@@ -1,0 +1,30 @@
+{
+  "host": "127.0.0.1",
+  "port": 17888,
+  "defaultModel": null,
+  "providers": [
+    {
+      "id": "antigravity",
+      "name": "Antigravity CLIProxyAPI",
+      "apiFormat": "openai_chat",
+      "baseUrl": "http://127.0.0.1:8317/v1",
+      "apiKeyEnv": "ANTIGRAVITY_PROXY_API_KEY"
+    }
+  ],
+  "models": [
+    {
+      "id": "antigravity/gemini-3.5-flash-low",
+      "providerId": "antigravity",
+      "upstreamModel": "gemini-3.5-flash-low",
+      "displayName": "Gemini 3.5 Flash (Antigravity)",
+      "aliases": ["gemini-3.5-flash-low", "claude-3-5-sonnet-20241022"],
+      "capabilities": { "text": true, "tools": true, "reasoning": true }
+    }
+  ],
+  "clients": {
+    "codex": { "enabled": true, "allowedModels": ["*"] },
+    "claude-code": { "enabled": true, "allowedModels": ["*"] },
+    "hermes": { "enabled": true, "allowedModels": ["*"] },
+    "generic-openai": { "enabled": true, "allowedModels": ["*"] }
+  }
+}

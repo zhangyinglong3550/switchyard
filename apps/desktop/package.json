@@ -1,0 +1,12 @@
+{
+  "name": "@switchyard/desktop",
+  "version": "0.2.0",
+  "private": true,
+  "main": "src/main.mjs",
+  "scripts": {
+    "start": "electron src/main.mjs"
+  },
+  "dependencies": {
+    "@switchyard/core": "0.2.0"
+  }
+}

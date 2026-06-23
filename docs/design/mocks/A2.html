@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
+<title>Switchyard A2</title>
+</head>
+<body>
+<div class="screen" style="display:flex; flex-direction:column;">
+  <div class="title-bar">
+    <span class="traffic red"></span><span class="traffic yellow"></span><span class="traffic green"></span>
+    <span class="title">Switchyard — Models</span>
+    <span class="stage">V0.2 · macOS</span>
+  </div>
+
+  <div class="toolbar">
+    <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+    <span style="font-size:12px; color:var(--text-muted); margin-left:6px;">/ Models</span>
+    <div style="flex:1;"></div>
+    <span class="status-pill running"><span class="dot"></span>Gateway running · 127.0.0.1:17888</span>
+    <span class="btn">Reload</span>
+    <span class="btn">Restart</span>
+    <span class="btn danger">Stop</span>
+  </div>
+
+  <div class="tabs-bar">
+    <span class="tab">Overview</span>
+    <span class="tab">Providers</span>
+    <span class="tab active">Models</span>
+    <span class="tab">Clients</span>
+    <span class="tab">Testbed</span>
+    <span class="tab">Logs</span>
+    <div style="flex:1;"></div>
+    <span class="btn ghost">⌘K Quick switch</span>
+  </div>
+
+  <main style="flex:1; display:flex; flex-direction:column; padding: 14px 18px 0; gap:14px; min-height:0;">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <div class="subtabs">
+        <span class="sub active">All · 26</span>
+        <span class="sub">Cloud · 17</span>
+        <span class="sub">Local · 6</span>
+        <span class="sub">CLIProxyAPI · 3</span>
+      </div>
+      <input style="flex:1; max-width:320px; padding:6px 10px; border:1px solid var(--border-strong); border-radius:6px; font-size:12px; background:var(--panel);" placeholder="Search by id, alias or upstream…" value="">
+      <div style="flex:1;"></div>
+      <span class="btn">Import…</span>
+      <span class="btn">Refresh</span>
+      <span class="btn primary">+ New model</span>
+    </div>
+
+    <div class="card" style="flex:1; min-height:0; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="overflow:auto;">
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width:24px;"><input type="checkbox"></th>
+            <th>Model ID</th>
+            <th>Provider</th>
+            <th>Upstream</th>
+            <th>Aliases</th>
+            <th>Capabilities</th>
+            <th>Visible to</th>
+            <th>Default</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">antigravity/gemini-3.5-flash-low</td>
+            <td>antigravity</td>
+            <td class="mono">gemini-3.5-flash-low</td>
+            <td><span class="chip">claude-3-5-sonnet-20241022</span> <span class="chip">gemini-flash</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">reasoning</span></td>
+            <td><span class="chip accent">codex</span><span class="chip accent">claude-code</span><span class="chip accent">hermes</span></td>
+            <td><span class="chip good">default</span></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">antigravity/claude-sonnet-4-6</td>
+            <td>antigravity</td>
+            <td class="mono">claude-sonnet-4-6</td>
+            <td><span class="chip">claude-sonnet</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">reasoning</span></td>
+            <td><span class="chip accent">codex</span><span class="chip accent">claude-code</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">kimi/moonshot-v1-32k</td>
+            <td>kimi</td>
+            <td class="mono">moonshot-v1-32k</td>
+            <td><span class="chip">kimi-32k</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+            <td><span class="chip accent">codex</span><span class="chip accent">hermes</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">kimi/moonshot-v1-128k</td>
+            <td>kimi</td>
+            <td class="mono">moonshot-v1-128k</td>
+            <td></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+            <td><span class="chip accent">codex</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">deepseek/deepseek-chat</td>
+            <td>deepseek</td>
+            <td class="mono">deepseek-chat</td>
+            <td><span class="chip">ds-chat</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">reasoning</span></td>
+            <td><span class="chip accent">codex</span><span class="chip accent">claude-code</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">deepseek/deepseek-reasoner</td>
+            <td>deepseek</td>
+            <td class="mono">deepseek-reasoner</td>
+            <td><span class="chip">r1</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">reasoning</span></td>
+            <td><span class="chip accent">codex</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">glm/glm-4-6</td>
+            <td>glm</td>
+            <td class="mono">glm-4-6</td>
+            <td><span class="chip">glm-4.6</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+            <td><span class="chip accent">codex</span><span class="chip accent">hermes</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">opencode-go/qwen-3-coder</td>
+            <td>opencode-go</td>
+            <td class="mono">qwen3-coder</td>
+            <td><span class="chip">qwen-coder</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+            <td><span class="chip accent">codex</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">openai/gpt-5-codex</td>
+            <td>openai</td>
+            <td class="mono">gpt-5-codex</td>
+            <td><span class="chip">gpt-codex</span></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">reasoning</span><span class="chip">images</span></td>
+            <td><span class="chip accent">codex</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+          <tr>
+            <td><input type="checkbox"></td>
+            <td class="mono">anthropic/claude-3-5-sonnet</td>
+            <td>anthropic</td>
+            <td class="mono">claude-3-5-sonnet-20241022</td>
+            <td></td>
+            <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">images</span></td>
+            <td><span class="chip accent">claude-code</span></td>
+            <td></td>
+            <td><span class="btn icon">⋯</span></td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 360px; gap:14px; padding-bottom:14px;">
+      <div class="log-pane" style="height:140px; overflow:hidden;">
+        <div><span class="l-time">17:42:11</span><span class="l-tag">[router]</span><span class="l-good">resolved</span> codex requested gpt-codex → openai/gpt-5-codex</div>
+        <div><span class="l-time">17:42:11</span><span class="l-tag">[http]</span><span class="l-info">POST</span> /codex/v1/responses 200 · 813 ms</div>
+        <div><span class="l-time">17:42:08</span><span class="l-tag">[reload]</span><span class="l-good">config reloaded</span> providers=7 models=26</div>
+        <div><span class="l-time">17:42:05</span><span class="l-tag">[router]</span><span class="l-good">resolved</span> claude-code requested claude-3-5-sonnet-20241022 → antigravity/gemini-3.5-flash-low</div>
+        <div><span class="l-time">17:42:05</span><span class="l-tag">[http]</span><span class="l-info">POST</span> /claude-code/v1/messages 200 · 1.42 s</div>
+        <div><span class="l-time">17:41:59</span><span class="l-tag">[upstream]</span><span class="l-warn">slow</span> antigravity 1.42 s (p95=410ms)</div>
+        <div><span class="l-time">17:41:50</span><span class="l-tag">[http]</span><span class="l-info">GET</span> /codex/v1/models 200 · 4 ms</div>
+      </div>
+      <div class="card">
+        <div class="hd"><h3>Selection</h3><span class="sub">1 model</span></div>
+        <div class="bd">
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <span class="btn">Toggle for codex</span>
+            <span class="btn">Toggle for claude-code</span>
+            <span class="btn">Edit aliases…</span>
+            <span class="btn">Test in Testbed</span>
+            <span class="btn danger">Remove</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body></html>

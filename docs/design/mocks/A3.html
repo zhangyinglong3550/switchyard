@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
+<title>Switchyard A3</title>
+</head>
+<body>
+<div class="screen" style="display:flex; flex-direction:column;">
+  <div class="title-bar">
+    <span class="traffic red"></span><span class="traffic yellow"></span><span class="traffic green"></span>
+    <span class="title">Switchyard — Providers / kimi</span>
+    <span class="stage">V0.2 · macOS</span>
+  </div>
+
+  <div style="display:flex; flex:1; min-height:0;">
+    <!-- Sidebar -->
+    <aside class="sidebar" style="width:220px;">
+      <div class="toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
+        <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+      </div>
+      <div>
+        <div class="group-title">Workspace</div>
+        <nav class="nav">
+          <a><span class="icon-square">⌂</span>Overview</a>
+          <a class="active"><span class="icon-square">⇄</span>Providers <span class="badge">7</span></a>
+          <a><span class="icon-square">▤</span>Models <span class="badge">26</span></a>
+          <a><span class="icon-square">◉</span>Clients</a>
+          <a><span class="icon-square">⌧</span>Testbed</a>
+          <a><span class="icon-square">≣</span>Logs</a>
+          <a><span class="icon-square">⚙</span>Settings</a>
+        </nav>
+      </div>
+      <div style="margin-top:auto; padding: 0 6px;">
+        <div style="padding:8px 10px; background:var(--panel); border:1px solid var(--border); border-radius:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span class="status-pill running"><span class="dot"></span>Running</span>
+            <span class="tiny muted mono">:17888</span>
+          </div>
+          <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:4px; margin-top:8px;">
+            <span class="btn" style="justify-content:center; padding:4px 0;">Stop</span>
+            <span class="btn" style="justify-content:center; padding:4px 0;">Restart</span>
+            <span class="btn" style="justify-content:center; padding:4px 0;">Reload</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+    <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+      <div class="toolbar" style="gap:10px;">
+        <div style="font-size:15px; font-weight:600;">Providers</div>
+        <div class="subtabs">
+          <span class="sub active">All · 7</span>
+          <span class="sub">Cloud · 4</span>
+          <span class="sub">Local · 2</span>
+          <span class="sub">CLIProxyAPI · 1</span>
+        </div>
+        <div style="flex:1;"></div>
+        <span class="status-pill running"><span class="dot"></span>Running</span>
+        <span class="btn">Reload</span>
+        <span class="btn primary">+ New provider</span>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 320px 1fr; gap:0; flex:1; min-height:0;">
+        <!-- Providers list column -->
+        <div style="border-right:1px solid var(--border); background:var(--panel); overflow:auto;">
+          <div style="padding:8px 12px; border-bottom:1px solid var(--border);">
+            <input style="width:100%; padding:6px 10px; border:1px solid var(--border-strong); border-radius:6px; font-size:12px;" placeholder="Search provider…">
+          </div>
+          <div style="display:flex; flex-direction:column;">
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">antigravity</span>
+                  <span class="chip" style="font-size:10.5px;">openai_chat</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">Antigravity CLIProxyAPI</div>
+                <div class="tiny muted mono" style="margin-top:2px;">127.0.0.1:8317</div>
+                <div class="tiny muted" style="margin-top:4px;">6 models</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">opencode-go</span>
+                  <span class="chip" style="font-size:10.5px;">openai_chat</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">OpenCode Go</div>
+                <div class="tiny muted mono" style="margin-top:2px;">opencode.go</div>
+                <div class="tiny muted" style="margin-top:4px;">4 models</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px; background:var(--accent-soft); border-left:3px solid var(--accent); border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">kimi</span>
+                  <span class="chip" style="font-size:10.5px;">openai_chat</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">Moonshot Kimi</div>
+                <div class="tiny muted mono" style="margin-top:2px;">api.moonshot.cn</div>
+                <div class="tiny muted" style="margin-top:4px;">3 models</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">deepseek</span>
+                  <span class="chip" style="font-size:10.5px;">openai_chat</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">DeepSeek</div>
+                <div class="tiny muted mono" style="margin-top:2px;">api.deepseek.com</div>
+                <div class="tiny muted" style="margin-top:4px;">2 models</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill warning" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">glm</span>
+                  <span class="chip" style="font-size:10.5px;">openai_chat</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">Zhipu GLM-4.6</div>
+                <div class="tiny muted mono" style="margin-top:2px;">open.bigmodel.cn</div>
+                <div class="tiny muted" style="margin-top:4px;">3 models · key missing</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">openai</span>
+                  <span class="chip" style="font-size:10.5px;">openai_responses</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">OpenAI (official)</div>
+                <div class="tiny muted mono" style="margin-top:2px;">api.openai.com</div>
+                <div class="tiny muted" style="margin-top:4px;">5 models</div>
+              </div>
+            </div>
+            <div style="padding:10px 12px;  border-left:3px solid transparent; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; gap:8px;">
+              <span class="status-pill stopped" style="padding:1px 6px;"><span class="dot"></span></span>
+              <div style="flex:1; min-width:0;">
+                <div style="display:flex; justify-content:space-between; gap:6px;">
+                  <span class="mono" style="font-size:12.5px; font-weight:600;">anthropic</span>
+                  <span class="chip" style="font-size:10.5px;">anthropic_messages</span>
+                </div>
+                <div class="tiny muted" style="margin-top:2px;">Anthropic (official)</div>
+                <div class="tiny muted mono" style="margin-top:2px;">api.anthropic.com</div>
+                <div class="tiny muted" style="margin-top:4px;">3 models · key missing</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail column -->
+        <div style="overflow:auto; padding:18px 22px; display:flex; flex-direction:column; gap:14px;">
+          <div style="display:flex; align-items:flex-start; gap:14px;">
+            <div style="width:42px; height:42px; border-radius:10px; background:linear-gradient(135deg, #ff7a59, #ffb86b); display:flex; align-items:center; justify-content:center; color:white; font-weight:700;">K</div>
+            <div style="flex:1;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div style="font-size:18px; font-weight:600;">Moonshot Kimi</div>
+                <span class="chip">openai_chat</span>
+                <span class="status-pill running"><span class="dot"></span>Ready</span>
+              </div>
+              <div class="mono tiny muted" style="margin-top:4px;">id: kimi · base: https://api.moonshot.cn/v1</div>
+            </div>
+            <span class="btn">Test</span>
+            <span class="btn">Edit…</span>
+            <span class="btn danger">Remove</span>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px;">
+            <div class="card">
+              <div class="hd"><h3>Configuration</h3><span class="sub">read-only summary</span></div>
+              <div class="bd">
+                <dl class="kv">
+                  <dt>API key</dt><dd><span class="chip good">env: KIMI_API_KEY</span> <span class="tiny muted">loaded · 56 chars</span></dd>
+                  <dt>Auth header</dt><dd class="mono">Authorization: Bearer …</dd>
+                  <dt>Default model</dt><dd class="mono">kimi/moonshot-v1-32k</dd>
+                  <dt>Last ping</dt><dd>Just now · 218 ms</dd>
+                  <dt>Compat patches</dt><dd><span class="chip warn">kimi-schema-sanitizer (V0.4)</span></dd>
+                </dl>
+              </div>
+            </div>
+            <div class="card">
+              <div class="hd"><h3>Visibility</h3><span class="sub">per client</span></div>
+              <div class="bd">
+                <dl class="kv">
+                  <dt>codex</dt><dd><span class="chip accent">enabled</span> <span class="tiny muted">3 models exposed</span></dd>
+                  <dt>claude-code</dt><dd><span class="chip">disabled</span> <span class="tiny muted">hidden by client filter</span></dd>
+                  <dt>hermes</dt><dd><span class="chip accent">enabled</span> <span class="tiny muted">3 models exposed</span></dd>
+                  <dt>generic-openai</dt><dd><span class="chip accent">enabled</span></dd>
+                </dl>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="hd">
+              <h3>Models in kimi</h3>
+              <div style="display:flex; gap:6px;">
+                <span class="btn">Refresh upstream</span>
+                <span class="btn primary">+ Add model</span>
+              </div>
+            </div>
+            <div class="bd" style="padding:0;">
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th>Model ID</th>
+                    <th>Upstream</th>
+                    <th>Aliases</th>
+                    <th>Capabilities</th>
+                    <th>Visible to</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="mono">kimi/moonshot-v1-32k</td>
+                    <td class="mono">moonshot-v1-32k</td>
+                    <td><span class="chip">kimi-32k</span></td>
+                    <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+                    <td><span class="chip accent">codex</span><span class="chip accent">hermes</span></td>
+                    <td><span class="btn icon">⋯</span></td>
+                  </tr>
+                  <tr>
+                    <td class="mono">kimi/moonshot-v1-128k</td>
+                    <td class="mono">moonshot-v1-128k</td>
+                    <td></td>
+                    <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span></td>
+                    <td><span class="chip accent">codex</span></td>
+                    <td><span class="btn icon">⋯</span></td>
+                  </tr>
+                  <tr>
+                    <td class="mono">kimi/kimi-k2-instruct</td>
+                    <td class="mono">kimi-k2-instruct</td>
+                    <td><span class="chip">k2</span></td>
+                    <td class="chip-row"><span class="chip">text</span><span class="chip">tools</span><span class="chip">reasoning</span></td>
+                    <td><span class="chip accent">codex</span><span class="chip accent">hermes</span></td>
+                    <td><span class="btn icon">⋯</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="log-pane" style="height:110px;">
+            <div><span class="l-time">17:42:11</span><span class="l-tag">[router]</span><span class="l-good">resolved</span> codex requested kimi-32k → kimi/moonshot-v1-32k</div>
+            <div><span class="l-time">17:42:11</span><span class="l-tag">[upstream]</span><span class="l-info">POST</span> https://api.moonshot.cn/v1/chat/completions 200 · 712 ms</div>
+            <div><span class="l-time">17:42:05</span><span class="l-tag">[patch]</span><span class="l-warn">queued</span> kimi-schema-sanitizer (will ship in V0.4)</div>
+            <div><span class="l-time">17:41:50</span><span class="l-tag">[http]</span><span class="l-info">GET</span> /codex/v1/models 200 · 4 ms</div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</body></html>

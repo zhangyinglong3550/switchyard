@@ -1,0 +1,19 @@
+{
+  "name": "@switchyard/core",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./server": "./src/server.mjs",
+    "./config": "./src/config.mjs",
+    "./router": "./src/router.mjs",
+    "./profile-writer": "./src/profile-writer.mjs",
+    "./compat": "./src/compat/index.mjs",
+    "./importers/ccswitch": "./src/importers/ccswitch.mjs"
+  },
+  "bin": {
+    "lls-gateway": "./bin/gateway.mjs"
+  }
+}

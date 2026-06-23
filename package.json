@@ -1,0 +1,69 @@
+{
+  "name": "switchyard",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Local multi-client LLM gateway and desktop control panel for Codex, Claude Code, Hermes and other OpenAI-compatible / Anthropic-compatible tools.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "gateway": "node packages/core/bin/gateway.mjs start",
+    "gateway:init": "node packages/core/bin/gateway.mjs init",
+    "gateway:doctor": "node packages/core/bin/gateway.mjs doctor",
+    "gateway:models": "node packages/core/bin/gateway.mjs models",
+    "test": "node --test packages/core/test/*.mjs",
+    "check": "node -e \"['packages/core/src/config.mjs','packages/core/src/router.mjs','packages/core/src/upstream.mjs','packages/core/src/utils.mjs','packages/core/src/server.mjs','packages/core/src/openai-adapter.mjs','packages/core/src/anthropic-adapter.mjs','packages/core/src/profile-writer.mjs','packages/core/src/compat/index.mjs','packages/core/bin/gateway.mjs','apps/desktop/src/main.mjs','apps/desktop/src/preload.cjs','apps/desktop/src/gateway-host.mjs','apps/desktop/src/config-store.mjs','apps/desktop/src/logs.mjs'].forEach(p=>require('child_process').execSync('node --check '+p,{stdio:'inherit'}))\"",
+    "desktop": "electron apps/desktop/src/main.mjs",
+    "desktop:dev": "electron apps/desktop/src/main.mjs",
+    "desktop:dmg": "electron-builder --mac dmg",
+    "release:check": "node scripts/release-check.mjs",
+    "import:ccswitch": "node scripts/import-ccswitch.mjs"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.zhangyinglong.switchyard",
+    "productName": "Switchyard",
+    "files": [
+      "package.json",
+      "apps/desktop/**/*",
+      "packages/core/**/*",
+      "config/**/*",
+      "!**/*.map",
+      "!**/test/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": null
+    },
+    "extraMetadata": {
+      "main": "apps/desktop/src/main.mjs"
+    }
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  },
+  "main": "apps/desktop/src/main.mjs",
+  "author": {
+    "name": "Switchyard Team"
+  }
+}

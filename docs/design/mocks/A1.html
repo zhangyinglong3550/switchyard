@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<link rel="stylesheet" href="shared.css">
+<title>Switchyard A1</title>
+</head>
+<body>
+<div class="screen" style="display:flex; flex-direction:column;">
+  <div class="title-bar">
+    <span class="traffic red"></span><span class="traffic yellow"></span><span class="traffic green"></span>
+    <span class="title">Switchyard · 本机 LLM 控制台</span>
+    <span class="stage">V0.2 · macOS</span>
+  </div>
+
+  <div style="display:flex; flex:1; min-height:0;">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
+        <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+      </div>
+      <div>
+        <div class="group-title">工作区</div>
+        <nav class="nav">
+          <a><span class="icon-square">⌂</span>总览</a>
+          <a class="active"><span class="icon-square">⇄</span>供应商 <span class="badge">7</span></a>
+          <a><span class="icon-square">▤</span>模型 <span class="badge">26</span></a>
+          <a><span class="icon-square">◉</span>客户端</a>
+          <a><span class="icon-square">⌘</span>别名</a>
+        </nav>
+      </div>
+      <div>
+        <div class="group-title">工具</div>
+        <nav class="nav">
+          <a><span class="icon-square">⌧</span>测试台</a>
+          <a><span class="icon-square">≣</span>日志 <span class="badge">实时</span></a>
+          <a><span class="icon-square">⚙</span>偏好设置</a>
+        </nav>
+      </div>
+      <div style="margin-top:auto;">
+        <div class="group-title">服务</div>
+        <div style="padding:10px; background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:6px 6px 0;">
+          <div style="display:flex; align-items:center; justify-content:space-between;">
+            <span class="status-pill running"><span class="dot"></span>运行中</span>
+            <span class="tiny muted">端口 17888</span>
+          </div>
+          <div class="tiny muted mono" style="margin-top:6px;">127.0.0.1:17888</div>
+          <div style="display:flex; gap:4px; margin-top:8px;">
+            <span class="btn" style="flex:1; justify-content:center;">停止</span>
+            <span class="btn" style="flex:1; justify-content:center;">重启</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div style="font-size:16px; font-weight:600;">供应商</div>
+          <div class="tiny muted">共 7 个 · 5 个就绪 · 2 个缺 Key</div>
+        </div>
+        <div style="flex:1;"></div>
+        <span class="btn">导入…</span>
+        <span class="btn">重载配置</span>
+        <span class="btn primary">+ 新增供应商</span>
+      </div>
+
+      <div style="padding:16px; display:flex; flex-direction:column; gap:16px; overflow:hidden;">
+        <div class="card">
+          <table class="data">
+            <thead>
+              <tr>
+                <th style="width:24px;"></th>
+                <th>标识</th>
+                <th>名称</th>
+                <th>协议</th>
+                <th>Base URL</th>
+                <th>API Key 来源</th>
+                <th>模型数</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">antigravity</td>
+                <td>Antigravity CLIProxyAPI</td>
+                <td><span class="chip">openai_chat</span></td>
+                <td class="mono">http://127.0.0.1:8317/v1</td>
+                <td><span class="chip good">环境变量 · ANTIGRAVITY_PROXY_API_KEY</span></td>
+                <td>6</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">opencode-go</td>
+                <td>OpenCode Go</td>
+                <td><span class="chip">openai_chat</span></td>
+                <td class="mono">https://opencode.go/v1</td>
+                <td><span class="chip good">环境变量 · OPENCODE_GO_API_KEY</span></td>
+                <td>4</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">kimi</td>
+                <td>Moonshot Kimi</td>
+                <td><span class="chip">openai_chat</span></td>
+                <td class="mono">https://api.moonshot.cn/v1</td>
+                <td><span class="chip good">环境变量 · KIMI_API_KEY</span></td>
+                <td>3</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">deepseek</td>
+                <td>DeepSeek</td>
+                <td><span class="chip">openai_chat</span></td>
+                <td class="mono">https://api.deepseek.com/v1</td>
+                <td><span class="chip good">环境变量 · DEEPSEEK_API_KEY</span></td>
+                <td>2</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill warning" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">glm</td>
+                <td>智谱 GLM-4.6</td>
+                <td><span class="chip">openai_chat</span></td>
+                <td class="mono">https://open.bigmodel.cn/api/paas/v4</td>
+                <td><span class="chip warn">环境变量未设置</span></td>
+                <td>3</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill running" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">openai</td>
+                <td>OpenAI 官方</td>
+                <td><span class="chip">openai_responses</span></td>
+                <td class="mono">https://api.openai.com/v1</td>
+                <td><span class="chip good">环境变量 · OPENAI_API_KEY</span></td>
+                <td>5</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+              <tr>
+                <td><span class="status-pill stopped" style="padding:1px 6px;"><span class="dot"></span></span></td>
+                <td class="mono">anthropic</td>
+                <td>Anthropic 官方</td>
+                <td><span class="chip">anthropic_messages</span></td>
+                <td class="mono">https://api.anthropic.com</td>
+                <td><span class="chip warn">未配置</span></td>
+                <td>3</td>
+                <td><span class="btn icon">⋯</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap:16px;">
+          <div class="card">
+            <div class="hd">
+              <h3>当前选中 · antigravity</h3>
+              <span class="sub">openai_chat · 6 个模型</span>
+            </div>
+            <div class="bd">
+              <dl class="kv">
+                <dt>Base URL</dt><dd class="mono">http://127.0.0.1:8317/v1</dd>
+                <dt>API Key</dt><dd><span class="chip good">环境变量 · ANTIGRAVITY_PROXY_API_KEY</span> <span class="tiny muted">已加载 · 51 字符</span></dd>
+                <dt>默认模型</dt><dd class="mono">antigravity/gemini-3.5-flash-low</dd>
+                <dt>上次连通</dt><dd>2 分钟前 · 142 ms</dd>
+                <dt>可见客户端</dt><dd><span class="chip accent">codex</span> <span class="chip accent">claude-code</span> <span class="chip accent">hermes</span></dd>
+              </dl>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="hd"><h3>客户端接入</h3><span class="sub">点击复制</span></div>
+            <div class="bd">
+              <div class="endpoint-row"><span class="label">Codex</span><span class="mono">http://127.0.0.1:17888/codex/v1</span><span class="btn icon">⎘</span></div>
+              <div class="endpoint-row"><span class="label">Claude Code</span><span class="mono">http://127.0.0.1:17888/claude-code</span><span class="btn icon">⎘</span></div>
+              <div class="endpoint-row"><span class="label">Hermes</span><span class="mono">http://127.0.0.1:17888/hermes/v1</span><span class="btn icon">⎘</span></div>
+              <div class="endpoint-row"><span class="label">通用 OpenAI</span><span class="mono">http://127.0.0.1:17888/v1</span><span class="btn icon">⎘</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</body></html>

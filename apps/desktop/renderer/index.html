@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Switchyard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div class="screen app-shell">
+  <aside class="sidebar">
+    <div class="toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
+      <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+    </div>
+    <div>
+      <div class="group-title">工作区</div>
+      <nav class="nav" id="primary-nav">
+        <a data-tab="overview" class="active"><span class="icon-square">⌂</span>总览</a>
+        <a data-tab="providers"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
+        <a data-tab="models"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
+        <a data-tab="clients"><span class="icon-square">◉</span>客户端</a>
+      </nav>
+    </div>
+    <div>
+      <div class="group-title">工具</div>
+      <nav class="nav" id="tools-nav">
+        <a data-tab="logs"><span class="icon-square">≣</span>日志 <span class="badge">实时</span></a>
+        <a data-tab="test"><span class="icon-square">▶</span>测试台</a>
+        <a data-tab="settings"><span class="icon-square">⚙</span>偏好设置</a>
+      </nav>
+    </div>
+    <div style="margin-top:auto;">
+      <div class="group-title">服务</div>
+      <div style="padding:10px; background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:6px 6px 0;">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <span class="status-pill stopped" id="service-pill"><span class="dot"></span><span id="service-state">未启动</span></span>
+          <span class="tiny muted" id="service-port">-</span>
+        </div>
+        <div class="tiny muted mono" style="margin-top:6px;" id="service-endpoint">-</div>
+        <div style="display:flex; gap:4px; margin-top:8px;">
+          <button class="btn" id="btn-start" style="flex:1; justify-content:center;">启动</button>
+          <button class="btn" id="btn-stop" style="flex:1; justify-content:center;">停止</button>
+          <button class="btn" id="btn-restart" style="flex:1; justify-content:center;">重启</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="app-main">
+    <!-- Overview -->
+    <section class="tab-panel active" id="panel-overview">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div style="font-size:16px; font-weight:600;">总览</div>
+          <div class="tiny muted" id="overview-subtitle">本机 LLM 控制台</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-reload">重载配置</button>
+        <button class="btn" id="btn-open-logs">打开日志目录</button>
+        <button class="btn" id="btn-import">从 cc-switch 导入…</button>
+      </div>
+      <div style="padding:16px; display:flex; flex-direction:column; gap:16px; overflow:auto;">
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>服务状态</h3><span class="sub" id="overview-uptime">-</span></div>
+            <div class="bd">
+              <dl class="kv">
+                <dt>运行</dt><dd id="ov-running">未启动</dd>
+                <dt>监听</dt><dd class="mono" id="ov-endpoint">-</dd>
+                <dt>配置文件</dt><dd class="mono" id="ov-config">-</dd>
+                <dt>供应商数</dt><dd id="ov-providers">0</dd>
+                <dt>模型数</dt><dd id="ov-models">0</dd>
+              </dl>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>客户端接入</h3><span class="sub">点击复制</span></div>
+            <div class="bd" id="ov-endpoints"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>自检</h3><button class="btn" id="btn-doctor">运行自检</button></div>
+          <div class="bd"><pre class="log-pane" id="doctor-output" style="background:#0f1014; min-height:140px;"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Providers -->
+    <section class="tab-panel" id="panel-providers">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div style="font-size:16px; font-weight:600;">供应商</div>
+          <div class="tiny muted" id="providers-subtitle">-</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-provider-import">从 cc-switch 导入…</button>
+        <button class="btn primary" id="btn-provider-add">+ 新增供应商</button>
+      </div>
+      <div style="padding:16px; overflow:auto; flex:1;">
+        <div class="card">
+          <table class="data" id="providers-table">
+            <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>模型数</th><th></th></tr></thead>
+            <tbody id="providers-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Models -->
+    <section class="tab-panel" id="panel-models">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div style="font-size:16px; font-weight:600;">模型</div>
+          <div class="tiny muted" id="models-subtitle">-</div>
+        </div>
+        <div style="flex:1;"></div>
+        <input class="field" id="models-search" placeholder="搜索模型 id / 别名 / 上游名…" style="min-width:260px;">
+        <button class="btn primary" id="btn-model-add">+ 新增模型</button>
+      </div>
+      <div style="padding:16px; overflow:auto; flex:1;">
+        <div class="card">
+          <table class="data" id="models-table">
+            <thead><tr><th>模型 ID</th><th>供应商</th><th>上游</th><th>别名</th><th>能力</th><th></th></tr></thead>
+            <tbody id="models-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clients -->
+    <section class="tab-panel" id="panel-clients">
+      <div class="toolbar">
+        <div style="font-size:16px; font-weight:600;">客户端</div>
+        <div class="tiny muted">一键写入 / 恢复 Codex、Claude Code、Hermes 配置；每次写入自动备份原文件</div>
+        <div style="flex:1;"></div>
+      </div>
+      <div style="padding:16px; overflow:auto; flex:1;">
+        <div class="grid two" id="clients-grid"></div>
+      </div>
+    </section>
+
+    <!-- Test Console -->
+    <section class="tab-panel" id="panel-test">
+      <div class="toolbar">
+        <div style="font-size:16px; font-weight:600;">测试台</div>
+        <div class="tiny muted">直接打通端到端：UI → gateway → upstream</div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-test-run">发送</button>
+      </div>
+      <div style="padding:16px; overflow:auto; flex:1; display:flex; flex-direction:column; gap:12px;">
+        <div class="card">
+          <div class="hd"><h3>请求</h3></div>
+          <div class="bd">
+            <div class="row">
+              <label>模型 <select class="field" id="test-model"></select></label>
+              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-stream"> 启用 stream</label>
+            </div>
+            <label>消息 (system + user)
+              <textarea class="field" id="test-prompt" rows="4" style="width:100%;">你好，请用一句话简短自我介绍。</textarea>
+            </label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>响应</h3></div>
+          <div class="bd"><pre class="log-pane" id="test-output" style="background:#0f1014; min-height:160px;"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section class="tab-panel" id="panel-logs">
+      <div class="toolbar">
+        <div style="font-size:16px; font-weight:600;">日志</div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-logs-clear">清空显示</button>
+        <button class="btn" id="btn-logs-open">打开日志目录</button>
+      </div>
+      <div style="padding:16px; flex:1; overflow:hidden; display:flex;">
+        <pre class="log-pane" id="logs-output" style="flex:1;"></pre>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab-panel" id="panel-settings">
+      <div class="toolbar"><div style="font-size:16px; font-weight:600;">偏好设置</div></div>
+      <div style="padding:16px; overflow:auto;">
+        <div class="card">
+          <div class="hd"><h3>配置文件</h3></div>
+          <div class="bd">
+            <dl class="kv">
+              <dt>路径</dt><dd class="mono" id="settings-config-path">-</dd>
+              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件，可手动备份。</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="dialog-overlay" id="provider-dialog-wrap">
+  <div class="dialog">
+    <h2 id="provider-dialog-title">新增供应商</h2>
+    <form id="provider-form" autocomplete="off">
+      <div class="row">
+        <label>标识 <input class="field" name="id" required placeholder="例：kimi"></label>
+        <label>名称 <input class="field" name="name" placeholder="显示名"></label>
+      </div>
+      <label>协议
+        <select class="field" name="apiFormat">
+          <option value="openai_chat">openai_chat</option>
+          <option value="openai_responses">openai_responses</option>
+          <option value="anthropic_messages">anthropic_messages</option>
+        </select>
+      </label>
+      <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
+      <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
+      <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" name="inlineKey"> 直接保存 Key 到本机配置文件（不建议，仅限本机）</label>
+      <label>Inline Key <input class="field" name="apiKey" type="password" autocomplete="new-password"></label>
+      <div class="actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="model-dialog-wrap">
+  <div class="dialog">
+    <h2 id="model-dialog-title">新增模型</h2>
+    <form id="model-form" autocomplete="off">
+      <div class="row">
+        <label>模型 ID <input class="field" name="id" required placeholder="provider/model"></label>
+        <label>供应商
+          <select class="field" name="providerId" id="model-provider-select"></select>
+        </label>
+      </div>
+      <div class="row">
+        <label>上游模型名 <input class="field" name="upstreamModel" required></label>
+        <label>显示名 <input class="field" name="displayName"></label>
+      </div>
+      <label>别名（英文逗号分隔） <input class="field" name="aliases" placeholder="alias-1, alias-2"></label>
+      <div class="capabilities">
+        <label><input type="checkbox" name="cap-text" checked> text</label>
+        <label><input type="checkbox" name="cap-tools" checked> tools</label>
+        <label><input type="checkbox" name="cap-reasoning"> reasoning</label>
+        <label><input type="checkbox" name="cap-images"> images</label>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="import-dialog-wrap">
+  <div class="dialog">
+    <h2>从 cc-switch 导入</h2>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">将合并到当前 Switchyard 配置，已存在的同名 provider/model 会被跳过；不会写入任何 inline API Key。</div>
+    <div class="scroll" id="import-preview" style="background:#f1f1f4; border-radius:6px; padding:10px; font-family:var(--code); font-size:12px; max-height:340px;"></div>
+    <div class="actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" id="btn-import-apply">合并到配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="profile-dialog-wrap">
+  <div class="dialog" style="max-width:700px;">
+    <h2 id="profile-dialog-title">预览配置文件</h2>
+    <div class="tiny muted" id="profile-dialog-meta" style="margin-bottom:8px;"></div>
+    <pre class="log-pane" id="profile-dialog-body" style="background:#0f1014; max-height:460px; overflow:auto;"></pre>
+    <div class="actions">
+      <button class="btn" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="./renderer.js"></script>
+</body>
+</html>
