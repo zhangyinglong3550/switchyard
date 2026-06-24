@@ -7,6 +7,34 @@ function flattenContent(content) {
   return contentToText(content);
 }
 
+function contentToChatContent(content) {
+  if (!Array.isArray(content)) return flattenContent(content);
+  const parts = [];
+  let hasImage = false;
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "input_image" && part.image_url) {
+      hasImage = true;
+      parts.push({ type: "image_url", image_url: { url: part.image_url, ...(part.detail ? { detail: part.detail } : {}) } });
+      continue;
+    }
+    if (part.type === "image_url" && part.image_url) {
+      hasImage = true;
+      parts.push(part);
+      continue;
+    }
+    const text = contentToText(part);
+    if (text) parts.push({ type: "text", text });
+  }
+  return hasImage ? parts : contentToText(content);
+}
+
+function responsesRoleToChatRole(role) {
+  if (role === "developer") return "system";
+  if (["system", "user", "assistant", "tool"].includes(role)) return role;
+  return "user";
+}
+
 export function responsesToChat(body, upstreamModel) {
   const messages = [];
   if (body.instructions) messages.push({ role: "system", content: flattenContent(body.instructions) });
@@ -17,8 +45,8 @@ export function responsesToChat(body, upstreamModel) {
       if (!item || typeof item !== "object") continue;
       if (item.type === "message" || item.role) {
         messages.push({
-          role: item.role || "user",
-          content: flattenContent(item.content ?? item.text ?? "")
+          role: responsesRoleToChatRole(item.role || "user"),
+          content: contentToChatContent(item.content ?? item.text ?? "")
         });
       } else if (item.type === "function_call") {
         messages.push({
@@ -90,7 +118,30 @@ export function chatToResponse(payload, requestedModel) {
     status: "completed",
     model: requestedModel,
     output,
-    usage: payload.usage || null
+    usage: normalizeResponsesUsage(payload.usage)
+  };
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    if (Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return 0;
+}
+
+function normalizeResponsesUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const input = firstNumber(usage.input_tokens, usage.prompt_tokens);
+  const output = firstNumber(usage.output_tokens, usage.completion_tokens);
+  const total = firstNumber(usage.total_tokens, input + output);
+  return {
+    ...usage,
+    input_tokens: input,
+    output_tokens: output,
+    total_tokens: total,
+    prompt_tokens: firstNumber(usage.prompt_tokens, input),
+    completion_tokens: firstNumber(usage.completion_tokens, output)
   };
 }
 
@@ -122,10 +173,17 @@ export async function streamChatAsResponses(upstream, res, requestedModel) {
       writeEvent(res, "response.output_text.delta", { type: "response.output_text.delta", item_id: itemId, output_index: 0, content_index: 0, delta: deltaText });
     }
   }
+  const completedItem = {
+    id: itemId,
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text, annotations: [] }]
+  };
   writeEvent(res, "response.output_text.done", { type: "response.output_text.done", item_id: itemId, output_index: 0, content_index: 0, text });
   writeEvent(res, "response.content_part.done", { type: "response.content_part.done", item_id: itemId, output_index: 0, content_index: 0, part: { type: "output_text", text, annotations: [] } });
-  writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: 0, item: { id: itemId, type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] } });
-  writeEvent(res, "response.completed", { type: "response.completed", response: { ...baseResponse, status: "completed", output: [] } });
+  writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: 0, item: completedItem });
+  writeEvent(res, "response.completed", { type: "response.completed", response: { ...baseResponse, status: "completed", output: [completedItem] } });
   res.write("data: [DONE]\n\n");
   res.end();
 }

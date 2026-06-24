@@ -5,6 +5,7 @@ import { kimiToolSchemaPatch } from "../src/compat/patches/kimi-tool-schema.mjs"
 import { deepseekReasoningPatch } from "../src/compat/patches/deepseek-reasoning.mjs";
 import { glmContentTextPatch } from "../src/compat/patches/glm-content-text.mjs";
 import { opencodeToolHistoryPatch } from "../src/compat/patches/opencode-tool-history.mjs";
+import { opencodeGlmNoToolsPatch } from "../src/compat/patches/opencode-glm-no-tools.mjs";
 import { officialGPTFallbackPatch } from "../src/compat/patches/official-gpt-fallback.mjs";
 
 // Helper: register a single test patch, run the test, then reset.
@@ -167,6 +168,46 @@ testPatch("opencode-tool-history · preserves message count", () => {
 
 // ── 5. Official GPT fallback ───────────────────────────────────────────────
 
+testPatch("opencode-glm-no-tools · strips tools only for OpenCode Go GLM models", () => {
+  registerPatch(opencodeGlmNoToolsPatch.id, opencodeGlmNoToolsPatch);
+  const ctx = { provider: { id: "opencode-go" }, model: { id: "opencode-go/glm-5.2" } };
+  const body = {
+    model: "glm-5.2",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+    tool_choice: "auto"
+  };
+
+  const out = applyOutbound(body, ctx);
+  assert.equal(out.tools, undefined);
+  assert.equal(out.tool_choice, undefined);
+  assert.deepEqual(out.messages, body.messages);
+});
+
+testPatch("opencode-glm-no-tools · does NOT affect OpenCode Go Kimi models", () => {
+  registerPatch(opencodeGlmNoToolsPatch.id, opencodeGlmNoToolsPatch);
+  const body = {
+    model: "kimi-k2.7-code",
+    tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+    tool_choice: "auto"
+  };
+  const out = applyOutbound(body, { provider: { id: "opencode-go" }, model: { id: "opencode-go/kimi-k2.7-code" } });
+  assert.equal(out.tools.length, 1);
+  assert.equal(out.tool_choice, "auto");
+});
+
+testPatch("opencode-glm-no-tools · does NOT affect non-OpenCode GLM providers", () => {
+  registerPatch(opencodeGlmNoToolsPatch.id, opencodeGlmNoToolsPatch);
+  const body = {
+    model: "glm-5.2",
+    tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }]
+  };
+  const out = applyOutbound(body, { provider: { id: "coding-plan" }, model: { id: "coding-plan/glm-5.2" } });
+  assert.equal(out.tools.length, 1);
+});
+
+// ── 6. Official GPT fallback ───────────────────────────────────────────────
+
 testPatch("official-gpt-fallback · sets default max_tokens when absent", () => {
   registerPatch(officialGPTFallbackPatch.id, officialGPTFallbackPatch);
   const ctx = { provider: { id: "codex" }, model: { id: "codex/gpt-5.5" } };
@@ -195,13 +236,14 @@ testPatch("official-gpt-fallback · strips GPT-unsupported parameters", () => {
 
 // ── Cross-patch isolation ──────────────────────────────────────────────────
 
-test("v0.4-patches · all 5 patches registered simultaneously do not interfere", () => {
+test("v0.4-patches · all builtin patches registered simultaneously do not interfere", () => {
   resetPatches();
   const patches = [
     kimiToolSchemaPatch,
     deepseekReasoningPatch,
     glmContentTextPatch,
     opencodeToolHistoryPatch,
+    opencodeGlmNoToolsPatch,
     officialGPTFallbackPatch
   ];
   for (const p of patches) registerPatch(p.id, p);
@@ -212,6 +254,7 @@ test("v0.4-patches · all 5 patches registered simultaneously do not interfere",
     "glm-content-text",
     "kimi-tool-schema",
     "official-gpt-fallback",
+    "opencode-glm-no-tools",
     "opencode-tool-history"
   ]);
 
@@ -247,6 +290,15 @@ test("v0.4-patches · all 5 patches registered simultaneously do not interfere",
   const ai = oc.messages.findLastIndex((m) => m.role === "assistant");
   const ti = oc.messages.findIndex((m) => m.role === "tool");
   assert.ok(ai < ti, "opencode: tool result after assistant");
+
+  const ocGlm = applyOutbound({
+    model: "glm-5.2",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
+    tool_choice: "auto"
+  }, { provider: { id: "opencode-go" }, model: { id: "opencode-go/glm-5.2" } });
+  assert.equal(ocGlm.tools, undefined, "opencode GLM tools stripped");
+  assert.equal(ocGlm.tool_choice, undefined, "opencode GLM tool_choice stripped");
 
   // GPT gets max_tokens default
   const gpt = applyOutbound({ model: "gpt-5.5", messages: [] }, { provider: { id: "codex" }, model: { id: "codex/gpt-5.5" } });

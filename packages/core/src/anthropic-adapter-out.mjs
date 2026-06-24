@@ -4,6 +4,38 @@
 import crypto from "node:crypto";
 import { contentToText } from "./utils.mjs";
 
+function parseDataUrl(url) {
+  const m = /^data:([^;,]+);base64,(.*)$/s.exec(String(url || ""));
+  if (!m) return null;
+  return { media_type: m[1], data: m[2] };
+}
+
+function contentToAnthropicContent(content) {
+  if (!Array.isArray(content)) {
+    const text = contentToText(content);
+    return text ? [{ type: "text", text }] : "";
+  }
+  const blocks = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "image_url") {
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+      const data = parseDataUrl(url);
+      if (data) {
+        blocks.push({ type: "image", source: { type: "base64", media_type: data.media_type, data: data.data } });
+        continue;
+      }
+      if (url) {
+        blocks.push({ type: "text", text: `[image: ${url}]` });
+        continue;
+      }
+    }
+    const text = contentToText(part);
+    if (text) blocks.push({ type: "text", text });
+  }
+  return blocks.length ? blocks : contentToText(content);
+}
+
 export function chatToAnthropicMessages(body, upstreamModel) {
   const messages = [];
   let system = "";
@@ -32,7 +64,7 @@ export function chatToAnthropicMessages(body, upstreamModel) {
       messages.push({ role: "assistant", content: blocks });
       continue;
     }
-    messages.push({ role: msg.role === "assistant" ? "assistant" : "user", content: contentToText(msg.content) });
+    messages.push({ role: msg.role === "assistant" ? "assistant" : "user", content: contentToAnthropicContent(msg.content) });
   }
   const out = {
     model: upstreamModel,

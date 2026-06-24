@@ -18,10 +18,11 @@
     "gateway:doctor": "node packages/core/bin/gateway.mjs doctor",
     "gateway:models": "node packages/core/bin/gateway.mjs models",
     "test": "node --test packages/core/test/*.mjs",
-    "check": "node -e \"['packages/core/src/config.mjs','packages/core/src/router.mjs','packages/core/src/upstream.mjs','packages/core/src/utils.mjs','packages/core/src/server.mjs','packages/core/src/openai-adapter.mjs','packages/core/src/anthropic-adapter.mjs','packages/core/src/profile-writer.mjs','packages/core/src/compat/index.mjs','packages/core/bin/gateway.mjs','apps/desktop/src/main.mjs','apps/desktop/src/preload.cjs','apps/desktop/src/gateway-host.mjs','apps/desktop/src/config-store.mjs','apps/desktop/src/logs.mjs'].forEach(p=>require('child_process').execSync('node --check '+p,{stdio:'inherit'}))\"",
+    "check": "node -e \"['packages/core/src/config.mjs','packages/core/src/router.mjs','packages/core/src/upstream.mjs','packages/core/src/utils.mjs','packages/core/src/server.mjs','packages/core/src/openai-adapter.mjs','packages/core/src/anthropic-adapter.mjs','packages/core/src/profile-writer.mjs','packages/core/src/history-unify.mjs','packages/core/src/keychain-store.mjs','packages/core/src/compat/index.mjs','packages/core/src/compat/patches/opencode-glm-no-tools.mjs','packages/core/bin/gateway.mjs','apps/desktop/src/main.mjs','apps/desktop/src/preload.cjs','apps/desktop/src/gateway-host.mjs','apps/desktop/src/config-store.mjs','apps/desktop/src/logs.mjs','apps/desktop/src/request-log-store.mjs','apps/desktop/src/agent-resources.mjs','apps/desktop/src/agent-plugins.mjs','apps/desktop/src/keychain-store.mjs','apps/desktop/src/diagnostics.mjs','apps/desktop/src/provider-health.mjs','apps/desktop/src/test-console.mjs','apps/desktop/renderer/renderer.js','apps/desktop/renderer/discovery-filter.mjs','apps/desktop/renderer/import-selection-utils.mjs','apps/desktop/renderer/model-form-utils.mjs'].forEach(p=>require('child_process').execSync('node --check '+p,{stdio:'inherit'}))\"",
     "desktop": "electron apps/desktop/src/main.mjs",
     "desktop:dev": "electron apps/desktop/src/main.mjs",
     "desktop:dmg": "electron-builder --mac dmg",
+    "desktop:win": "electron-builder --win nsis zip --x64",
     "release:check": "node scripts/release-check.mjs",
     "import:ccswitch": "node scripts/import-ccswitch.mjs"
   },
@@ -45,6 +46,7 @@
     },
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "apps/desktop/assets/icon.icns",
       "target": [
         {
           "target": "dmg",
@@ -54,6 +56,28 @@
         }
       ],
       "identity": null
+    },
+    "win": {
+      "icon": "apps/desktop/assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     },
     "extraMetadata": {
       "main": "apps/desktop/src/main.mjs"
@@ -65,5 +89,9 @@
   "main": "apps/desktop/src/main.mjs",
   "author": {
     "name": "Switchyard Team"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "undici": "^6.27.0"
   }
 }

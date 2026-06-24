@@ -8,7 +8,7 @@ import {
   validateConfig,
   mergeWithDefaults,
   configLocation
-} from "@switchyard/core/config";
+} from "../../../packages/core/src/config.mjs";
 
 export function ensureConfig() {
   return initConfig({ force: false });

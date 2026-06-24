@@ -1,10 +1,12 @@
 // Resolve a requested model id (or alias) to a concrete provider+upstream model.
+import { claudeCodeDiscoveryModelId } from "./config.mjs";
 
 export function buildRouter(config) {
   const providers = new Map(config.providers.map((p) => [p.id, p]));
   const models = new Map();
   for (const model of config.models) {
-    const keys = [model.id, model.upstreamModel, ...(model.aliases || [])].filter(Boolean);
+    if (model?.enabled === false) continue;
+    const keys = [model.id, model.upstreamModel, claudeCodeDiscoveryModelId(model), ...(model.aliases || [])].filter(Boolean);
     for (const key of keys) {
       if (!models.has(key)) models.set(key, model);
     }
@@ -20,7 +22,8 @@ export function resolveRoute(config, requestedModel, { clientId } = {}) {
     const filter = config.clients[clientId];
     if (filter.enabled === false) return null;
     const allow = new Set(filter.allowedModels || ["*"]);
-    if (!allow.has("*") && !allow.has(candidate.id) && !(candidate.aliases || []).some((alias) => allow.has(alias))) {
+    const candidateKeys = [candidate.id, candidate.upstreamModel, claudeCodeDiscoveryModelId(candidate), ...(candidate.aliases || [])].filter(Boolean);
+    if (!allow.has("*") && !candidateKeys.some((key) => allow.has(key))) {
       return null;
     }
   }

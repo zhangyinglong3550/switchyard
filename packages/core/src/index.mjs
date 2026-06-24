@@ -5,5 +5,6 @@ export * from "./upstream.mjs";
 export * from "./openai-adapter.mjs";
 export * from "./anthropic-adapter.mjs";
 export * from "./profile-writer.mjs";
+export * from "./history-unify.mjs";
 export * from "./compat/index.mjs";
 export * from "./utils.mjs";

@@ -51,6 +51,20 @@ test("resolveRoute returns null when client disabled", () => {
   assert.equal(resolveRoute(cfg, "p/main", { clientId: "hermes" }), null);
 });
 
+test("resolveRoute ignores disabled models", () => {
+  const cfg = mergeWithDefaults({
+    defaultModel: "p/disabled",
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: "http://x" }],
+    models: [
+      { id: "p/enabled", providerId: "p", upstreamModel: "enabled" },
+      { id: "p/disabled", providerId: "p", upstreamModel: "disabled", aliases: ["disabled-alias"], enabled: false }
+    ]
+  });
+  assert.equal(resolveRoute(cfg, "p/disabled"), null);
+  assert.equal(resolveRoute(cfg, "disabled-alias"), null);
+  assert.equal(resolveRoute(cfg, "missing"), null);
+});
+
 test("buildRouter dedupes alias keys", () => {
   const cfg = makeConfig();
   const r = buildRouter(cfg);

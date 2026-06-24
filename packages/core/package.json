@@ -10,6 +10,7 @@
     "./config": "./src/config.mjs",
     "./router": "./src/router.mjs",
     "./profile-writer": "./src/profile-writer.mjs",
+    "./history-unify": "./src/history-unify.mjs",
     "./compat": "./src/compat/index.mjs",
     "./importers/ccswitch": "./src/importers/ccswitch.mjs"
   },

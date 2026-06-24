@@ -16,7 +16,131 @@ function envName(slug, suffix) {
   return `SWITCHYARD_${slug.replace(/-/g, "_").toUpperCase()}_${suffix}`;
 }
 
-export function importProviders({ sqlite3Cli } = {}) {
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    if (Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return undefined;
+}
+
+function maskKey(value) {
+  if (!value) return "";
+  const s = String(value);
+  if (s.length <= 8) return "••••";
+  return `${s.slice(0, 4)}••••${s.slice(-4)}`;
+}
+
+function catalogModelFrom(value) {
+  if (!value) return null;
+  if (typeof value === "string") return { id: value };
+  if (typeof value !== "object") return null;
+  const id = value.id || value.model || value.name || value.slug;
+  if (!id || typeof id !== "string") return null;
+  return {
+    id,
+    displayName: value.displayName || value.display_name || value.name || id,
+    contextWindow: firstNumber(value.contextWindow, value.context_window, value.context_length, value.max_context_window, value.maxContextWindow),
+    maxOutputTokens: firstNumber(value.maxOutputTokens, value.max_output_tokens, value.max_completion_tokens, value.output_token_limit),
+    capabilities: {
+      text: true,
+      tools: value.capabilities?.tools !== false,
+      reasoning: Boolean(value.capabilities?.reasoning || value.supports_reasoning || value.reasoning),
+      images: Boolean(value.capabilities?.images || value.capabilities?.vision),
+      stream: value.capabilities?.stream !== false,
+      multimodal: Boolean(value.capabilities?.multimodal)
+    }
+  };
+}
+
+function addCatalogModel(list, value) {
+  const model = catalogModelFrom(value);
+  if (!model) return;
+  const existing = list.find((item) => item.id === model.id);
+  if (!existing) {
+    list.push(model);
+    return;
+  }
+  existing.displayName = model.displayName || existing.displayName;
+  existing.contextWindow = model.contextWindow || existing.contextWindow;
+  existing.maxOutputTokens = model.maxOutputTokens || existing.maxOutputTokens;
+  existing.capabilities = { ...(existing.capabilities || {}), ...(model.capabilities || {}) };
+}
+
+function extractInlineKey(appType, parsed) {
+  const d = parsed || {};
+  if ((appType === "claude" || appType === "claude-desktop") && d.env) {
+    return firstString(d.env.ANTHROPIC_AUTH_TOKEN, d.env.ANTHROPIC_API_KEY);
+  }
+  if (appType === "hermes") {
+    return firstString(d.api_key, d.apiKey, d.env?.OPENAI_API_KEY, d.env?.API_KEY);
+  }
+  if (appType === "codex") {
+    return firstString(d.auth?.OPENAI_API_KEY, d.auth?.api_key, d.env?.OPENAI_API_KEY);
+  }
+  if (appType === "gemini") {
+    return firstString(d.env?.GEMINI_API_KEY, d.env?.GOOGLE_API_KEY);
+  }
+  return firstString(
+    d.api_key,
+    d.apiKey,
+    d.token,
+    d.auth?.OPENAI_API_KEY,
+    d.env?.OPENAI_API_KEY,
+    d.env?.ANTHROPIC_AUTH_TOKEN,
+    d.env?.ANTHROPIC_API_KEY,
+    d.env?.GEMINI_API_KEY,
+    d.env?.API_KEY
+  );
+}
+
+export function filterImportedConfig(result, selection = {}) {
+  if (!result?.ok || !result.config) return result;
+  const selectedProviders = Array.isArray(selection.providers) ? new Set(selection.providers.filter(Boolean)) : null;
+  const selectedModels = Array.isArray(selection.models) ? new Set(selection.models.filter(Boolean)) : null;
+  const modelProviderIds = new Set();
+  const models = (result.config.models || []).filter((model) => {
+    if (!model?.id || !model?.providerId) return false;
+    const providerSelected = !selectedProviders || selectedProviders.has(model.providerId);
+    const modelSelected = !selectedModels || selectedModels.has(model.id);
+    if (modelSelected && selectedModels?.has(model.id)) modelProviderIds.add(model.providerId);
+    if (selectedModels) return modelSelected;
+    if (selectedProviders) return providerSelected;
+    return true;
+  });
+  const keepProviders = new Set(modelProviderIds);
+  if (selectedProviders) for (const id of selectedProviders) keepProviders.add(id);
+  const providers = (result.config.providers || []).filter((provider) => {
+    if (!provider?.id) return false;
+    return selectedProviders || selectedModels ? keepProviders.has(provider.id) : true;
+  });
+  const providerIds = new Set(providers.map((provider) => provider.id));
+  const finalModels = models.filter((model) => providerIds.has(model.providerId));
+  const metaProviders = (result.importMeta?.providers || []).filter((meta) => providerIds.has(meta.slug));
+  const dedupedFromAppTypes = (result.importMeta?.dedupedFromAppTypes || []).filter((meta) => providerIds.has(meta.slug));
+  return {
+    ...result,
+    importMeta: {
+      ...(result.importMeta || {}),
+      providers: metaProviders,
+      dedupedFromAppTypes
+    },
+    config: {
+      ...result.config,
+      providers,
+      models: finalModels
+    }
+  };
+}
+
+export function importProviders({ sqlite3Cli, includeKeys = true, selection } = {}) {
   if (!fs.existsSync(DB_PATH)) return { ok: false, error: "cc-switch db not found", path: DB_PATH };
   const cli = sqlite3Cli || "sqlite3";
   let rows;
@@ -39,7 +163,7 @@ export function importProviders({ sqlite3Cli } = {}) {
 
   const providers = [];
   const models = [];
-  const importMeta = { dedupedFromAppTypes: [], skipped: 0, warnings: [] };
+  const importMeta = { dedupedFromAppTypes: [], providers: [], skipped: 0, warnings: [] };
 
   for (const [slug, entry] of collected.entries()) {
     const appTypes = entry.sources.map((s) => s.app_type);
@@ -47,6 +171,7 @@ export function importProviders({ sqlite3Cli } = {}) {
     let baseUrl = "";
     let apiFormat = ""; // "" means not yet determined
     let keyEnv = envName(slug, "API_KEY");
+    let inlineKey = "";
     const catalogModels = [];
     let hasAnthropicEnv = false;  // true if any claude/ claude-desktop source has ANTHROPIC_BASE_URL
     let codexWireApi = "";       // from codex config TOML
@@ -54,6 +179,7 @@ export function importProviders({ sqlite3Cli } = {}) {
     for (const s of entry.sources) {
       const d = s.parsed || {};
       const at = s.app_type;
+      inlineKey = inlineKey || extractInlineKey(at, d);
 
       // ------ claude / claude-desktop (Anthropic-proxied) ------
       if ((at === "claude" || at === "claude-desktop") && d.env) {
@@ -65,9 +191,9 @@ export function importProviders({ sqlite3Cli } = {}) {
         for (const ek of Object.keys(d.env || {})) {
           const v = d.env[ek];
           if (!v || typeof v !== "string") continue;
-          if (ek === "ANTHROPIC_MODEL") { if (!catalogModels.includes(v)) catalogModels.push(v); }
-          else if (ek.startsWith("ANTHROPIC_DEFAULT_") && ek.endsWith("_MODEL")) { if (!catalogModels.includes(v)) catalogModels.push(v); }
-          else if (ek === "CLAUDE_CODE_SUBAGENT_MODEL") { if (!catalogModels.includes(v)) catalogModels.push(v); }
+          if (ek === "ANTHROPIC_MODEL") addCatalogModel(catalogModels, v);
+          else if (ek.startsWith("ANTHROPIC_DEFAULT_") && ek.endsWith("_MODEL")) addCatalogModel(catalogModels, v);
+          else if (ek === "CLAUDE_CODE_SUBAGENT_MODEL") addCatalogModel(catalogModels, v);
         }
       }
 
@@ -75,11 +201,8 @@ export function importProviders({ sqlite3Cli } = {}) {
       if (at === "hermes" && (d.base_url || d.baseUrl)) {
         baseUrl = baseUrl || d.base_url || d.baseUrl;
         if (apiFormat === "") apiFormat = "openai_chat";
-        if (Array.isArray(d.models)) for (const m of d.models) {
-          const mid = m && (m.id || m.name);
-          if (mid && !catalogModels.includes(mid)) catalogModels.push(mid);
-        }
-        if (d.model && typeof d.model === "string" && !catalogModels.includes(d.model)) catalogModels.push(d.model);
+        if (Array.isArray(d.models)) for (const m of d.models) addCatalogModel(catalogModels, m);
+        addCatalogModel(catalogModels, d.model);
       }
 
       // ------ codex (TOML config) ------
@@ -95,14 +218,13 @@ export function importProviders({ sqlite3Cli } = {}) {
           }
           if (t.startsWith("model ") || (t.startsWith("model") && !t.startsWith("model_") && t.includes("="))) {
             const v = t.split("=", 2)[1].trim().replace(/["']/g, "");
-            if (v && !catalogModels.includes(v)) catalogModels.push(v);
+            addCatalogModel(catalogModels, v);
           }
         }
         if (d.modelCatalog && Array.isArray(d.modelCatalog.models)) {
           for (const m of d.modelCatalog.models) {
             if (!m) continue;
-            const mid = m.id || m.model || (typeof m === "string" ? m : null);
-            if (mid && !catalogModels.includes(mid)) catalogModels.push(mid);
+            addCatalogModel(catalogModels, m);
           }
         }
       }
@@ -138,29 +260,70 @@ export function importProviders({ sqlite3Cli } = {}) {
 
     // Normalize baseUrl: strip trailing slash
     baseUrl = baseUrl.replace(/\/+$/, "");
+    let authMode = "api_key";
+    let providerType = "";
+    const normalizedBase = baseUrl.toLowerCase();
+    if (normalizedBase.includes("chatgpt.com/backend-api/codex")) {
+      apiFormat = "openai_responses";
+      authMode = "codex_oauth";
+      providerType = "codex_oauth";
+    }
+    if (normalizedBase.includes("xiaomimimo.com") && normalizedBase.endsWith("/anthropic")) {
+      apiFormat = "anthropic_messages";
+    } else if (normalizedBase.includes("xiaomimimo.com") && apiFormat === "openai_responses") {
+      apiFormat = "openai_chat";
+    }
     // For anthropic_messages, keep /anthropic suffix (it's part of the correct endpoint)
     // For openai_chat, strip /anthropic suffix since we route to /chat/completions
     if (apiFormat === "openai_chat" && baseUrl.endsWith("/anthropic")) {
       baseUrl = baseUrl.slice(0, -"/anthropic".length);
     }
 
-    providers.push({ id: slug, name: entry.name, apiFormat, baseUrl, apiKeyEnv: keyEnv });
+    const provider = { id: slug, name: entry.name, apiFormat, baseUrl, apiKeyEnv: keyEnv };
+    if (authMode !== "api_key") provider.authMode = authMode;
+    if (providerType) provider.providerType = providerType;
+    if (includeKeys && inlineKey) provider.apiKey = inlineKey;
+    providers.push(provider);
+    importMeta.providers.push({
+      slug,
+      name: entry.name,
+      appTypes,
+      apiFormat,
+      baseUrl,
+      keySource: inlineKey ? "inline" : keyEnv,
+      hasInlineKey: Boolean(inlineKey),
+      keyPreview: inlineKey ? maskKey(inlineKey) : ""
+    });
 
     const seen = new Set();
-    for (const m of catalogModels) {
-      if (!m || typeof m !== "string" || seen.has(m) || m.startsWith("$") || m.length > 80) continue;
-      seen.add(m);
-      const safe = m.replace(/[^a-zA-Z0-9_\-\.\/\@\+]/g, "_");
+    for (const item of catalogModels) {
+      const upstream = item.id;
+      if (!upstream || typeof upstream !== "string" || seen.has(upstream) || upstream.startsWith("$") || upstream.length > 80) continue;
+      seen.add(upstream);
+      const safe = upstream.replace(/[^a-zA-Z0-9_\-\.\/\@\+]/g, "_");
       const modelId = `${slug}/${safe}`;
       if (models.some((md) => md.id === modelId)) continue;
       models.push({
-        id: modelId, providerId: slug, upstreamModel: m, displayName: safe,
-        aliases: [], capabilities: { text: true, tools: true, reasoning: false, images: false }
+        id: modelId,
+        providerId: slug,
+        upstreamModel: upstream,
+        displayName: item.displayName || safe,
+        aliases: [upstream],
+        contextWindow: item.contextWindow,
+        maxOutputTokens: item.maxOutputTokens,
+        capabilities: {
+          text: true,
+          tools: item.capabilities?.tools !== false,
+          reasoning: !!item.capabilities?.reasoning,
+          images: !!item.capabilities?.images,
+          stream: item.capabilities?.stream !== false,
+          multimodal: !!item.capabilities?.multimodal
+        }
       });
     }
   }
 
-  return {
+  const result = {
     ok: true, dbPath: DB_PATH, importMeta,
     config: {
       host: "127.0.0.1", port: 17888, defaultModel: null,
@@ -173,4 +336,5 @@ export function importProviders({ sqlite3Cli } = {}) {
       }
     }
   };
+  return filterImportedConfig(result, selection);
 }

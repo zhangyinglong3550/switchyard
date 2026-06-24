@@ -1,24 +1,29 @@
 // Runs the gateway HTTP server inside the Electron main process.
 // Exposes start/stop/restart and reload primitives that map 1:1 to UI buttons.
-import { createServer } from "@switchyard/core/server";
-import { configFile } from "./config-store.mjs";
+import { createServer } from "../../../packages/core/src/server.mjs";
+import { configFile, readConfig } from "./config-store.mjs";
 import { appendLog } from "./logs.mjs";
+import { scheduleRequestLogCleanup } from "./request-log-store.mjs";
 
 let current = null;
 
 export async function startGateway() {
   if (current?.server) return statusFromServer();
   process.env.SWITCHYARD_CONFIG = process.env.SWITCHYARD_CONFIG || configFile();
+  const config = readConfig();
+  scheduleRequestLogCleanup();
+  const host = config.host || "127.0.0.1";
+  const port = Number(config.port || 17888);
   const server = createServer({ onLog: (entry) => appendLog(entry) });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(port, host, () => {
       server.removeListener("error", reject);
       resolve();
     });
   });
   const addr = server.address();
-  current = { server, host: "127.0.0.1", port: addr.port, startedAt: Date.now() };
+  current = { server, host, port: typeof addr === "object" && addr ? addr.port : port, startedAt: Date.now() };
   appendLog({ level: "info", msg: "gateway started", host: current.host, port: current.port });
   return statusFromServer();
 }

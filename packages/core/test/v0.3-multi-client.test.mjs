@@ -21,7 +21,11 @@ async function fetchJson(url, init = {}) {
   return { status: res.status, body: await res.json() };
 }
 
-test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => {
+function close(server) {
+  return new Promise((resolve) => server.close(resolve));
+}
+
+test("v0.3 · one config feeds Codex + Claude Code simultaneously", async (t) => {
   const upstream = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ id: "x", choices: [{ message: { role: "assistant", content: "pong" } }] }));
@@ -48,6 +52,10 @@ test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => 
 
   const server = createServer();
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(async () => {
+    await close(server);
+    await close(upstream);
+  });
   const port = server.address().port;
   const base = `http://127.0.0.1:${port}`;
 
@@ -56,7 +64,9 @@ test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => 
   assert.equal(codex.status, 200);
   assert.equal(cc.status, 200);
   assert.deepEqual(codex.body.data.map((m) => m.id), ["p/m1"]);
-  assert.deepEqual(cc.body.data.map((m) => m.id), ["p/m1"]);
+  assert.match(cc.body.data[0].id, /^claude-switchyard-p-m1-/);
+  assert.equal(cc.body.data[0].type, "model");
+  assert.equal(cc.body.has_more, false);
 
   // Same model id, two clients, two protocols (openai chat + anthropic messages)
   const chatRes = await fetchJson(`${base}/codex/v1/chat/completions`, {
@@ -68,7 +78,7 @@ test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => 
 
   const msgRes = await fetchJson(`${base}/claude-code/v1/messages`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "p/m1", max_tokens: 32, messages: [{ role: "user", content: "hi" }] })
+    body: JSON.stringify({ model: cc.body.data[0].id, max_tokens: 32, messages: [{ role: "user", content: "hi" }] })
   });
   assert.equal(msgRes.status, 200);
   // anthropic-shaped body
@@ -87,7 +97,7 @@ test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => 
   const codex2 = await fetchJson(`${base}/codex/v1/models`);
   const cc2 = await fetchJson(`${base}/claude-code/v1/models`);
   assert.ok(codex2.body.data.some((m) => m.id === "p/m2"));
-  assert.ok(cc2.body.data.some((m) => m.id === "p/m2"));
+  assert.ok(cc2.body.data.some((m) => m.id === "claude-sonnet-alias"));
 
   // alias visibility check (anthropic side requesting "claude-sonnet-alias" hits p/m2)
   const aliasRes = await fetchJson(`${base}/claude-code/v1/messages`, {
@@ -95,12 +105,9 @@ test("v0.3 · one config feeds Codex + Claude Code simultaneously", async () => 
     body: JSON.stringify({ model: "claude-sonnet-alias", max_tokens: 16, messages: [{ role: "user", content: "x" }] })
   });
   assert.equal(aliasRes.status, 200);
-
-  server.close();
-  upstream.close();
 });
 
-test("v0.3 · per-client visibility filters do hide models", async () => {
+test("v0.3 · per-client visibility filters do hide models", async (t) => {
   const upstream = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ id: "x", choices: [{ message: { role: "assistant", content: "pong" } }] }));
@@ -126,6 +133,10 @@ test("v0.3 · per-client visibility filters do hide models", async () => {
 
   const server = createServer();
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(async () => {
+    await close(server);
+    await close(upstream);
+  });
   const port = server.address().port;
   const base = `http://127.0.0.1:${port}`;
 
@@ -133,7 +144,8 @@ test("v0.3 · per-client visibility filters do hide models", async () => {
   const cc = await fetchJson(`${base}/claude-code/v1/models`);
   const generic = await fetchJson(`${base}/v1/models`);
   assert.deepEqual(codex.body.data.map((m) => m.id), ["p/codex-only"]);
-  assert.deepEqual(cc.body.data.map((m) => m.id), ["p/cc-only"]);
+  assert.match(cc.body.data[0].id, /^claude-switchyard-p-cc-only-/);
+  assert.equal(cc.body.data[0].type, "model");
   assert.equal(generic.body.data.length, 2);
 
   // Cross-client misuse should be rejected at route time
@@ -142,7 +154,4 @@ test("v0.3 · per-client visibility filters do hide models", async () => {
     body: JSON.stringify({ model: "p/cc-only", messages: [{ role: "user", content: "x" }] })
   });
   assert.equal(bad.status, 400);
-
-  server.close();
-  upstream.close();
 });

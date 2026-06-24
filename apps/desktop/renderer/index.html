@@ -19,13 +19,19 @@
         <a data-tab="providers"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
         <a data-tab="models"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
         <a data-tab="clients"><span class="icon-square">◉</span>客户端</a>
+        <a data-tab="diagnostics"><span class="icon-square">◎</span>诊断中心</a>
       </nav>
     </div>
     <div>
       <div class="group-title">工具</div>
       <nav class="nav" id="tools-nav">
-        <a data-tab="logs"><span class="icon-square">≣</span>日志 <span class="badge">实时</span></a>
+        <a data-tab="usage"><span class="icon-square">▥</span>用量</a>
+        <a data-tab="logs"><span class="icon-square">≣</span>日志</a>
         <a data-tab="test"><span class="icon-square">▶</span>测试台</a>
+        <a data-tab="sessions"><span class="icon-square">◫</span>会话</a>
+        <a data-tab="traces"><span class="icon-square">⌁</span>调用可视化</a>
+        <a data-tab="skills"><span class="icon-square">✎</span>Skills</a>
+        <a data-tab="plugins"><span class="icon-square">◇</span>插件</a>
         <a data-tab="settings"><span class="icon-square">⚙</span>偏好设置</a>
       </nav>
     </div>
@@ -51,7 +57,7 @@
     <section class="tab-panel active" id="panel-overview">
       <div class="toolbar">
         <div style="display:flex; flex-direction:column; gap:2px;">
-          <div style="font-size:16px; font-weight:600;">总览</div>
+          <div class="page-title">总览</div>
           <div class="tiny muted" id="overview-subtitle">本机 LLM 控制台</div>
         </div>
         <div style="flex:1;"></div>
@@ -59,7 +65,7 @@
         <button class="btn" id="btn-open-logs">打开日志目录</button>
         <button class="btn" id="btn-import">从 cc-switch 导入…</button>
       </div>
-      <div style="padding:16px; display:flex; flex-direction:column; gap:16px; overflow:auto;">
+      <div class="page-scroll page-stack">
         <div class="grid two">
           <div class="card">
             <div class="hd"><h3>服务状态</h3><span class="sub" id="overview-uptime">-</span></div>
@@ -89,19 +95,21 @@
     <section class="tab-panel" id="panel-providers">
       <div class="toolbar">
         <div style="display:flex; flex-direction:column; gap:2px;">
-          <div style="font-size:16px; font-weight:600;">供应商</div>
+          <div class="page-title">供应商</div>
           <div class="tiny muted" id="providers-subtitle">-</div>
         </div>
         <div style="flex:1;"></div>
         <button class="btn" id="btn-provider-import">从 cc-switch 导入…</button>
         <button class="btn primary" id="btn-provider-add">+ 新增供应商</button>
       </div>
-      <div style="padding:16px; overflow:auto; flex:1;">
+      <div class="page-scroll">
         <div class="card">
-          <table class="data" id="providers-table">
-            <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>模型数</th><th></th></tr></thead>
-            <tbody id="providers-tbody"></tbody>
-          </table>
+          <div class="table-scroll tall">
+            <table class="data" id="providers-table">
+              <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>代理 / 兼容</th><th>模型数</th><th></th></tr></thead>
+              <tbody id="providers-tbody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>
@@ -110,19 +118,21 @@
     <section class="tab-panel" id="panel-models">
       <div class="toolbar">
         <div style="display:flex; flex-direction:column; gap:2px;">
-          <div style="font-size:16px; font-weight:600;">模型</div>
+          <div class="page-title">模型</div>
           <div class="tiny muted" id="models-subtitle">-</div>
         </div>
         <div style="flex:1;"></div>
         <input class="field" id="models-search" placeholder="搜索模型 id / 别名 / 上游名…" style="min-width:260px;">
         <button class="btn primary" id="btn-model-add">+ 新增模型</button>
       </div>
-      <div style="padding:16px; overflow:auto; flex:1;">
+      <div class="page-scroll">
         <div class="card">
-          <table class="data" id="models-table">
-            <thead><tr><th>模型 ID</th><th>供应商</th><th>上游</th><th>别名</th><th>能力</th><th></th></tr></thead>
-            <tbody id="models-tbody"></tbody>
-          </table>
+          <div class="table-scroll tall">
+            <table class="data" id="models-table">
+              <thead><tr><th>模型 ID</th><th>供应商</th><th>上游</th><th>别名</th><th>能力</th><th></th></tr></thead>
+              <tbody id="models-tbody"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>
@@ -130,39 +140,183 @@
     <!-- Clients -->
     <section class="tab-panel" id="panel-clients">
       <div class="toolbar">
-        <div style="font-size:16px; font-weight:600;">客户端</div>
+        <div class="page-title">客户端</div>
         <div class="tiny muted">一键写入 / 恢复 Codex、Claude Code、Hermes 配置；每次写入自动备份原文件</div>
         <div style="flex:1;"></div>
       </div>
-      <div style="padding:16px; overflow:auto; flex:1;">
+      <div class="page-scroll">
         <div class="grid two" id="clients-grid"></div>
+      </div>
+    </section>
+
+    <!-- Diagnostics -->
+    <section class="tab-panel" id="panel-diagnostics">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">诊断中心</div>
+          <div class="tiny muted">提供启发式定位：模型不可用、客户端配置漂移、能力声明不准和失败请求草稿</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-provider-health-refresh">刷新健康</button>
+        <button class="btn primary" id="btn-diagnostics-run">运行诊断</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="grid three" id="diagnostics-client-grid"></div>
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>供应商诊断</h3><span class="sub" id="diagnostics-provider-summary">启发式建议</span></div>
+            <div class="bd diagnostics-list" id="diagnostics-providers"></div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>最近失败</h3><span class="sub" id="diagnostics-error-summary">草稿回放</span></div>
+            <div class="bd diagnostics-list" id="diagnostics-errors"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>模型能力校准</h3><span class="sub" id="diagnostics-model-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact">
+              <thead><tr><th>模型</th><th>供应商</th><th>能力</th><th>客户端可见</th><th></th></tr></thead>
+              <tbody id="diagnostics-models-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>探针结果</h3><span class="sub">探针是启发式建议，确认后才写配置</span><button class="btn primary" id="btn-diagnostics-apply-capabilities" style="display:none;">应用到模型配置</button></div>
+          <div class="bd"><pre class="log-pane xlarge" id="diagnostics-output"></pre></div>
+        </div>
       </div>
     </section>
 
     <!-- Test Console -->
     <section class="tab-panel" id="panel-test">
       <div class="toolbar">
-        <div style="font-size:16px; font-weight:600;">测试台</div>
-        <div class="tiny muted">直接打通端到端：UI → gateway → upstream</div>
+        <div class="page-title">测试台</div>
+        <div class="tiny muted">验证 Agent、协议、模型、流式和视觉兜底是否真的可用</div>
         <div style="flex:1;"></div>
         <button class="btn" id="btn-test-run">发送</button>
+        <button class="btn" id="btn-test-batch">批量验证</button>
+        <button class="btn" id="btn-test-vision">视觉兜底</button>
       </div>
-      <div style="padding:16px; overflow:auto; flex:1; display:flex; flex-direction:column; gap:12px;">
-        <div class="card">
+      <div class="page-scroll page-stack">
+        <div class="card test-request-card">
           <div class="hd"><h3>请求</h3></div>
           <div class="bd">
             <div class="row">
-              <label>模型 <select class="field" id="test-model"></select></label>
-              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-stream"> 启用 stream</label>
+              <label>Agent
+                <select class="field" id="test-agent">
+                  <option value="generic-openai">通用 OpenAI</option>
+                  <option value="codex">Codex</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="hermes">Hermes</option>
+                </select>
+              </label>
+              <label>协议
+                <select class="field" id="test-protocol">
+                  <option value="openai_chat">OpenAI Chat</option>
+                  <option value="openai_responses">OpenAI Responses</option>
+                  <option value="anthropic_messages">Anthropic Messages</option>
+                </select>
+              </label>
             </div>
-            <label>消息 (system + user)
-              <textarea class="field" id="test-prompt" rows="4" style="width:100%;">你好，请用一句话简短自我介绍。</textarea>
+            <div class="row">
+              <label>模型 <select class="field" id="test-model"></select></label>
+              <label>批量数量 <input class="field" id="test-batch-count" type="number" min="1" max="20" value="10"></label>
+            </div>
+            <div class="row">
+              <label>Temperature <input class="field" id="test-temperature" type="number" min="0" max="2" step="0.1" placeholder="默认"></label>
+              <label>最大输出 Token <input class="field" id="test-max-tokens" type="number" min="1" max="200000" value="512"></label>
+            </div>
+            <div class="row" style="align-items:center;">
+              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-stream"> 启用 stream</label>
+              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-image"> 附带测试图片</label>
+              <span class="tiny muted">视觉兜底会向当前模型发送 1x1 红色图片，验证非视觉模型是否能借助兜底模型理解图片。</span>
+            </div>
+            <div class="actions" style="justify-content:flex-start;">
+              <button class="btn" type="button" id="btn-test-sample">多轮示例</button>
+              <button class="btn" type="button" id="btn-test-clear">清空消息</button>
+            </div>
+            <label>消息（支持 system / user / assistant / tool 多轮）
+              <textarea class="field" id="test-prompt" rows="10" style="width:100%;">user: 你好，请用一句话简短自我介绍。</textarea>
             </label>
           </div>
         </div>
         <div class="card">
+          <div class="hd"><h3>原始请求</h3><span class="sub">发送前后都会显示脱敏后的请求体</span></div>
+          <div class="bd"><pre class="log-pane medium" id="test-request-preview" style="background:#0f1014;">尚未发送</pre></div>
+        </div>
+        <div class="card">
           <div class="hd"><h3>响应</h3></div>
-          <div class="bd"><pre class="log-pane" id="test-output" style="background:#0f1014; min-height:160px;"></pre></div>
+          <div class="bd"><pre class="log-pane xlarge" id="test-output" style="background:#0f1014;"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Usage -->
+    <section class="tab-panel" id="panel-usage">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">用量统计</div>
+          <div class="tiny muted">按 Agent 和模型查看请求量、Token、错误与延迟</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="usage-agent-filter" style="min-width:160px;">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="generic-openai">通用 OpenAI</option>
+          <option value="model-test">模型测试</option>
+        </select>
+        <input class="field" id="usage-model-filter" placeholder="按模型筛选…" style="min-width:220px;">
+        <select class="field" id="usage-range-preset" style="min-width:130px;">
+          <option value="24h">近 24 小时</option>
+          <option value="3d">近 3 天</option>
+          <option value="7d" selected>近 7 天</option>
+          <option value="14d">近 14 天</option>
+          <option value="30d">近 30 天</option>
+          <option value="custom">自定义</option>
+        </select>
+        <button class="btn" id="btn-usage-refresh">刷新统计</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>统计范围</h3><span class="sub" id="usage-range-summary">-</span></div>
+          <div class="bd">
+            <div class="usage-range-grid">
+              <label>时间轴 A 开始 <input class="field" id="usage-since" type="date"></label>
+              <label>时间轴 A 结束 <input class="field" id="usage-until" type="date"></label>
+              <label class="checkbox-line"><input type="checkbox" id="usage-compare-enabled"> 启用时间轴 B 对比</label>
+              <label>时间轴 B 开始 <input class="field" id="usage-compare-since" type="date"></label>
+              <label>时间轴 B 结束 <input class="field" id="usage-compare-until" type="date"></label>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>每日趋势</h3><span class="sub" id="usage-daily-summary">-</span></div>
+          <div class="bd">
+            <div class="usage-chart" id="usage-daily-chart"></div>
+          </div>
+        </div>
+        <div class="page-stack">
+          <div class="card">
+            <div class="hd"><h3>模型用量</h3><span class="sub" id="usage-summary">-</span></div>
+            <div class="table-scroll medium">
+              <table class="data compact">
+                <thead><tr><th>Agent</th><th>模型</th><th>请求</th><th>错误</th><th>Token</th><th>均延迟</th></tr></thead>
+                <tbody id="usage-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>最近请求</h3><span class="sub" id="request-log-summary">-</span></div>
+            <div class="table-scroll medium">
+              <table class="data compact">
+                <thead><tr><th>时间</th><th>客户端</th><th>模型</th><th>状态</th><th>耗时</th><th></th></tr></thead>
+                <tbody id="request-log-tbody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -170,20 +324,189 @@
     <!-- Logs -->
     <section class="tab-panel" id="panel-logs">
       <div class="toolbar">
-        <div style="font-size:16px; font-weight:600;">日志</div>
+        <div>
+          <div class="page-title">日志</div>
+          <div class="tiny muted">按行展示 gateway.log 尾部；详细用量请看“用量统计”</div>
+        </div>
         <div style="flex:1;"></div>
-        <button class="btn" id="btn-logs-clear">清空显示</button>
+        <button class="btn" id="btn-logs-refresh-file">刷新日志</button>
         <button class="btn" id="btn-logs-open">打开日志目录</button>
       </div>
-      <div style="padding:16px; flex:1; overflow:hidden; display:flex;">
-        <pre class="log-pane" id="logs-output" style="flex:1;"></pre>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="hd"><h3>日志文件尾部</h3><span class="sub" id="log-file-summary">-</span></div>
+          <div class="bd"><div class="log-file-list" id="logs-output"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sessions -->
+    <section class="tab-panel" id="panel-sessions">
+      <div class="toolbar">
+        <div class="page-title">Agent 会话</div>
+        <div style="flex:1;"></div>
+        <select class="field" id="session-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+        </select>
+        <button class="btn" id="btn-sessions-refresh">刷新</button>
+      </div>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="hd"><h3>本机会话文件</h3><span class="sub" id="sessions-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact">
+              <thead><tr><th>Agent</th><th>名称</th><th>路径</th><th>大小</th><th>更新时间</th><th></th></tr></thead>
+              <tbody id="sessions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Traces -->
+    <section class="tab-panel" id="panel-traces">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">调用可视化</div>
+          <div class="tiny muted">实时展示刚发出的请求、上下文、工具、Skill 和响应结构</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="trace-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="generic-openai">通用 OpenAI</option>
+        </select>
+        <button class="btn" id="btn-traces-refresh">刷新</button>
+      </div>
+      <div class="page-scroll" style="display:grid; grid-template-columns:minmax(320px, 420px) minmax(0, 1fr); gap:12px;">
+        <div class="card">
+          <div class="hd"><h3>最近对象</h3><span class="sub" id="traces-summary">-</span></div>
+          <div class="bd trace-list" id="trace-list"></div>
+        </div>
+        <div class="trace-detail-stack">
+          <div class="card">
+            <div class="hd"><h3>实时调用</h3><span class="sub" id="live-log-summary">等待请求</span></div>
+            <div class="bd structured-log-list" id="structured-logs"></div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3 id="trace-title">历史时间线</h3><span class="sub" id="trace-subtitle">选择左侧对象</span><button class="btn" id="btn-trace-replay" style="display:none;">草稿回放到测试台</button></div>
+            <div class="bd"><div class="trace-timeline" id="trace-timeline"><div class="empty-state">选择一个会话或请求查看交互过程</div></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Skills -->
+    <section class="tab-panel" id="panel-skills">
+      <div class="toolbar">
+        <div class="page-title">Agent Skills</div>
+        <div style="flex:1;"></div>
+        <select class="field" id="skill-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+        </select>
+        <button class="btn" id="btn-skills-refresh">刷新</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>本地 Skill</h3><span class="sub" id="skills-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact">
+              <thead><tr><th>Agent</th><th>Skill</th><th>状态</th><th>路径</th><th>更新时间</th><th></th></tr></thead>
+              <tbody id="skills-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd">
+            <h3>SkillHub</h3>
+            <span class="sub">搜索 skillhub.cn，可下载 zip 或直接安装到指定 Agent</span>
+          </div>
+          <div class="bd">
+            <div class="row">
+              <label>搜索 <input class="field" id="skillhub-search" placeholder="搜索 skill 名称、描述，例如 codex / 文档 / 浏览器"></label>
+              <button class="btn" id="btn-skillhub-search">搜索</button>
+            </div>
+            <div class="tiny muted" id="skillhub-summary" style="margin:8px 0;">尚未搜索</div>
+            <div class="table-scroll medium">
+              <table class="data compact">
+                <thead><tr><th>Skill</th><th>说明</th><th>数据</th><th></th></tr></thead>
+                <tbody id="skillhub-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugins -->
+    <section class="tab-panel" id="panel-plugins">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">Agent 插件</div>
+          <div class="tiny muted">读取 Claude Code 插件源、marketplace 和本机已安装插件</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="plugin-agent-filter">
+          <option value="claude-code">Claude Code</option>
+        </select>
+        <button class="btn" id="btn-plugins-refresh">刷新</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>添加插件源</h3><span class="sub">本地 marketplace 路径或 JSON URL</span></div>
+          <div class="bd">
+            <div class="responsive-form-grid plugin-source-grid">
+              <label>名称 <input class="field" id="plugin-source-name" placeholder="例：团队插件源"></label>
+              <label>本地路径 <input class="field" id="plugin-source-path" placeholder="例：~/.claude/plugins/marketplaces/team"></label>
+              <label>JSON URL <input class="field" id="plugin-source-url" placeholder="https://example.com/marketplace.json"></label>
+              <div style="display:flex; align-items:end;"><button class="btn primary" id="btn-plugin-source-add">添加源</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="page-stack plugin-tables-stack">
+          <div class="card">
+            <div class="hd"><h3>插件源</h3><span class="sub" id="plugin-sources-summary">-</span></div>
+            <div class="table-scroll page-flow">
+              <table class="data compact">
+                <thead><tr><th>来源</th><th>名称</th><th>插件数</th><th></th></tr></thead>
+                <tbody id="plugin-sources-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>已安装插件</h3><span class="sub" id="installed-plugins-summary">-</span></div>
+            <div class="table-scroll page-flow">
+              <table class="data compact">
+                <thead><tr><th>插件</th><th>能力</th><th>路径</th></tr></thead>
+                <tbody id="installed-plugins-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>可用插件</h3><span class="sub" id="available-plugins-summary">-</span></div>
+          <div class="table-scroll page-flow plugin-available-scroll">
+            <table class="data compact">
+              <thead><tr><th>插件</th><th>说明</th><th>分类</th><th>来源</th></tr></thead>
+              <tbody id="available-plugins-tbody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- Settings -->
     <section class="tab-panel" id="panel-settings">
-      <div class="toolbar"><div style="font-size:16px; font-weight:600;">偏好设置</div></div>
-      <div style="padding:16px; overflow:auto;">
+      <div class="toolbar"><div class="page-title">偏好设置</div></div>
+      <div class="page-scroll page-stack">
         <div class="card">
           <div class="hd"><h3>配置文件</h3></div>
           <div class="bd">
@@ -193,30 +516,207 @@
             </dl>
           </div>
         </div>
+        <div class="card">
+          <div class="hd">
+            <h3>Agent 核心文件</h3>
+            <span class="sub" id="core-files-summary">-</span>
+          </div>
+          <div class="bd">
+            <div class="row">
+              <label>Agent
+                <select class="field" id="core-agent-filter">
+                  <option value="codex">Codex</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="hermes">Hermes</option>
+                </select>
+              </label>
+              <label>文件
+                <select class="field" id="core-file-select"></select>
+              </label>
+            </div>
+            <div class="tiny muted mono" id="core-file-path" style="margin:8px 0;">-</div>
+            <textarea class="field code-editor" id="core-file-editor" spellcheck="false" style="min-height:420px;"></textarea>
+            <div class="actions">
+              <button class="btn" id="btn-core-file-refresh">重新读取</button>
+              <button class="btn primary" id="btn-core-file-save">保存文件</button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
 </div>
 
-<div class="dialog-overlay" id="provider-dialog-wrap">
+<div class="dialog-overlay" id="text-viewer-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="text-viewer-title">查看</h2>
+    <div class="tiny muted mono" id="text-viewer-path" style="margin-bottom:10px;"></div>
+    <textarea class="field code-editor" id="text-viewer-content" spellcheck="false"></textarea>
+    <div class="actions">
+      <button class="btn" type="button" data-close="text-viewer-wrap">关闭</button>
+      <button class="btn primary" type="button" id="btn-text-viewer-save" style="display:none;">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="session-viewer-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="session-viewer-title">会话</h2>
+    <div class="tiny muted mono" id="session-viewer-path" style="margin-bottom:10px;"></div>
+    <div class="segmented">
+      <button class="btn primary" type="button" id="btn-session-view-conversation">对话</button>
+      <button class="btn" type="button" id="btn-session-view-raw">原始 JSON</button>
+    </div>
+    <div class="conversation-view" id="session-conversation"></div>
+    <textarea class="field code-editor" id="session-raw" spellcheck="false" style="display:none;"></textarea>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-viewer-wrap">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skill-link-wrap">
   <div class="dialog">
+    <h2>复制 Skill 到其他 Agent</h2>
+    <div class="tiny muted" id="skill-link-source">-</div>
+    <label>目标 Agent
+      <select class="field" id="skill-link-target">
+        <option value="codex">Codex</option>
+        <option value="claude-code">Claude Code</option>
+        <option value="hermes">Hermes</option>
+      </select>
+    </label>
+    <label>目标 Skill 名称 <input class="field" id="skill-link-name"></label>
+    <div class="callout compact">会创建软链接，不复制文件内容。后续编辑源 Skill 时，软链接目标会同步看到变化。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skill-link-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-skill-link-confirm">创建软链接</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skillhub-detail-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="skillhub-detail-title">SkillHub 详情</h2>
+    <div class="tiny muted mono" id="skillhub-detail-slug">-</div>
+    <div class="chip-row" id="skillhub-detail-tags" style="margin:12px 0;"></div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">说明</div>
+        <div id="skillhub-detail-description" class="detail-text">-</div>
+      </div>
+      <div>
+        <div class="detail-label">数据</div>
+        <div class="chip-row" id="skillhub-detail-metrics"></div>
+      </div>
+    </div>
+    <dl class="kv compact" style="margin-top:14px;">
+      <dt>作者</dt><dd id="skillhub-detail-owner">-</dd>
+      <dt>版本</dt><dd id="skillhub-detail-version">-</dd>
+      <dt>来源</dt><dd id="skillhub-detail-source">-</dd>
+      <dt>网页</dt><dd class="mono" id="skillhub-detail-homepage">-</dd>
+    </dl>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skillhub-detail-wrap">关闭</button>
+      <button class="btn" type="button" id="btn-skillhub-detail-open">浏览器打开</button>
+      <button class="btn" type="button" id="btn-skillhub-detail-download">下载</button>
+      <button class="btn primary" type="button" id="btn-skillhub-detail-install">安装</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skillhub-install-wrap">
+  <div class="dialog">
+    <h2>安装 SkillHub Skill</h2>
+    <div class="tiny muted" id="skillhub-install-source">-</div>
+    <label>安装到 Agent
+      <select class="field" id="skillhub-install-target">
+        <option value="codex">Codex</option>
+        <option value="claude-code">Claude Code</option>
+        <option value="hermes">Hermes</option>
+      </select>
+    </label>
+    <label>Skill 名称 <input class="field" id="skillhub-install-name"></label>
+    <label class="checkbox-line"><input type="checkbox" id="skillhub-install-overwrite"> 覆盖已存在的同名 Skill</label>
+    <div class="callout compact">安装会把 Skill 内容复制到目标 Agent 的 skills 目录；本地 Agent 读取后即可使用。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skillhub-install-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-skillhub-install-confirm">安装</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="provider-dialog-wrap">
+  <div class="dialog dialog-xwide">
     <h2 id="provider-dialog-title">新增供应商</h2>
     <form id="provider-form" autocomplete="off">
+      <div class="row">
+        <label>供应商模板
+          <select class="field" name="presetId" id="provider-preset-select">
+            <option value="">自定义供应商</option>
+          </select>
+        </label>
+        <label>认证方式
+          <select class="field" name="authMode" id="provider-auth-mode">
+            <option value="api_key">API Key</option>
+          </select>
+        </label>
+      </div>
       <div class="row">
         <label>标识 <input class="field" name="id" required placeholder="例：kimi"></label>
         <label>名称 <input class="field" name="name" placeholder="显示名"></label>
       </div>
       <label>协议
         <select class="field" name="apiFormat">
-          <option value="openai_chat">openai_chat</option>
-          <option value="openai_responses">openai_responses</option>
-          <option value="anthropic_messages">anthropic_messages</option>
+          <option value="openai_chat">OpenAI Chat Completions（最通用）</option>
+          <option value="openai_responses">OpenAI Responses（Codex / 新版 OpenAI）</option>
+          <option value="anthropic_messages">Anthropic Messages（Claude / Claude Code）</option>
         </select>
       </label>
       <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
-      <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
-      <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" name="inlineKey"> 直接保存 Key 到本机配置文件（不建议，仅限本机）</label>
-      <label>Inline Key <input class="field" name="apiKey" type="password" autocomplete="new-password"></label>
+      <label>Provider 代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890；所有模型默认继承"></label>
+      <label>高级：路由策略
+        <select class="field" name="routingMode">
+          <option value="auto">自动（协议一致时原生透传）</option>
+          <option value="gateway">强制转换（排障/兼容）</option>
+          <option value="native">强制原生（协议不匹配时报错）</option>
+        </select>
+      </label>
+      <div class="callout compact">
+        <div class="callout-title">Provider 兼容包</div>
+        <div class="callout-body">兼容包会强制启用一组 provider/model 定向补丁；可在模型里继续单独补充。</div>
+        <div class="compat-pack-grid" id="provider-compat-packs"></div>
+      </div>
+      <div class="row" id="provider-key-fields">
+        <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
+        <label>Inline Key（本机保存）
+          <span class="input-with-button">
+            <input class="field" name="apiKey" id="provider-api-key-input" type="password" autocomplete="new-password" placeholder="给自己本机用时可直接保存">
+            <button class="btn" type="button" id="btn-provider-key-toggle">显示</button>
+          </span>
+        </label>
+      </div>
+      <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
+      <div class="callout">
+        <div class="callout-title">连接验证</div>
+        <div class="callout-body">先点“测试连接”确认地址和密钥有效，再点“查询模型”把上游模型拉下来，勾选后直接生成本地模型。</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+          <button class="btn" type="button" id="btn-provider-test">测试连接</button>
+          <button class="btn" type="button" id="btn-provider-discover">查询模型</button>
+        </div>
+        <pre class="inline-console" id="provider-test-output">尚未测试</pre>
+      </div>
+      <div class="callout">
+        <div class="callout-title">待添加模型</div>
+        <div class="callout-body">查询到的模型会出现在这里。可以设置别名、思考、多模态和工具能力，然后和供应商一起保存。</div>
+        <div class="discovery-toolbar">
+          <label class="discovery-search">搜索模型 <input class="field" id="provider-discovery-search" placeholder="输入模型名、别名、能力"></label>
+          <span class="tiny muted" id="provider-discovery-count">0 个模型</span>
+        </div>
+        <div id="provider-discovered-models" class="discovery-list">
+          <div class="empty-state">还没有查询模型</div>
+        </div>
+      </div>
       <div class="actions">
         <button class="btn" type="button" data-close>取消</button>
         <button class="btn primary" type="submit">保存</button>
@@ -226,7 +726,7 @@
 </div>
 
 <div class="dialog-overlay" id="model-dialog-wrap">
-  <div class="dialog">
+  <div class="dialog dialog-wide">
     <h2 id="model-dialog-title">新增模型</h2>
     <form id="model-form" autocomplete="off">
       <div class="row">
@@ -240,11 +740,37 @@
         <label>显示名 <input class="field" name="displayName"></label>
       </div>
       <label>别名（英文逗号分隔） <input class="field" name="aliases" placeholder="alias-1, alias-2"></label>
+      <div class="row">
+        <label>上下文窗口 <input class="field" name="contextWindow" type="number" min="0" placeholder="例：128000"></label>
+        <label>最大输出 Token <input class="field" name="maxOutputTokens" type="number" min="0" placeholder="例：8192"></label>
+      </div>
+      <label>视觉兜底模型（可选）
+        <select class="field" name="visionFallbackModelId" id="model-vision-fallback-select">
+          <option value="">不启用</option>
+        </select>
+      </label>
+      <label>代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890"></label>
+      <div class="callout compact">
+        <div class="callout-title">模型兼容包</div>
+        <div class="callout-body">用于同一 Provider 下只有部分模型需要特殊补丁的场景。</div>
+        <div class="compat-pack-grid" id="model-compat-packs"></div>
+      </div>
       <div class="capabilities">
-        <label><input type="checkbox" name="cap-text" checked> text</label>
-        <label><input type="checkbox" name="cap-tools" checked> tools</label>
-        <label><input type="checkbox" name="cap-reasoning"> reasoning</label>
-        <label><input type="checkbox" name="cap-images"> images</label>
+        <label><input type="checkbox" name="cap-text" checked> 文本</label>
+        <label><input type="checkbox" name="cap-tools" checked> 工具调用</label>
+        <label><input type="checkbox" name="cap-reasoning"> 思考</label>
+        <label><input type="checkbox" name="cap-images"> 图片</label>
+        <label><input type="checkbox" name="cap-stream" checked> 流式</label>
+        <label><input type="checkbox" name="cap-multimodal"> 多模态</label>
+      </div>
+      <div class="callout" style="margin-top:8px;">
+        <div class="callout-title">模型测试</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:6px;">
+          <button class="btn" type="button" id="btn-model-test">测试此模型</button>
+          <button class="btn" type="button" id="btn-model-probe">能力校准</button>
+          <button class="btn primary" type="button" id="btn-model-apply-capabilities" style="display:none;">应用建议能力</button>
+        </div>
+        <pre class="inline-console" id="model-test-output" style="min-height:160px; max-height:min(46vh, 460px);">尚未测试</pre>
       </div>
       <div class="actions">
         <button class="btn" type="button" data-close>取消</button>
@@ -255,10 +781,16 @@
 </div>
 
 <div class="dialog-overlay" id="import-dialog-wrap">
-  <div class="dialog">
+  <div class="dialog dialog-xwide">
     <h2>从 cc-switch 导入</h2>
-    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">将合并到当前 Switchyard 配置，已存在的同名 provider/model 会被跳过；不会写入任何 inline API Key。</div>
-    <div class="scroll" id="import-preview" style="background:#f1f1f4; border-radius:6px; padding:10px; font-family:var(--code); font-size:12px; max-height:340px;"></div>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">将合并到当前 Switchyard 配置，已存在的同名 provider/model 会被跳过；同机自用时会把 cc-switch 里的密钥一并带入本机配置。</div>
+    <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+      <button class="btn" type="button" id="btn-import-select-all">全选</button>
+      <button class="btn" type="button" id="btn-import-select-none" style="margin-left:6px;">全不选</button>
+      <button class="btn" type="button" id="btn-import-toggle-keys">显示明文密钥</button>
+    </div>
+    <div class="import-preview" id="import-preview"></div>
+    <pre class="log-pane import-run-output" id="import-run-output">等待导入</pre>
     <div class="actions">
       <button class="btn" type="button" data-close>取消</button>
       <button class="btn primary" id="btn-import-apply">合并到配置</button>
@@ -267,10 +799,10 @@
 </div>
 
 <div class="dialog-overlay" id="profile-dialog-wrap">
-  <div class="dialog" style="max-width:700px;">
+  <div class="dialog dialog-wide">
     <h2 id="profile-dialog-title">预览配置文件</h2>
     <div class="tiny muted" id="profile-dialog-meta" style="margin-bottom:8px;"></div>
-    <pre class="log-pane" id="profile-dialog-body" style="background:#0f1014; max-height:460px; overflow:auto;"></pre>
+    <pre class="log-pane large" id="profile-dialog-body" style="background:#0f1014;"></pre>
     <div class="actions">
       <button class="btn" type="button" data-close>关闭</button>
     </div>
@@ -278,6 +810,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="./renderer.js"></script>
+<script type="module" src="./renderer.js"></script>
 </body>
 </html>
