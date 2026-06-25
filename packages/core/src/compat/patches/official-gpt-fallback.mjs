@@ -22,6 +22,16 @@ function targeted({ provider, model }) {
 
 export const officialGPTFallbackPatch = {
   id: "official-gpt-fallback",
+  label: "官方 GPT 参数兜底",
+  description: "官方 GPT / Codex 上游对非 OpenAI 参数和空 max_tokens 更严格。",
+  trigger: "provider/model 命中 Codex、OpenAI 或 GPT，或手动启用 official-gpt 规则。",
+  changes: [
+    "补齐正数 max_tokens",
+    "移除 top_k、min_p、presence_penalty、repetition_penalty",
+    "把异常 temperature 收敛到 1"
+  ],
+  risk: "会丢弃部分非 OpenAI 采样参数；只用于 GPT 兼容路径。",
+  tests: ["official-gpt-fallback · sets default max_tokens when absent"],
   match(ctx) { return targeted(ctx); },
   outbound(body) {
     if (!body) return body;

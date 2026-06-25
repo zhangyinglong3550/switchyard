@@ -42,6 +42,16 @@ function sanitizeSchema(schema) {
 
 export const kimiToolSchemaPatch = {
   id: "kimi-tool-schema",
+  label: "Kimi 工具 Schema 清理",
+  description: "Moonshot/Kimi 对工具 JSON Schema 更严格，会拒绝部分通用 schema 字段。",
+  trigger: "provider/model 名称命中 Kimi 或 Moonshot，或手动启用 kimi 兼容规则。",
+  changes: [
+    "移除 $schema、$id、examples 和 null default",
+    "展开单分支 anyOf",
+    "把对象型 additionalProperties 收敛为 false"
+  ],
+  risk: "可能降低工具 schema 表达力；只在发送给目标供应商前改写。",
+  tests: ["kimi-tool-schema · strips $schema, examples, anyOf wrappers from Kimi function parameters"],
   match(ctx) { return targeted(ctx); },
   outbound(body) {
     if (!body || !Array.isArray(body.tools)) return body;

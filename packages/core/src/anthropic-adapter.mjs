@@ -1,6 +1,7 @@
 // Adapter between Anthropic Messages API and OpenAI Chat Completions.
 import crypto from "node:crypto";
 import { contentToText, safeJsonParse } from "./utils.mjs";
+import { SWITCHYARD_THINKING_KEY, cloneAnthropicThinkingBlocks, reasoningBlocksFromMessage } from "./reasoning.mjs";
 
 function contentToChatContent(content) {
   if (!Array.isArray(content)) return contentToText(content);
@@ -37,9 +38,10 @@ export function anthropicToChat(body, upstreamModel) {
     if (Array.isArray(msg.content)) {
       const toolUses = msg.content.filter((b) => b && b.type === "tool_use");
       const toolResults = msg.content.filter((b) => b && b.type === "tool_result");
+      const thinkingBlocks = cloneAnthropicThinkingBlocks(msg.content);
       const textContent = contentToText(msg.content.filter((b) => !b || (b.type !== "tool_use" && b.type !== "tool_result")));
       if (role === "assistant" && toolUses.length) {
-        messages.push({
+        const message = {
           role: "assistant",
           content: textContent,
           tool_calls: toolUses.map((u) => ({
@@ -47,7 +49,9 @@ export function anthropicToChat(body, upstreamModel) {
             type: "function",
             function: { name: u.name, arguments: JSON.stringify(u.input || {}) }
           }))
-        });
+        };
+        if (thinkingBlocks.length) message[SWITCHYARD_THINKING_KEY] = thinkingBlocks;
+        messages.push(message);
         continue;
       }
       if (toolResults.length) {
@@ -59,6 +63,14 @@ export function anthropicToChat(body, upstreamModel) {
           });
         }
         if (textContent) messages.push({ role, content: textContent });
+        continue;
+      }
+      if (role === "assistant" && thinkingBlocks.length) {
+        messages.push({
+          role,
+          content: contentToChatContent(msg.content),
+          [SWITCHYARD_THINKING_KEY]: thinkingBlocks
+        });
         continue;
       }
     }
@@ -93,6 +105,7 @@ export function chatToAnthropic(payload, requestedModel) {
   const choice = payload.choices?.[0] || {};
   const message = choice.message || {};
   const content = [];
+  content.push(...reasoningBlocksFromMessage(message));
   const text = contentToText(message.content || "");
   if (text) content.push({ type: "text", text });
   if (Array.isArray(message.tool_calls)) {
@@ -193,8 +206,51 @@ export function streamMessageAsAnthropic(message, res) {
       writeEvent(res, "content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
       if (block.text) writeEvent(res, "content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } });
       writeEvent(res, "content_block_stop", { type: "content_block_stop", index });
+    } else if (block?.type === "thinking") {
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { type: "thinking", thinking: "", signature: "" }
+      });
+      if (block.thinking || block.text) {
+        writeEvent(res, "content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "thinking_delta", thinking: block.thinking || block.text || "" }
+        });
+      }
+      if (block.signature) {
+        writeEvent(res, "content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "signature_delta", signature: block.signature }
+        });
+      }
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index });
+    } else if (block?.type === "redacted_thinking") {
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: { ...block }
+      });
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index });
     } else if (block?.type === "tool_use") {
-      writeEvent(res, "content_block_start", { type: "content_block_start", index, content_block: block });
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: {
+          type: "tool_use",
+          id: block.id || `toolu_${crypto.randomUUID()}`,
+          name: block.name,
+          input: {}
+        }
+      });
+      const partialJson = JSON.stringify(block.input && typeof block.input === "object" ? block.input : {});
+      writeEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: partialJson }
+      });
       writeEvent(res, "content_block_stop", { type: "content_block_stop", index });
     }
   });

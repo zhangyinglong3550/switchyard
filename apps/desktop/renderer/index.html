@@ -176,7 +176,7 @@
           <div class="hd"><h3>模型能力校准</h3><span class="sub" id="diagnostics-model-summary">-</span></div>
           <div class="table-scroll tall">
             <table class="data compact">
-              <thead><tr><th>模型</th><th>供应商</th><th>能力</th><th>客户端可见</th><th></th></tr></thead>
+              <thead><tr><th>模型</th><th>供应商</th><th>能力</th><th>兼容规则</th><th>客户端可见</th><th></th></tr></thead>
               <tbody id="diagnostics-models-tbody"></tbody>
             </table>
           </div>
@@ -394,7 +394,7 @@
             <div class="bd structured-log-list" id="structured-logs"></div>
           </div>
           <div class="card">
-            <div class="hd"><h3 id="trace-title">历史时间线</h3><span class="sub" id="trace-subtitle">选择左侧对象</span><button class="btn" id="btn-trace-replay" style="display:none;">草稿回放到测试台</button></div>
+            <div class="hd"><h3 id="trace-title">历史时间线</h3><span class="sub" id="trace-subtitle">选择左侧对象</span><button class="btn" id="btn-trace-issue-bundle" style="display:none;">复制问题包</button><button class="btn" id="btn-trace-issue-export" style="display:none;">导出问题包</button><button class="btn" id="btn-trace-replay" style="display:none;">草稿回放到测试台</button></div>
             <div class="bd"><div class="trace-timeline" id="trace-timeline"><div class="empty-state">选择一个会话或请求查看交互过程</div></div></div>
           </div>
         </div>
@@ -683,9 +683,21 @@
         </select>
       </label>
       <div class="callout compact">
+        <div class="callout-title">可见 Agent</div>
+        <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，该供应商下的模型只会出现在这些 Agent 的模型列表里。</div>
+        <div class="capabilities client-scope-grid" id="provider-visible-clients"></div>
+      </div>
+      <div class="callout compact">
         <div class="callout-title">Provider 兼容包</div>
         <div class="callout-body">兼容包会强制启用一组 provider/model 定向补丁；可在模型里继续单独补充。</div>
         <div class="compat-pack-grid" id="provider-compat-packs"></div>
+      </div>
+      <div class="callout compact">
+        <div class="callout-title">推荐兼容规则</div>
+        <div class="callout-body">根据 provider id、Base URL、协议和已知厂商适配经验给出建议；点击应用后才会写入上面的兼容包选择。</div>
+        <div class="compat-recommendation-list" id="provider-compat-recommendations">
+          <div class="tiny muted">输入供应商信息后显示推荐</div>
+        </div>
       </div>
       <div class="row" id="provider-key-fields">
         <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
@@ -697,6 +709,7 @@
         </label>
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
+      <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
       <div class="callout">
         <div class="callout-title">连接验证</div>
         <div class="callout-body">先点“测试连接”确认地址和密钥有效，再点“查询模型”把上游模型拉下来，勾选后直接生成本地模型。</div>
@@ -751,9 +764,21 @@
       </label>
       <label>代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890"></label>
       <div class="callout compact">
+        <div class="callout-title">可见 Agent</div>
+        <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，会在供应商可见范围基础上进一步收窄。</div>
+        <div class="capabilities client-scope-grid" id="model-visible-clients"></div>
+      </div>
+      <div class="callout compact">
         <div class="callout-title">模型兼容包</div>
         <div class="callout-body">用于同一 Provider 下只有部分模型需要特殊补丁的场景。</div>
         <div class="compat-pack-grid" id="model-compat-packs"></div>
+      </div>
+      <div class="callout compact">
+        <div class="callout-title">推荐兼容规则</div>
+        <div class="callout-body">根据供应商、上游模型名和协议给出模型级建议；点击应用后才会写入上面的兼容包选择。</div>
+        <div class="compat-recommendation-list" id="model-compat-recommendations">
+          <div class="tiny muted">选择供应商并填写模型后显示推荐</div>
+        </div>
       </div>
       <div class="capabilities">
         <label><input type="checkbox" name="cap-text" checked> 文本</label>
@@ -805,6 +830,21 @@
     <pre class="log-pane large" id="profile-dialog-body" style="background:#0f1014;"></pre>
     <div class="actions">
       <button class="btn" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="backup-dialog-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="backup-dialog-title">恢复配置备份</h2>
+    <div class="tiny muted" id="backup-dialog-meta" style="margin-bottom:8px;"></div>
+    <label>备份版本
+      <select class="field" id="backup-dialog-select"></select>
+    </label>
+    <pre class="log-pane" id="backup-dialog-preview" style="background:#0f1014; min-height:120px;"></pre>
+    <div class="actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" id="btn-backup-restore">恢复选中备份</button>
     </div>
   </div>
 </div>

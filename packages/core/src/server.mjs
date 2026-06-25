@@ -12,7 +12,7 @@ import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { responsesToChat, chatToResponse, streamChatAsResponses } from "./openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
-import { registerBuiltinPatches, applyStreamLine } from "./compat/index.mjs";
+import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
 registerBuiltinPatches();
 
 const CLIENT_PROTOCOL = {
@@ -24,6 +24,7 @@ const CLIENT_PROTOCOL = {
 const CLIENT_PREFIXES = [
   { prefix: "/codex", clientId: "codex" },
   { prefix: "/claude-code", clientId: "claude-code" },
+  { prefix: "/claude-app", clientId: "claude-app" },
   { prefix: "/hermes", clientId: "hermes" },
   { prefix: "/openai", clientId: "generic-openai" },
   { prefix: "/anthropic", clientId: "generic-openai" }
@@ -93,7 +94,7 @@ export function createServer({ onLog } = {}) {
       }
       if (req.method === "GET" && (path === "/v1/models" || path === "/v1/models/" || path === "/models" || path === "/models/")) {
         const models = publicModelsForClient(config, clientId);
-        if (clientId === "claude-code") {
+        if (clientId === "claude-code" || clientId === "claude-app") {
           json(res, 200, {
             data: models,
             has_more: false,
@@ -102,8 +103,16 @@ export function createServer({ onLog } = {}) {
           });
           return;
         }
+        if (clientId === "codex") {
+          const catalogModels = codexCatalogModels(config);
+          json(res, 200, {
+            object: "list",
+            data: catalogModels.map(codexPublicModelFromCatalog),
+            models: catalogModels
+          });
+          return;
+        }
         const payload = { object: "list", data: models };
-        if (clientId === "codex") payload.models = codexCatalogModels(config);
         json(res, 200, payload);
         return;
       }
@@ -147,6 +156,17 @@ function codexCatalogModels(config) {
     providerName: providerById.get(model.providerId)?.name || model.providerId
   }));
   return buildCodexModelCatalog({ models, defaultModel: config.defaultModel }).models;
+}
+
+function codexPublicModelFromCatalog(model) {
+  return {
+    ...model,
+    id: model.slug,
+    object: "model",
+    created: 0,
+    owned_by: model["x-switchyard-provider"] || "switchyard",
+    display_name: model.display_name || model.slug
+  };
 }
 
 function errorMessage(err) {
@@ -270,11 +290,20 @@ function summarizeMessages(messages) {
 
 function summarizeRequest(chatBody, route, protocol) {
   const messages = summarizeMessages(chatBody.messages || []);
+  const upstreamProtocol = route?.provider?.apiFormat || "openai_chat";
   return {
     protocol,
     modelId: route?.model?.id || "",
     upstreamModel: route?.upstreamModel || "",
     providerId: route?.provider?.id || "",
+    conversionChain: {
+      steps: protocol === upstreamProtocol ? [protocol] : [protocol, upstreamProtocol]
+    },
+    compatRules: {
+      outbound: activePatchDescriptors({ provider: route?.provider, model: route?.model, direction: "outbound" }),
+      inbound: activePatchDescriptors({ provider: route?.provider, model: route?.model, direction: "inbound" }),
+      stream: activePatchDescriptors({ provider: route?.provider, model: route?.model, direction: "stream" })
+    },
     params: {
       stream: Boolean(chatBody.stream),
       temperature: chatBody.temperature,
@@ -282,6 +311,7 @@ function summarizeRequest(chatBody, route, protocol) {
       toolChoice: chatBody.tool_choice
     },
     messages,
+    vision: chatBody._switchyardVision || null,
     tools: summarizeTools(chatBody.tools),
     toolCount: Array.isArray(chatBody.tools) ? chatBody.tools.length : 0
   };
@@ -428,6 +458,64 @@ function recordResponseSummary(record, payload, opts = {}) {
   record.responseSummary = summarizeResponse(payload, opts);
 }
 
+function streamEventCount(summary, ...names) {
+  const counts = summary?.dataTypeCounts || summary?.eventCounts || {};
+  return names.reduce((sum, name) => sum + firstNumber(counts[name]), 0);
+}
+
+function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" } = {}) {
+  const textDeltaCount = streamEventCount(summary, "response.output_text.delta");
+  const textDoneCount = streamEventCount(summary, "response.output_text.done", "response.content_part.done");
+  const functionCallDeltaCount = streamEventCount(summary, "response.function_call_arguments.delta");
+  const functionCallDoneCount = streamEventCount(summary, "response.function_call_arguments.done");
+  const toolCalls = [];
+  if (functionCallDeltaCount || functionCallDoneCount) {
+    toolCalls.push({
+      id: "stream",
+      name: "function_call_arguments",
+      argumentsPreview: `${functionCallDeltaCount} delta events, ${functionCallDoneCount} done events`
+    });
+  }
+  return {
+    stream: true,
+    status,
+    text: "",
+    reasoning: "",
+    toolCalls,
+    finishReason: summary?.sawTerminalEvent ? "completed" : "incomplete",
+    usage: normalizeResponseUsage(null),
+    error,
+    streamDiagnostics: summary || null,
+    streamEventSummary: {
+      textDeltaCount,
+      textDoneCount,
+      functionCallDeltaCount,
+      functionCallDoneCount,
+      retryCount: firstNumber(summary?.retryCount),
+      preludeRetryCount: firstNumber(summary?.preludeRetryCount),
+      sawTerminalEvent: Boolean(summary?.sawTerminalEvent),
+      sawMeaningfulEvent: Boolean(summary?.sawMeaningfulEvent)
+    }
+  };
+}
+
+function recordStreamDiagnostics(record, summary, { status = 0, error = "" } = {}) {
+  if (!record || !summary) return;
+  if (!record.requestSummary) record.requestSummary = {};
+  record.requestSummary.streamDiagnostics = summary;
+  record.responseSummary = responseSummaryFromStreamDiagnostics(summary, { status, error: error || record.error || "" });
+}
+
+function recordDispatchCompatibility(record, result) {
+  if (!record || !result) return;
+  if (!record.requestSummary) record.requestSummary = {};
+  if (Array.isArray(result.rectifiers) && result.rectifiers.length) {
+    record.requestSummary.rectifiers = result.rectifiers;
+  }
+  if (result.errorClass) record.requestSummary.errorClass = result.errorClass;
+  if (result.requestOverrides) record.requestSummary.requestOverrides = result.requestOverrides;
+}
+
 function emitTraceStart(emit, record) {
   if (!record || typeof emit !== "function") return;
   emit({
@@ -507,10 +595,10 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
   }
   let chatBody = { ...body, _modelId: route.model.id };
   recordPrompt(requestRecord, chatBody.messages);
-  recordRequestSummary(requestRecord, chatBody, route, "openai_chat");
-  emitTraceStart(emit, requestRecord);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
+  recordRequestSummary(requestRecord, chatBody, route, "openai_chat");
+  emitTraceStart(emit, requestRecord);
   if (body.stream) {
     // For stream we currently only support direct openai_chat passthrough.
     // Non-openai_chat streaming is a V0.3+ item.
@@ -524,6 +612,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
     return pipeStream(result.upstream, res, { provider: route.provider, model: route.model });
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
     recordResponseSummary(requestRecord, result.payload, { status: result.status, error: requestRecord.error });
@@ -558,18 +647,32 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     recordRequestSummary(requestRecord, { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id }, route, "openai_responses");
     emitTraceStart(emit, requestRecord);
     const upstreamBody = { ...body, model: route.upstreamModel, _modelId: route.model.id };
-    const result = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
-    if (result.kind === "stream") {
-      recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
-      return pipeRawStream(result.upstream, res, {
+    if (body.stream) {
+      const dispatchNativeStream = async () => {
+        const next = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+        if (next.kind !== "stream") {
+          if (next.kind === "error") throw new Error(requestPayloadError(next.payload) || `status ${next.status}`);
+          throw new Error("native Responses retry did not return a stream");
+        }
+        return next.upstream;
+      };
+      const upstream = await dispatchNativeStream();
+      recordResponseSummary(requestRecord, null, { stream: true, status: upstream?.status || 0 });
+      return pipeRawStream(upstream, res, {
         protocol: "responses",
         model: body.model,
+        retryUpstream: dispatchNativeStream,
+        onStreamSummary: (summary) => {
+          recordStreamDiagnostics(requestRecord, summary, { status: upstream?.status || 0 });
+        },
         onError: (err) => {
           requestRecord.error = errorMessage(err);
-          recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0, error: requestRecord.error });
+          recordResponseSummary(requestRecord, null, { stream: true, status: upstream?.status || 0, error: requestRecord.error });
         }
       });
     }
+    const result = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+    recordDispatchCompatibility(requestRecord, result);
     if (result.kind === "error") {
       requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
       recordResponseSummary(requestRecord, result.payload, { status: result.status, error: requestRecord.error });
@@ -586,10 +689,10 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
   }
   let chatBody = { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id };
   recordPrompt(requestRecord, chatBody.messages);
-  recordRequestSummary(requestRecord, chatBody, route, "openai_responses");
-  emitTraceStart(emit, requestRecord);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
+  recordRequestSummary(requestRecord, chatBody, route, "openai_responses");
+  emitTraceStart(emit, requestRecord);
   if (body.stream) {
     if (apiFormat === "openai_responses") {
       const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
@@ -598,6 +701,9 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
         return pipeRawStream(result.upstream, res, {
           protocol: "responses",
           model: body.model,
+          onStreamSummary: (summary) => {
+            recordStreamDiagnostics(requestRecord, summary, { status: result.upstream?.status || 0 });
+          },
           onError: (err) => {
             requestRecord.error = errorMessage(err);
             recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0, error: requestRecord.error });
@@ -607,6 +713,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     }
     if (apiFormat !== "openai_chat") {
       const fallback = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      recordDispatchCompatibility(requestRecord, fallback);
       if (fallback.kind === "error") {
         requestRecord.error = requestPayloadError(fallback.payload) || `status ${fallback.status}`;
         recordResponseSummary(requestRecord, fallback.payload, { status: fallback.status, error: requestRecord.error });
@@ -632,6 +739,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     return streamChatAsResponses(result.upstream, res, body.model);
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
     recordResponseSummary(requestRecord, result.payload, { status: result.status, error: requestRecord.error });
@@ -680,23 +788,210 @@ function writeSse(res, event, data) {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function pipeRawStream(upstream, res, { protocol = "", model = "", onError = null } = {}) {
+function shouldRetryStreamError(err) {
+  const code = err?.cause?.code || err?.code || "";
+  return ["HPE_INVALID_EOF_STATE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "ECONNRESET", "ECONNABORTED", "EPIPE", "ETIMEDOUT"].includes(code) ||
+    /HPE_INVALID_EOF_STATE|UND_ERR_CONNECT_TIMEOUT|fetch failed|terminated|socket|disconnect|ECONNRESET|ECONNABORTED|EPIPE|ETIMEDOUT|connect timeout/i.test(errorMessage(err));
+}
+
+function writeRawStreamHeaders(res, upstream) {
+  if (res.headersSent) return;
   res.writeHead(upstream.status, {
     "Content-Type": upstream.headers.get("content-type") || "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive"
   });
-  if (!upstream.body) { res.end(); return; }
+}
+
+function chunkHasBytes(chunk) {
+  return Boolean((typeof chunk === "string" && chunk.length) || chunk?.byteLength || chunk?.length);
+}
+
+function streamTerminalSeen(text) {
+  return /(?:^|\n)event:\s*response\.(?:completed|failed|cancelled)\s*(?:\n|$)/.test(text) ||
+    /(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(text);
+}
+
+function streamMeaningfulResponsesEventSeen(text) {
+  return /(?:^|\n)event:\s*response\.(?:output_text|content_part|output_item|function_call|reasoning|reasoning_summary)[^\n]*\s*(?:\n|$)/.test(text) ||
+    /"type"\s*:\s*"response\.(?:output_text|content_part|output_item|function_call|reasoning|reasoning_summary)[^"]*"/.test(text);
+}
+
+function createStreamDiagnostics(protocol) {
+  if (protocol !== "responses") return null;
+  return {
+    protocol,
+    chunkCount: 0,
+    byteCount: 0,
+    eventCounts: {},
+    dataTypeCounts: {},
+    doneCount: 0,
+    retryCount: 0,
+    preludeRetryCount: 0,
+    sawTerminalEvent: false,
+    sawMeaningfulEvent: false,
+    _lineBuffer: "",
+    _eventName: "message"
+  };
+}
+
+function incrementCounter(target, key) {
+  if (!target || !key) return;
+  target[key] = (target[key] || 0) + 1;
+}
+
+function parseJsonType(data) {
+  try {
+    const parsed = JSON.parse(data);
+    return typeof parsed?.type === "string" ? parsed.type : "json_without_type";
+  } catch {
+    return "non_json";
+  }
+}
+
+function observeResponsesStreamText(diag, text) {
+  if (!diag || !text) return;
+  diag._lineBuffer += text;
+  const lines = diag._lineBuffer.split(/\r?\n/);
+  diag._lineBuffer = lines.pop() || "";
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!line) {
+      diag._eventName = "message";
+      continue;
+    }
+    if (line.startsWith(":")) {
+      incrementCounter(diag.eventCounts, "comment");
+      continue;
+    }
+    if (line.startsWith("event:")) {
+      diag._eventName = line.slice(6).trim() || "message";
+      incrementCounter(diag.eventCounts, diag._eventName);
+      continue;
+    }
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (data === "[DONE]") {
+      diag.doneCount += 1;
+      incrementCounter(diag.dataTypeCounts, "[DONE]");
+      continue;
+    }
+    incrementCounter(diag.dataTypeCounts, parseJsonType(data));
+  }
+}
+
+function publicStreamDiagnostics(diag, extra = {}) {
+  if (!diag) return null;
+  return {
+    protocol: diag.protocol,
+    chunkCount: diag.chunkCount,
+    byteCount: diag.byteCount,
+    eventCounts: diag.eventCounts,
+    dataTypeCounts: diag.dataTypeCounts,
+    doneCount: diag.doneCount,
+    retryCount: diag.retryCount,
+    preludeRetryCount: diag.preludeRetryCount,
+    sawTerminalEvent: Boolean(extra.sawTerminalEvent ?? diag.sawTerminalEvent),
+    sawMeaningfulEvent: Boolean(extra.sawMeaningfulEvent ?? diag.sawMeaningfulEvent)
+  };
+}
+
+async function pipeRawStream(upstream, res, { protocol = "", model = "", onError = null, retryUpstream = null, onStreamSummary = null } = {}) {
+  writeRawStreamHeaders(res, upstream);
   const heartbeat = setInterval(() => {
     if (!res.destroyed && !res.writableEnded) res.write(`: switchyard keepalive ${Date.now()}\n\n`);
   }, 15_000);
   heartbeat.unref?.();
+  let wroteUpstreamChunk = false;
+  let sawTerminalEvent = false;
+  let sawMeaningfulEvent = false;
+  let scanTail = "";
+  const decoder = new TextDecoder();
+  const streamDiagnostics = createStreamDiagnostics(protocol);
+  let retried = false;
+  let pendingPreludeChunks = [];
+  let pendingPreludeBytes = 0;
+  const bufferResponsesPrelude = protocol === "responses";
+  const preludeBufferLimit = 128 * 1024;
+  const writeChunk = (chunk) => {
+    if (bufferResponsesPrelude && !sawMeaningfulEvent && !sawTerminalEvent && pendingPreludeBytes < preludeBufferLimit) {
+      pendingPreludeChunks.push(chunk);
+      pendingPreludeBytes += chunk?.byteLength || chunk?.length || 0;
+      return;
+    }
+    if (pendingPreludeChunks.length) {
+      for (const pending of pendingPreludeChunks) res.write(pending);
+      pendingPreludeChunks = [];
+      pendingPreludeBytes = 0;
+    }
+    res.write(chunk);
+  };
+  const resetBufferedPrelude = () => {
+    pendingPreludeChunks = [];
+    pendingPreludeBytes = 0;
+  };
   try {
-    for await (const chunk of upstream.body) res.write(chunk);
+    while (true) {
+      try {
+        if (!upstream.body) return;
+        for await (const chunk of upstream.body) {
+          if (chunkHasBytes(chunk)) wroteUpstreamChunk = true;
+          if (streamDiagnostics) {
+            streamDiagnostics.chunkCount += 1;
+            streamDiagnostics.byteCount += chunk?.byteLength || chunk?.length || 0;
+          }
+          const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+          if (text) {
+            observeResponsesStreamText(streamDiagnostics, text);
+            const scan = `${scanTail}${text}`;
+            if (streamTerminalSeen(scan)) sawTerminalEvent = true;
+            if (streamMeaningfulResponsesEventSeen(scan)) sawMeaningfulEvent = true;
+            if (streamDiagnostics) {
+              streamDiagnostics.sawTerminalEvent = sawTerminalEvent;
+              streamDiagnostics.sawMeaningfulEvent = sawMeaningfulEvent;
+            }
+            scanTail = scan.slice(-256);
+          }
+          writeChunk(chunk);
+        }
+        if (protocol === "responses" && wroteUpstreamChunk && !sawTerminalEvent) {
+          throw new Error("Responses stream disconnected before completion");
+        }
+        if (pendingPreludeChunks.length) {
+          for (const pending of pendingPreludeChunks) res.write(pending);
+          resetBufferedPrelude();
+        }
+        return;
+      } catch (err) {
+        if (sawTerminalEvent && shouldRetryStreamError(err)) return;
+        if (!sawMeaningfulEvent && !retried && typeof retryUpstream === "function" && shouldRetryStreamError(err)) {
+          retried = true;
+          if (streamDiagnostics) {
+            streamDiagnostics.retryCount += 1;
+            streamDiagnostics.preludeRetryCount += 1;
+          }
+          sawTerminalEvent = false;
+          wroteUpstreamChunk = false;
+          scanTail = "";
+          resetBufferedPrelude();
+          upstream = await retryUpstream(err);
+          writeRawStreamHeaders(res, upstream);
+          continue;
+        }
+        try { if (typeof onError === "function") onError(err); } catch {}
+        writeStreamError(res, err, { protocol, model });
+        return;
+      }
+    }
   } catch (err) {
     try { if (typeof onError === "function") onError(err); } catch {}
     writeStreamError(res, err, { protocol, model });
   } finally {
+    try {
+      if (typeof onStreamSummary === "function") {
+        onStreamSummary(publicStreamDiagnostics(streamDiagnostics, { sawTerminalEvent, sawMeaningfulEvent }));
+      }
+    } catch {}
     clearInterval(heartbeat);
     res.end();
   }
@@ -705,6 +1000,7 @@ async function pipeRawStream(upstream, res, { protocol = "", model = "", onError
 function writeStreamError(res, err, { protocol = "", model = "" } = {}) {
   if (res.destroyed || res.writableEnded) return;
   const message = errorMessage(err);
+  res.write("\n\n");
   writeSse(res, "error", {
     type: "error",
     error: {
@@ -746,15 +1042,16 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
   }
   let chatBody = { ...anthropicToChat(body, route.upstreamModel), _modelId: route.model.id };
   recordPrompt(requestRecord, chatBody.messages);
-  recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages");
-  emitTraceStart(emit, requestRecord);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
+  recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages");
+  emitTraceStart(emit, requestRecord);
   if (body.stream) {
     if ((route.provider.apiFormat || "openai_chat") !== "openai_chat") {
       let result = null;
       try {
-        result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      recordDispatchCompatibility(requestRecord, result);
       } catch (err) {
         requestRecord.error = errorMessage(err);
         recordResponseSummary(requestRecord, null, { stream: true, status: 0, error: requestRecord.error });
@@ -776,6 +1073,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
     return streamChatAsAnthropic(result.upstream, res, body.model);
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
     recordResponseSummary(requestRecord, result.payload, { status: result.status, error: requestRecord.error });

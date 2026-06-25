@@ -1,0 +1,20 @@
+{
+  "id": "siliconflow-enable-thinking",
+  "title": "SiliconFlow provider maps Codex reasoning to enable_thinking",
+  "operation": "compat_outbound",
+  "ctx": {
+    "provider": { "id": "siliconflow", "baseUrl": "https://api.siliconflow.cn/v1" },
+    "model": { "id": "siliconflow/Pro/MiniMaxAI/MiniMax-M2.7", "upstreamModel": "Pro/MiniMaxAI/MiniMax-M2.7" }
+  },
+  "input": {
+    "messages": [],
+    "reasoning": { "effort": "medium" }
+  },
+  "expect": {
+    "output": {
+      "enable_thinking": true,
+      "reasoning": { "$exists": false },
+      "reasoning_split": { "$exists": false }
+    }
+  }
+}

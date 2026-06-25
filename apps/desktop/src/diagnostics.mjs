@@ -23,6 +23,18 @@ const CATEGORY_HINTS = {
     title: "请求字段不被上游接受",
     hint: "这是兼容补丁问题，优先确认该补丁是否已经按 provider/model 定向生效。"
   },
+  protocol_state: {
+    title: "协议状态未完整回传",
+    hint: "检查 thinking/reasoning、tool_use、function_call 等状态块是否在下一轮历史中原样回传。"
+  },
+  tool_result_order: {
+    title: "工具结果顺序不兼容",
+    hint: "并发工具调用后，所有 tool_result 通常需要紧跟同一条 user message 返回。"
+  },
+  role_compat: {
+    title: "角色字段不兼容",
+    hint: "部分上游不接受 developer 等扩展角色，建议转换为 system 或启用角色兼容规则。"
+  },
   capability: {
     title: "模型能力声明不匹配",
     hint: "运行能力校准，确认该模型是否支持图片、工具调用、流式或推理字段。"
@@ -82,6 +94,12 @@ export function classifyGatewayError(error) {
     category = "network";
   } else if (/(model .*not found|was not found in this provider|unknown model|model_not_found|similar models)/i.test(text)) {
     category = "model_not_found";
+  } else if (/(content\[\]\.thinking|thinking mode must be passed back|reasoning.*must be passed back|encrypted_content|signature.*thinking)/i.test(text)) {
+    category = "protocol_state";
+  } else if (/(tool use concurrency|tool_use ids were found without tool_result|tool_result blocks immediately after|parallel tool)/i.test(text)) {
+    category = "tool_result_order";
+  } else if (/(unsupported role|invalid role|role.*developer|developer.*not supported)/i.test(text)) {
+    category = "role_compat";
   } else if (/(extra inputs are not permitted|extra_forbidden|invalid_request_error|schema|unknown field|unsupported field|field:|validation error)/i.test(text)) {
     category = "schema";
   } else if (/(does not support|not support|unsupported.*(image|vision|tool|function|stream|reasoning)|image input|tool use|multimodal)/i.test(text)) {
@@ -116,6 +134,92 @@ export function suggestCapabilitiesFromProbeResults(model = {}, results = {}) {
     upstreamModel: model.upstreamModel || model.id || "",
     capabilities,
     probes: { ...results }
+  };
+}
+
+function probeFailureText(result) {
+  if (!result) return "";
+  return asText(result.error || result.bodyPreview || result.preview || result.classification?.message || "");
+}
+
+function probeCategory(result) {
+  if (!result) return "unknown";
+  if (result.classification?.category) return result.classification.category;
+  return classifyGatewayError(probeFailureText(result)).category;
+}
+
+function anyProbeCategory(results, category) {
+  return Object.values(results || {}).some((result) => result && result.ok === false && probeCategory(result) === category);
+}
+
+function recommendation(ruleId, title, reason, action = "review") {
+  return { ruleId, title, reason, action };
+}
+
+export function buildCompatibilityProfile({ provider = {}, model = {}, results = {}, activeRules = [] } = {}) {
+  const supportsDeveloperRole = results["developer-role"] ? okProbe(results["developer-role"]) : null;
+  const schemaStrictness = anyProbeCategory(results, "schema") ? "high" : "unknown";
+  const flags = {
+    supportsText: results.text ? okProbe(results.text) : null,
+    supportsStream: results.stream ? okProbe(results.stream) : null,
+    supportsTools: results.tools ? okProbe(results.tools) : null,
+    supportsVision: results.vision ? okProbe(results.vision) : null,
+    supportsReasoning: results.reasoning ? okProbe(results.reasoning) : null,
+    supportsDeveloperRole,
+    requiresThinkingRoundtrip: anyProbeCategory(results, "protocol_state"),
+    requiresToolResultsTogether: anyProbeCategory(results, "tool_result_order"),
+    schemaStrictness,
+    streaming: results.stream ? (okProbe(results.stream) ? "sse-standard" : "failed") : "unknown"
+  };
+  const recommendations = [];
+  if (flags.requiresThinkingRoundtrip) {
+    recommendations.push(recommendation(
+      "anthropic-thinking-roundtrip",
+      "保留 thinking / signature 回传",
+      "上游要求下一轮历史携带上一轮 thinking 状态块。",
+      "adapter"
+    ));
+  }
+  if (flags.requiresToolResultsTogether) {
+    recommendations.push(recommendation(
+      "batch-parallel-tool-results",
+      "合并并发工具结果",
+      "上游要求并发 tool_use 的 tool_result 紧跟在同一条 user message。",
+      "adapter"
+    ));
+  }
+  if (supportsDeveloperRole === false) {
+    recommendations.push(recommendation(
+      "developer-to-system",
+      "将 developer 角色转为 system",
+      "上游不接受 developer 扩展角色。",
+      "adapter"
+    ));
+  }
+  if (schemaStrictness === "high") {
+    recommendations.push(recommendation(
+      "sanitize-tool-schema",
+      "清理工具 JSON Schema",
+      "上游拒绝部分通用 JSON Schema 字段。",
+      "compat-rule"
+    ));
+  }
+  if (flags.supportsStream === false) {
+    recommendations.push(recommendation(
+      "stream-fallback",
+      "使用非流式兜底或更强 keepalive",
+      "上游流式返回不稳定或格式不标准。",
+      "runtime-policy"
+    ));
+  }
+  return {
+    providerId: provider.id || model.providerId || "",
+    modelId: model.id || model.modelId || "",
+    upstreamModel: model.upstreamModel || model.id || "",
+    protocol: provider.apiFormat || "openai_chat",
+    flags,
+    recommendations,
+    activeRules: Array.isArray(activeRules) ? activeRules : []
   };
 }
 

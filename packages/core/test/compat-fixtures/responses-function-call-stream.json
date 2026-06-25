@@ -1,0 +1,34 @@
+{
+  "id": "responses-function-call-stream",
+  "title": "Responses stream function_call deltas survive completed output empty",
+  "operation": "responses_stream_to_chat",
+  "upstreamModel": "gpt-5.5",
+  "sse": [
+    "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"call_1\",\"name\":\"Skill\"},\"output_index\":0}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"skill\\\":\\\"lark-minutes\\\"}\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"skill\\\":\\\"lark-minutes\\\"}\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+    "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"arguments\":\"{\\\"skill\\\":\\\"lark-minutes\\\"}\",\"call_id\":\"call_1\",\"name\":\"Skill\"},\"output_index\":0}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+    "data: [DONE]\n\n"
+  ],
+  "expect": {
+    "output": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "message": {
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "function": {
+                  "name": "Skill",
+                  "arguments": "{\"skill\":\"lark-minutes\"}"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

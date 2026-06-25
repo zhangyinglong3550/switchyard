@@ -1,4 +1,10 @@
 import { filterDiscoveryModels } from "./discovery-filter.mjs";
+import {
+  CLIENT_SCOPE_OPTIONS,
+  clientScopeLabel,
+  modelsForClient as visibleModelsForClient,
+  normalizeClientScope
+} from "./client-visibility-utils.mjs";
 import { modelIdConflict } from "./model-form-utils.mjs";
 import { normalizeDiscoveredModelForProvider, selectedImportResult as buildSelectedImportResult } from "./import-selection-utils.mjs";
 import { buildTestRequest, parseTestMessages } from "../src/test-console.mjs";
@@ -20,6 +26,9 @@ const state = {
   plugins: { sources: [], marketplaces: [], installed: [], available: [] },
   coreFiles: { items: [], current: null },
   compatPacks: [],
+  compatActive: { providers: {}, models: {} },
+  providerCompatRecommendations: [],
+  modelCompatRecommendations: [],
   providerHealth: {},
   diagnostics: null,
   usageRequests: [],
@@ -36,6 +45,9 @@ const toast = (msg) => {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.remove("show"), 2000);
 };
+
+let providerCompatRecommendationRun = 0;
+let modelCompatRecommendationRun = 0;
 
 const PROTOCOL_LABEL = {
   openai_chat: "OpenAI Chat",
@@ -55,7 +67,22 @@ const CAPABILITY_LABEL = {
   reasoning: "思考",
   images: "图片",
   stream: "流式",
-  multimodal: "多模态"
+  multimodal: "多模态",
+  "developer-role": "Developer 角色",
+  "schema-strictness": "工具 Schema 严格度"
+};
+
+const COMPAT_FLAG_LABEL = {
+  supportsText: "文本",
+  supportsStream: "流式",
+  supportsTools: "工具调用",
+  supportsVision: "图片",
+  supportsReasoning: "思考",
+  supportsDeveloperRole: "Developer 角色",
+  requiresThinkingRoundtrip: "需要 thinking 回传",
+  requiresToolResultsTogether: "需要合并工具结果",
+  schemaStrictness: "Schema 严格度",
+  streaming: "流式状态"
 };
 
 const AUTH_MODE_LABEL = {
@@ -66,6 +93,38 @@ const AUTH_MODE_LABEL = {
 };
 
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function renderClientScopeOptions(containerId, selected) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  const normalized = normalizeClientScope(selected);
+  const all = normalized.includes("*");
+  wrap.innerHTML = [
+    `<label><input type="checkbox" value="*" ${all ? "checked" : ""}> 全部</label>`,
+    ...CLIENT_SCOPE_OPTIONS.map(([id, label]) => `<label><input type="checkbox" value="${escapeHtml(id)}" ${!all && normalized.includes(id) ? "checked" : ""}> ${escapeHtml(label)}</label>`)
+  ].join("");
+  wrap.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.value === "*" && input.checked) {
+        wrap.querySelectorAll('input[type="checkbox"]').forEach((item) => { if (item.value !== "*") item.checked = false; });
+      } else if (input.value !== "*" && input.checked) {
+        const allInput = wrap.querySelector('input[value="*"]');
+        if (allInput) allInput.checked = false;
+      }
+      const checkedSpecific = Array.from(wrap.querySelectorAll('input[type="checkbox"]:checked')).filter((item) => item.value !== "*");
+      const allInput = wrap.querySelector('input[value="*"]');
+      if (!checkedSpecific.length && allInput) allInput.checked = true;
+    });
+  });
+}
+
+function collectClientScopeOptions(containerId) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return ["*"];
+  const checked = Array.from(wrap.querySelectorAll('input[type="checkbox"]:checked')).map((input) => input.value);
+  if (!checked.length || checked.includes("*")) return ["*"];
+  return checked;
+}
 
 function defaultUsageRange() {
   const until = new Date();
@@ -117,12 +176,13 @@ document.querySelectorAll(".nav a").forEach((a) => {
 });
 
 async function refreshAll() {
-  const [config, status, configPath, presets, compatPacks, providerHealth] = await Promise.all([
+  const [config, status, configPath, presets, compatPacks, compatActive, providerHealth] = await Promise.all([
     invoke("config:read"),
     invoke("gateway:status"),
     invoke("config:file"),
     invoke("provider:presets"),
     invoke("compat:packs"),
+    invoke("compat:active"),
     invoke("provider-health:list").catch(() => ({}))
   ]);
   state.config = config;
@@ -130,6 +190,7 @@ async function refreshAll() {
   state.configPath = configPath;
   state.providerPresets = presets || [];
   state.compatPacks = compatPacks || [];
+  state.compatActive = compatActive || { providers: {}, models: {} };
   state.providerHealth = providerHealth || {};
   renderProviderPresetOptions();
   renderHeader();
@@ -236,6 +297,25 @@ function presetBaseUrlForAuth(preset, authMode) {
   return preset.baseUrl || "";
 }
 
+function providerHasCodexOauthRisk(provider, preset, authMode) {
+  return authMode === "codex_oauth" || preset?.id === "codex-oauth" || provider?.authMode === "codex_oauth";
+}
+
+function syncProviderRiskNote(provider = null) {
+  const note = document.getElementById("provider-risk-note");
+  if (!note) return;
+  const selectedPreset = providerPresetById(document.getElementById("provider-preset-select")?.value);
+  const preset = selectedPreset || providerPresetById(provider?.presetId);
+  const authMode = document.getElementById("provider-auth-mode")?.value || provider?.authMode || "api_key";
+  const risky = providerHasCodexOauthRisk(provider, preset, authMode);
+  note.classList.toggle("hidden", !risky);
+  if (!risky) {
+    note.textContent = "";
+    return;
+  }
+  note.textContent = preset?.riskNote || "高风险：该官方 Codex OAuth 代理方式会通过本地网关复用官方登录态，官方文档提示可能带来账号限制风险。推荐优先使用官方直连。";
+}
+
 function syncProviderAuthControls() {
   const mode = document.getElementById("provider-auth-mode")?.value || "api_key";
   const preset = providerPresetById(document.getElementById("provider-preset-select")?.value);
@@ -263,6 +343,7 @@ function applyProviderPreset(preset) {
   form.querySelector('[name="apiFormat"]').value = preset.apiFormat || "openai_chat";
   form.querySelector('[name="apiKeyEnv"]').value = preset.apiKeyEnv || "";
   renderAuthModeOptions(preset, preset.defaultAuthMode || "api_key");
+  renderCompatPackOptions("provider-compat-packs", preset.compatPacks || []);
 }
 
 function providerAuthCell(provider) {
@@ -281,15 +362,78 @@ function compatPacksHtml(ids = []) {
   return selected.map((id) => `<span class="chip">${escapeHtml(byId.get(id)?.label || id)}</span>`).join("");
 }
 
+const COMPAT_DIRECTION_LABEL = {
+  outbound: "请求",
+  inbound: "响应",
+  stream: "流式"
+};
+
+function flattenCompatRules(rulesByDirection) {
+  return Object.entries(rulesByDirection || {}).flatMap(([direction, rules]) =>
+    (rules || []).map((rule) => ({ ...rule, direction: rule.direction || direction }))
+  );
+}
+
+function compactCompatRules(rulesByDirection) {
+  const grouped = new Map();
+  for (const rule of flattenCompatRules(rulesByDirection)) {
+    const key = `${rule.id}:${rule.source}`;
+    const current = grouped.get(key) || { ...rule, directions: new Set() };
+    if (rule.direction) current.directions.add(rule.direction);
+    grouped.set(key, current);
+  }
+  return Array.from(grouped.values()).map((rule) => ({
+    ...rule,
+    directions: Array.from(rule.directions || [])
+  }));
+}
+
+function compatRulesHtml(rulesByDirection, { limit = 4 } = {}) {
+  const rules = compactCompatRules(rulesByDirection).slice(0, limit);
+  if (!rules.length) return "";
+  return rules.map((rule) => {
+    const source = rule.source === "manual" ? "手动" : "自动";
+    const direction = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
+    const title = [rule.description, rule.trigger ? `触发：${rule.trigger}` : "", rule.risk ? `风险：${rule.risk}` : ""].filter(Boolean).join("\n");
+    return `<span class="chip ${rule.source === "auto" ? "good" : ""}" title="${escapeHtml(title)}">${escapeHtml(source)}规则：${escapeHtml(rule.label || rule.id)}${direction ? ` · ${escapeHtml(direction)}` : ""}</span>`;
+  }).join("");
+}
+
+function requestErrorClass(summary) {
+  return summary?.errorClass || summary?.error_class || "";
+}
+
+function rectifierItems(summary) {
+  return (summary?.rectifiers || []).filter(Boolean).map((item) => {
+    const status = item.retryOk === true ? "重试成功" : item.retryOk === false ? "重试失败" : "已触发";
+    const reason = item.errorClass || item.reason || "";
+    return `${item.id || item.name || "rectifier"} · ${status}${reason ? ` · ${reason}` : ""}`;
+  });
+}
+
+function requestOverrideItems(summary) {
+  const overrides = summary?.requestOverrides || summary?.request_overrides;
+  if (!overrides) return [];
+  const items = [];
+  const sources = (overrides.sources || []).join(" + ");
+  if (sources) items.push(`来源：${sources}`);
+  if (overrides.headerNames?.length) items.push(`请求头：${overrides.headerNames.join(", ")}`);
+  if (overrides.bodyKeys?.length) items.push(`请求体字段：${overrides.bodyKeys.join(", ")}`);
+  return items;
+}
+
 function providerRouteExtrasCell(provider) {
   const chips = [];
   if (state.providerHealth?.[provider.id]) chips.push(healthChip(state.providerHealth[provider.id]));
+  if (!normalizeClientScope(provider.allowedClients).includes("*")) chips.push(`<span class="chip">可见：${escapeHtml(clientScopeLabel(provider.allowedClients))}</span>`);
   if (provider.proxyUrl) chips.push(`<span class="chip good">Provider 代理</span>`);
   if (provider.routingMode && provider.routingMode !== "auto") {
     chips.push(`<span class="chip">${provider.routingMode === "native" ? "强制原生" : "强制转换"}</span>`);
   }
   const packs = compatPacksHtml(provider.compatPacks || []);
   if (packs) chips.push(packs);
+  const activeRules = compatRulesHtml(state.compatActive?.providers?.[provider.id]);
+  if (activeRules) chips.push(activeRules);
   return chips.length ? `<div class="chip-row compact">${chips.join("")}</div>` : '<span class="tiny muted">-</span>';
 }
 
@@ -339,7 +483,9 @@ function renderModels() {
     const tr = document.createElement("tr");
     const caps = [
       Object.entries(m.capabilities || {}).filter(([_k, v]) => v).map(([k]) => `<span class="chip">${k}</span>`).join(" "),
-      compatPacksHtml(m.compatPacks || [])
+      !normalizeClientScope(m.allowedClients).includes("*") ? `<span class="chip">可见：${escapeHtml(clientScopeLabel(m.allowedClients))}</span>` : "",
+      compatPacksHtml(m.compatPacks || []),
+      compatRulesHtml(state.compatActive?.models?.[m.id])
     ].filter(Boolean).join(" ");
     const aliases = (m.aliases || []).map((a) => `<span class="chip">${escapeHtml(a)}</span>`).join(" ") || '<span class="tiny muted">—</span>';
     tr.innerHTML = `
@@ -356,14 +502,18 @@ function renderModels() {
   tbody.querySelectorAll("[data-del-model]").forEach((b) => b.addEventListener("click", () => removeModel(b.dataset.delModel)));
 }
 
+const CODEX_PROFILE_MODES = {
+  OFFICIAL_DIRECT: "official_direct",
+  SWITCHYARD_PROXY: "switchyard_proxy"
+};
+
 const PROFILE_META = {
-  codex: { label: "Codex", file: "~/.codex/config.toml", entry: "/codex/v1", note: "写入 model_provider = custom、model_catalog_json，并指向 Switchyard Responses 入口；备份保存在 ~/.switchyard/backups/" },
+  codex: { label: "Codex", file: "~/.codex/config.toml", entry: "/codex/v1", note: "可选择官方直连或 Switchyard 三方代理。三方代理写入 model_provider = custom；官方直连会移除 Switchyard 管理块，认证交给 Codex App/CLI。" },
   "claude-code": { label: "Claude Code", file: "~/.claude/settings.json", entry: "/claude-code", note: "写入 env.ANTHROPIC_BASE_URL；ANTHROPIC_AUTH_TOKEN 读取 ${SWITCHYARD_KEY}" },
   hermes: { label: "Hermes", file: "~/.hermes/config.json", entry: "/hermes/v1", note: "写入 baseUrl，apiKeyEnv = SWITCHYARD_KEY" }
 };
 
 const CLAUDE_CODE_MAPPING_SLOTS = [
-  ["default", "Default"],
   ["haiku", "Haiku"],
   ["sonnet", "Sonnet"],
   ["opus", "Opus"],
@@ -394,14 +544,12 @@ function renderModelSelectOptions(models, selected, { autoLabel = "自动选择"
 function renderClaudeCodeMapping(filter, visible) {
   const mapping = filter?.modelMapping || {};
   return `
-    <div class="client-mapping">
-      <div class="client-mapping-head">
-        <div>
-          <div class="callout-title">Claude Code 模型槽位</div>
-          <div class="callout-body">显式指定 Default / Haiku / Sonnet / Opus / Fable 映射，避免自动顺序选到不可用模型。</div>
-        </div>
-        <button class="btn" data-claude-map-save>保存映射</button>
-      </div>
+    <details class="client-advanced">
+      <summary>
+        <span>Claude Code 槽位映射</span>
+        <small>Haiku / Sonnet / Opus / Fable</small>
+      </summary>
+      <p class="client-help">默认模型由上方选择控制；这里仅指定各能力槽位，避免自动顺序选到不可用模型。</p>
       <div class="client-mapping-grid">
         ${CLAUDE_CODE_MAPPING_SLOTS.map(([slot, label]) => `
           <label>${escapeHtml(label)}
@@ -411,8 +559,18 @@ function renderClaudeCodeMapping(filter, visible) {
           </label>
         `).join("")}
       </div>
-    </div>
+      <div class="client-actions secondary">
+        <button class="btn" data-claude-map-save>保存槽位</button>
+      </div>
+    </details>
   `;
+}
+
+function clientModelSummary(visible) {
+  if (!visible.length) return '<span class="tiny muted">没有可见模型</span>';
+  const primary = visible.slice(0, 4).map((model) => `<span class="chip">${escapeHtml(modelDisplayName(model))}</span>`).join("");
+  const rest = visible.length > 4 ? `<span class="tiny muted">另有 ${visible.length - 4} 个</span>` : "";
+  return `${primary}${rest}`;
 }
 
 function renderClients() {
@@ -421,37 +579,77 @@ function renderClients() {
   grid.innerHTML = "";
   const clients = Object.entries(config.clients || {});
   for (const [id, filter] of clients) {
-    const visible = (filter.allowedModels || []).includes("*")
-      ? config.models
-      : config.models.filter((m) => (filter.allowedModels || []).includes(m.id) || (m.aliases || []).some((a) => (filter.allowedModels || []).includes(a)));
+    const visible = modelsForClient(id);
     const meta = PROFILE_META[id];
     const div = document.createElement("div");
-    div.className = "card";
+    div.className = "card client-card";
+    div.dataset.clientId = id;
     const mappingHtml = id === "claude-code" ? renderClaudeCodeMapping(filter, visible) : "";
-    const historyActions = id === "codex" ? `
-        <button class="btn" data-history-unify-preview>预览历史统一</button>
-        <button class="btn" data-history-unify-apply>统一会话历史</button>
+    const codexAccessHtml = id === "codex" ? `
+      <div class="codex-access-box">
+        <div class="codex-access-head">
+          <div>
+            <div class="callout-title">Codex 接入与迁移</div>
+            <p class="client-help">先选择 Codex 使用官方直连还是 Switchyard 三方代理；切换后如历史会话不可见，再按目标模式迁移会话归属。</p>
+          </div>
+          <button class="btn" data-profile-restore="${escapeHtml(id)}">恢复配置备份</button>
+        </div>
+        <div class="codex-access-grid">
+          <div class="codex-access-step">
+            <div class="client-section-label">1. 接入模式</div>
+            <div class="codex-action-row">
+              <button class="btn" data-profile-preview-mode="official_direct">预览官方直连</button>
+              <button class="btn primary" data-profile-apply-mode="official_direct">切到官方直连</button>
+              <button class="btn" data-profile-preview-mode="switchyard_proxy">预览三方代理</button>
+              <button class="btn primary" data-profile-apply-mode="switchyard_proxy">切到三方代理</button>
+            </div>
+            <p class="client-help">这一步改写 ~/.codex/config.toml。官方直连不经过 Switchyard；三方代理写入 model_provider = custom 并同步模型列表。</p>
+          </div>
+          <div class="codex-access-step">
+            <div class="client-section-label">2. 历史会话（可选）</div>
+            <div class="codex-action-row">
+              <button class="btn" data-history-unify-preview="custom">预览迁到三方</button>
+              <button class="btn primary" data-history-unify-apply="custom">迁到三方代理</button>
+              <button class="btn" data-history-unify-preview="openai">预览迁到官方</button>
+              <button class="btn primary" data-history-unify-apply="openai">迁到官方直连</button>
+            </div>
+            <p class="client-help">这一步只改历史会话的 model_provider，并会先备份 state_5.sqlite 和 rollout 文件。</p>
+          </div>
+        </div>
+      </div>
     ` : "";
-    const actionsHtml = meta ? `
-      <div style="display:flex; gap:6px; margin-top:8px;">
+    const actionsHtml = meta && id !== "codex" ? `
+      <div class="client-actions">
         <button class="btn" data-profile-preview="${escapeHtml(id)}">预览</button>
         <button class="btn primary" data-profile-apply="${escapeHtml(id)}">一键写入</button>
         <button class="btn" data-profile-restore="${escapeHtml(id)}">恢复备份</button>
-        ${historyActions}
       </div>
-      <div class="tiny muted" style="margin-top:6px;">${escapeHtml(meta.note)}</div>
+      <div class="client-note">${escapeHtml(meta.note)}</div>
     ` : "";
     div.innerHTML = `
-      <div class="hd"><h3>${escapeHtml(meta?.label || id)}</h3><span class="sub">${filter.enabled === false ? "已停用" : "启用中"} · ${visible.length} 个模型</span></div>
+      <div class="hd client-card-title"><h3>${escapeHtml(meta?.label || id)}</h3><span class="status-pill ${filter.enabled === false ? "stopped" : "running"}"><span class="dot"></span>${filter.enabled === false ? "已停用" : "启用中"} · ${visible.length} 个模型</span></div>
       <div class="bd">
-        <dl class="kv" style="margin:0 0 6px;">
-          <dt>客户端 ID</dt><dd class="mono">${escapeHtml(id)}</dd>
-          ${meta ? `<dt>入口路径</dt><dd class="mono">${escapeHtml(meta.entry)}</dd>` : ""}
-          ${meta ? `<dt>配置文件</dt><dd class="mono">${escapeHtml(meta.file)}</dd>` : ""}
+        <dl class="client-meta">
+          <div><dt>客户端 ID</dt><dd class="mono">${escapeHtml(id)}</dd></div>
+          ${meta ? `<div><dt>入口路径</dt><dd class="mono">${escapeHtml(meta.entry)}</dd></div>` : ""}
+          ${meta ? `<div><dt>配置文件</dt><dd class="mono">${escapeHtml(meta.file)}</dd></div>` : ""}
         </dl>
-        <div class="tiny muted" style="margin-bottom:6px;">allowedModels：${(filter.allowedModels || []).map(escapeHtml).join(", ")}</div>
-        <div style="display:flex; flex-wrap:wrap; gap:4px;">${visible.slice(0, 8).map((m) => `<span class="chip">${escapeHtml(m.id)}</span>`).join("")}${visible.length > 8 ? `<span class="tiny muted">…共 ${visible.length}</span>` : ""}</div>
+        <div class="client-default-box">
+          <div class="client-default-head">
+            <div class="callout-title">默认模型</div>
+            <button class="btn" data-client-default-save>保存并写入</button>
+          </div>
+          <select class="field" data-client-default-model>
+            ${renderModelSelectOptions(visible, filter.defaultModel || "", { autoLabel: "自动选择首个可见模型" })}
+          </select>
+          <p class="client-help">用于该 Agent 配置，也用于请求没有指定模型时的路由兜底。</p>
+        </div>
+        <div class="client-model-summary">
+          <div class="client-section-label">可见模型</div>
+          <div class="chip-row compact">${clientModelSummary(visible)}</div>
+        </div>
         ${mappingHtml}
+        ${codexAccessHtml}
         ${actionsHtml}
       </div>
     `;
@@ -459,10 +657,13 @@ function renderClients() {
   }
   grid.querySelectorAll("[data-profile-preview]").forEach((b) => b.addEventListener("click", () => profilePreview(b.dataset.profilePreview)));
   grid.querySelectorAll("[data-profile-apply]").forEach((b) => b.addEventListener("click", () => profileApply(b.dataset.profileApply)));
+  grid.querySelectorAll("[data-profile-preview-mode]").forEach((b) => b.addEventListener("click", () => profilePreview("codex", b.dataset.profilePreviewMode)));
+  grid.querySelectorAll("[data-profile-apply-mode]").forEach((b) => b.addEventListener("click", () => profileApply("codex", b.dataset.profileApplyMode)));
   grid.querySelectorAll("[data-profile-restore]").forEach((b) => b.addEventListener("click", () => profileRestore(b.dataset.profileRestore)));
+  grid.querySelectorAll("[data-client-default-save]").forEach((b) => b.addEventListener("click", () => saveClientDefaultModel(b.closest(".card"))));
   grid.querySelectorAll("[data-claude-map-save]").forEach((b) => b.addEventListener("click", () => saveClaudeCodeModelMapping(b.closest(".card"))));
-  grid.querySelectorAll("[data-history-unify-preview]").forEach((b) => b.addEventListener("click", () => codexHistoryUnifyPreview()));
-  grid.querySelectorAll("[data-history-unify-apply]").forEach((b) => b.addEventListener("click", () => codexHistoryUnifyApply()));
+  grid.querySelectorAll("[data-history-unify-preview]").forEach((b) => b.addEventListener("click", () => codexHistoryUnifyPreview(b.dataset.historyUnifyPreview)));
+  grid.querySelectorAll("[data-history-unify-apply]").forEach((b) => b.addEventListener("click", () => codexHistoryUnifyApply(b.dataset.historyUnifyApply)));
 }
 
 function statusChip(status) {
@@ -559,19 +760,63 @@ function renderDiagnostics() {
   }
   const errors = document.getElementById("diagnostics-errors");
   if (errors) {
-    errors.innerHTML = (data.recentErrors || []).map((row, index) => `
-      <div class="diagnostic-row">
-        <div>
-          <strong>${escapeHtml(row.modelId || "-")}</strong>
-          <div class="tiny muted">${escapeHtml(formatDate(row.ts))} · status ${escapeHtml(row.status || "-")}</div>
-          <div class="tiny muted">${escapeHtml(row.classification?.title || row.error || "-")}</div>
+    errors.innerHTML = (data.recentErrors || []).map((row, index) => {
+      const request = parseSummary(row.requestSummary || row.request_summary);
+      const chain = request?.conversionChain?.steps?.length
+        ? `<div class="tiny muted">链路：${escapeHtml(request.conversionChain.steps.join(" → "))}</div>`
+        : "";
+      const rules = compatRulesHtml(request?.compatRules, { limit: 3 });
+      const errorClass = requestErrorClass(request);
+      const rectifiers = rectifierItems(request);
+      const overrides = requestOverrideItems(request);
+      const runtimeChips = [
+        errorClass ? `<span class="chip warn">错误类：${escapeHtml(errorClass)}</span>` : "",
+        ...rectifiers.slice(0, 3).map((item) => `<span class="chip good">${escapeHtml(item)}</span>`),
+        ...overrides.slice(0, 2).map((item) => `<span class="chip">${escapeHtml(item)}</span>`)
+      ].filter(Boolean).join("");
+      return `
+        <div class="diagnostic-row">
+          <div>
+            <strong>${escapeHtml(row.modelId || "-")}</strong>
+            <div class="tiny muted">${escapeHtml(formatDate(row.ts))} · status ${escapeHtml(row.status || "-")}</div>
+            <div class="tiny muted">${escapeHtml(row.classification?.title || row.error || "-")}</div>
+            ${chain}
+            ${rules ? `<div class="chip-row compact">${rules}</div>` : ""}
+            ${runtimeChips ? `<div class="chip-row compact">${runtimeChips}</div>` : ""}
+          </div>
+          <div class="row-actions">
+            <span class="chip warn">${escapeHtml(row.classification?.category || "unknown")}</span>
+            <button class="btn" data-diagnostic-issue="${index}">问题包</button>
+            <button class="btn" data-diagnostic-export="${index}">导出</button>
+            <button class="btn" data-diagnostic-replay="${index}">草稿回放</button>
+          </div>
         </div>
-        <div class="row-actions">
-          <span class="chip warn">${escapeHtml(row.classification?.category || "unknown")}</span>
-          <button class="btn" data-diagnostic-replay="${index}">草稿回放</button>
-        </div>
-      </div>
-    `).join("") || '<div class="empty-state">最近没有失败请求</div>';
+      `;
+    }).join("") || '<div class="empty-state">最近没有失败请求</div>';
+    errors.querySelectorAll("[data-diagnostic-issue]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const row = data.recentErrors[Number(button.dataset.diagnosticIssue)];
+        if (row) {
+          try {
+            await copyIssueBundle(row);
+          } catch (err) {
+            toast(`复制问题包失败：${err.message}`);
+          }
+        }
+      });
+    });
+    errors.querySelectorAll("[data-diagnostic-export]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const row = data.recentErrors[Number(button.dataset.diagnosticExport)];
+        if (row) {
+          try {
+            await exportIssueBundle(row);
+          } catch (err) {
+            toast(`导出问题包失败：${err.message}`);
+          }
+        }
+      });
+    });
     errors.querySelectorAll("[data-diagnostic-replay]").forEach((button) => {
       button.addEventListener("click", async () => {
         const id = data.recentErrors[Number(button.dataset.diagnosticReplay)]?.id;
@@ -590,10 +835,11 @@ function renderDiagnostics() {
         <td class="mono">${escapeHtml(model.id)}</td>
         <td class="mono">${escapeHtml(model.providerId)}</td>
         <td class="chip-row compact">${capabilityChips(model.capabilities)}</td>
+        <td class="chip-row compact">${compatRulesHtml(state.compatActive?.models?.[model.id]) || '<span class="tiny muted">-</span>'}</td>
         <td>${(model.visibleIn || []).map((id) => `<span class="chip">${escapeHtml(agentLabel(id))}</span>`).join("") || '<span class="tiny muted">不可见</span>'}</td>
         <td><button class="btn" data-diagnostic-probe="${index}">运行探针</button></td>
       </tr>
-    `).join("") || '<tr><td colspan="5" class="muted">暂无模型</td></tr>';
+    `).join("") || '<tr><td colspan="6" class="muted">暂无模型</td></tr>';
     modelsTbody.querySelectorAll("[data-diagnostic-probe]").forEach((button) => {
       button.addEventListener("click", () => probeConfiguredModel(data.models[Number(button.dataset.diagnosticProbe)]?.id));
     });
@@ -636,15 +882,51 @@ function formatCapabilityProbe(result) {
   for (const [key, row] of Object.entries(result.results || {})) {
     const label = CAPABILITY_LABEL[key === "vision" ? "images" : key] || key;
     const status = row.ok ? "✓" : "✗";
-    const detail = row.error || row.preview || (row.reasoning ? "reasoning detected" : "");
+    const detail = row.error || row.preview || row.classification?.title || (row.reasoning ? "reasoning detected" : "");
     lines.push(`${status} ${label} · ${row.status || "n/a"} · ${row.ms || 0} ms${detail ? `\n  ${detail}` : ""}`);
+    if (!row.ok && row.classification?.hint) lines.push(`  建议：${row.classification.hint}`);
   }
   const caps = result.suggestion?.capabilities || {};
   lines.push("", "启发式建议能力：");
   for (const [key, value] of Object.entries(caps)) {
     lines.push(`- ${CAPABILITY_LABEL[key] || key}: ${value ? "启用" : "关闭"}`);
   }
+  const profile = result.compatibilityProfile;
+  if (profile) {
+    lines.push("", "兼容画像：");
+    lines.push(`- 上游协议：${PROTOCOL_LABEL[profile.protocol] || profile.protocol || "-"}`);
+    for (const [key, value] of Object.entries(profile.flags || {})) {
+      if (value === null || value === undefined) continue;
+      lines.push(`- ${COMPAT_FLAG_LABEL[key] || key}: ${formatProfileValue(value)}`);
+    }
+    if (profile.recommendations?.length) {
+      lines.push("", "建议补丁 / 策略：");
+      for (const item of profile.recommendations) {
+        lines.push(`- ${item.title || item.ruleId}: ${item.reason || ""}`);
+      }
+    }
+  }
+  const activeRules = compactCompatRules(result.compatRules || {});
+  lines.push("", "当前实际兼容规则：");
+  if (activeRules.length) {
+    for (const rule of activeRules) {
+      const source = rule.source === "manual" ? "手动" : "自动";
+      const directions = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
+      lines.push(`- ${source} · ${rule.label || rule.id}${directions ? ` · ${directions}` : ""}`);
+      if (rule.description) lines.push(`  ${rule.description}`);
+      if (rule.changes?.length) lines.push(`  改动：${rule.changes.join("；")}`);
+      if (rule.risk) lines.push(`  风险：${rule.risk}`);
+    }
+  } else {
+    lines.push("- 无");
+  }
   return lines.join("\n");
+}
+
+function formatProfileValue(value) {
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return String(value);
 }
 
 async function probeConfiguredModel(modelId) {
@@ -705,6 +987,19 @@ async function replayRequestToConsole(row) {
   setActiveTab("test");
 }
 
+async function copyIssueBundle(row) {
+  const report = await invoke("request:issue-bundle", { row });
+  const text = report.markdown || JSON.stringify(report.bundle || report, null, 2);
+  await navigator.clipboard.writeText(text);
+  toast("已复制脱敏问题包");
+}
+
+async function exportIssueBundle(row) {
+  const result = await invoke("request:issue-bundle:save", { row });
+  if (result?.canceled) return;
+  toast(result?.markdownPath ? "已导出脱敏问题包" : "导出完成");
+}
+
 document.getElementById("btn-diagnostics-apply-capabilities")?.addEventListener("click", async () => {
   const suggestion = state.lastCapabilitySuggestion;
   if (!suggestion?.modelId) return;
@@ -718,11 +1013,12 @@ document.getElementById("btn-diagnostics-apply-capabilities")?.addEventListener(
   }
 });
 
-async function profilePreview(clientId) {
+async function profilePreview(clientId, mode) {
   try {
-    const { text, path } = await invoke("profile:preview", { clientId });
+    const { text, path } = await invoke("profile:preview", { clientId, mode });
     const status = await invoke("profile:status", { clientId });
-    document.getElementById("profile-dialog-title").textContent = `预览 · ${PROFILE_META[clientId]?.label || clientId}`;
+    const modeLabel = mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "官方直连" : mode === CODEX_PROFILE_MODES.SWITCHYARD_PROXY ? "三方代理" : "";
+    document.getElementById("profile-dialog-title").textContent = `预览 · ${PROFILE_META[clientId]?.label || clientId}${modeLabel ? ` · ${modeLabel}` : ""}`;
     document.getElementById("profile-dialog-meta").textContent = `目标：${path} · 已有备份：${status.backups}`;
     document.getElementById("profile-dialog-body").textContent = text;
     document.getElementById("profile-dialog-wrap").classList.add("open");
@@ -731,14 +1027,15 @@ async function profilePreview(clientId) {
   }
 }
 
-async function profileApply(clientId) {
+async function profileApply(clientId, mode) {
   try {
-    const r = await invoke("profile:apply", { clientId });
+    const r = await invoke("profile:apply", { clientId, mode });
     await refreshAll();
     const catalog = r.catalogPath ? `；模型目录：${r.catalogPath}` : "";
     const modelCount = Number.isFinite(r.modelCount) ? `；模型：${r.modelCount}` : "";
     const ccSwitch = r.ccSwitchProfilePath ? "；已同步 CC Switch 网关入口" : "";
-    toast(`已写入 ${r.path}${r.backup ? "（已备份）" : ""}${catalog}${modelCount}${ccSwitch}`);
+    const direct = r.mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "；已切到官方直连，请确认 Codex App/CLI 已登录" : "";
+    toast(`已写入 ${r.path}${r.backup ? "（已备份）" : ""}${catalog}${modelCount}${ccSwitch}${direct}`);
   } catch (err) {
     toast(`写入失败：${err.message}`);
   }
@@ -752,9 +1049,13 @@ async function saveClaudeCodeModelMapping(root) {
     });
     const next = JSON.parse(JSON.stringify(state.config));
     next.clients = next.clients || {};
+    const existing = next.clients["claude-code"] || {};
+    if (existing.defaultModel) mapping.default = existing.defaultModel;
     next.clients["claude-code"] = {
-      enabled: next.clients["claude-code"]?.enabled !== false,
-      allowedModels: Array.isArray(next.clients["claude-code"]?.allowedModels) ? next.clients["claude-code"].allowedModels : ["*"],
+      ...existing,
+      enabled: existing.enabled !== false,
+      allowedModels: Array.isArray(existing.allowedModels) ? existing.allowedModels : ["*"],
+      defaultModel: typeof existing.defaultModel === "string" && existing.defaultModel.trim() ? existing.defaultModel.trim() : null,
       modelMapping: mapping
     };
     await invoke("config:save", next);
@@ -765,52 +1066,145 @@ async function saveClaudeCodeModelMapping(root) {
   }
 }
 
-async function codexHistoryUnifyPreview() {
+async function saveClientDefaultModel(root) {
   try {
-    const r = await invoke("codex-history:unify", { dryRun: true });
-    if (!r.ok) {
-      toast(`历史统一预览失败：${r.reason || "unknown"}`);
-      return;
+    const clientId = root?.dataset.clientId;
+    if (!clientId) return;
+    const selected = root.querySelector("[data-client-default-model]")?.value || "";
+    const next = JSON.parse(JSON.stringify(state.config));
+    next.clients = next.clients || {};
+    const existing = next.clients[clientId] || {};
+    next.clients[clientId] = {
+      ...existing,
+      enabled: existing.enabled !== false,
+      allowedModels: Array.isArray(existing.allowedModels) ? existing.allowedModels : ["*"],
+      defaultModel: selected.trim() || null
+    };
+    if (clientId === "claude-code") {
+      next.clients[clientId].modelMapping = { ...(existing.modelMapping || {}) };
+      if (selected.trim()) next.clients[clientId].modelMapping.default = selected.trim();
+      else delete next.clients[clientId].modelMapping.default;
     }
-    const counts = Object.entries(r.counts || {}).map(([k, v]) => `${k}:${v}`).join("，") || "无";
-    toast(`将统一 ${r.affectedThreads || 0} 个会话到 custom；来源：${counts}`);
+    await invoke("config:save", next);
+    if (PROFILE_META[clientId]) {
+      try {
+        await invoke("profile:apply", { clientId });
+        toast(`${agentLabel(clientId)} 默认模型已保存并写入配置`);
+      } catch (err) {
+        toast(`${agentLabel(clientId)} 默认模型已保存；写入配置失败：${err.message}`);
+      }
+    } else {
+      toast(`${agentLabel(clientId)} 默认模型已保存`);
+    }
+    await refreshAll();
   } catch (err) {
-    toast(`历史统一预览失败：${err.message}`);
+    toast(`保存默认模型失败：${err.message}`);
   }
 }
 
-async function codexHistoryUnifyApply() {
+function historyTargetLabel(targetProvider) {
+  return targetProvider === "openai" ? "官方直连 openai" : "三方代理 custom";
+}
+
+function formatBackupLabel(item) {
+  const time = item?.mtimeMs ? new Date(item.mtimeMs).toLocaleString() : item?.name || "未知时间";
+  const size = Number.isFinite(item?.size) ? `${Math.max(1, Math.round(item.size / 1024))} KB` : "未知大小";
+  return `${time} · ${size} · ${item?.name || ""}`;
+}
+
+function selectedBackupItem() {
+  const select = document.getElementById("backup-dialog-select");
+  const name = select?.value || "";
+  return state.profileBackupDialog?.items?.find((item) => item.name === name) || null;
+}
+
+function renderBackupPreview() {
+  const item = selectedBackupItem();
+  const preview = document.getElementById("backup-dialog-preview");
+  if (!preview) return;
+  preview.textContent = item
+    ? `将恢复：${item.full || item.name}\n\n恢复前会覆盖当前配置文件，请确认这个版本就是要回退的目标。`
+    : "请选择一个备份版本。";
+}
+
+async function codexHistoryUnifyPreview(targetProvider) {
   try {
-    const preview = await invoke("codex-history:unify", { dryRun: true });
+    const r = await invoke("codex-history:unify", { dryRun: true, targetProvider });
+    if (!r.ok) {
+      toast(`历史迁移预览失败：${r.reason || "unknown"}`);
+      return;
+    }
+    const counts = Object.entries(r.counts || {}).map(([k, v]) => `${k}:${v}`).join("，") || "无";
+    toast(`将迁移 ${r.affectedThreads || 0} 个会话到 ${historyTargetLabel(targetProvider)}；来源：${counts}`);
+  } catch (err) {
+    toast(`历史迁移预览失败：${err.message}`);
+  }
+}
+
+async function codexHistoryUnifyApply(targetProvider) {
+  try {
+    const preview = await invoke("codex-history:unify", { dryRun: true, targetProvider });
     if (!preview.ok) {
-      toast(`历史统一失败：${preview.reason || "unknown"}`);
+      toast(`历史迁移失败：${preview.reason || "unknown"}`);
       return;
     }
     const count = preview.affectedThreads || 0;
     if (!count) {
-      toast("没有需要统一的会话历史");
+      toast("没有需要迁移的会话历史");
       return;
     }
-    const ok = confirm(`将 ${count} 个 Codex 会话的 model_provider 统一为 custom，并先备份 state_5.sqlite 和 rollout 文件。继续吗？`);
+    const ok = confirm(`将 ${count} 个 Codex 会话的 model_provider 迁移为 ${targetProvider}，并先备份 state_5.sqlite 和 rollout 文件。继续吗？`);
     if (!ok) return;
-    const r = await invoke("codex-history:unify", { dryRun: false });
+    const r = await invoke("codex-history:unify", { dryRun: false, targetProvider });
     if (!r.ok) {
-      toast(`历史统一失败：${r.reason || "unknown"}`);
+      toast(`历史迁移失败：${r.reason || "unknown"}`);
       return;
     }
-    toast(`已统一 ${r.affectedThreads || 0} 个会话；备份：${r.backupRoot}`);
+    toast(`已迁移 ${r.affectedThreads || 0} 个会话到 ${historyTargetLabel(targetProvider)}；备份：${r.backupRoot}`);
   } catch (err) {
-    toast(`历史统一失败：${err.message}`);
+    toast(`历史迁移失败：${err.message}`);
   }
 }
 
 async function profileRestore(clientId) {
   try {
-    const r = await invoke("profile:restore", { clientId });
+    const status = await invoke("profile:status", { clientId });
+    const items = status.backupItems || [];
+    if (!items.length) {
+      toast("没有可用备份");
+      return;
+    }
+    state.profileBackupDialog = { clientId, items };
+    document.getElementById("backup-dialog-title").textContent = `恢复配置备份 · ${PROFILE_META[clientId]?.label || clientId}`;
+    document.getElementById("backup-dialog-meta").textContent = `目标：${profilePathLabel(clientId)} · 共 ${items.length} 个备份`;
+    const select = document.getElementById("backup-dialog-select");
+    select.innerHTML = items.map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(formatBackupLabel(item))}</option>`).join("");
+    renderBackupPreview();
+    document.getElementById("backup-dialog-wrap").classList.add("open");
+  } catch (err) {
+    toast(`恢复失败：${err.message}`);
+  }
+}
+
+function profilePathLabel(clientId) {
+  return PROFILE_META[clientId]?.file || clientId;
+}
+
+async function restoreSelectedProfileBackup() {
+  const dialog = state.profileBackupDialog;
+  const item = selectedBackupItem();
+  if (!dialog?.clientId || !item?.name) return;
+  const ok = confirm(`确认恢复这个备份吗？\n\n${item.full || item.name}`);
+  if (!ok) return;
+  try {
+    const r = await invoke("profile:restore", { clientId: dialog.clientId, backupName: item.name });
+    if (!r.ok) {
+      toast(`恢复失败：${r.reason || "unknown"}`);
+      return;
+    }
+    document.getElementById("backup-dialog-wrap").classList.remove("open");
     await refreshAll();
-    if (r.ok) toast(`已恢复：${r.restoredFrom}`);
-    else if (r.reason === "no-distinct-backup") toast("没有和当前文件不同的备份");
-    else toast("没有可用备份");
+    toast(`已恢复：${r.restoredFrom}`);
   } catch (err) {
     toast(`恢复失败：${err.message}`);
   }
@@ -934,6 +1328,134 @@ function collectCompatPackOptions(containerId) {
   return Array.from(wrap.querySelectorAll('input[type="checkbox"]:checked')).map((input) => input.value).filter(Boolean);
 }
 
+function setCompatPackOptions(containerId, packIds = []) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return [];
+  const selected = new Set(packIds.filter(Boolean));
+  const applied = [];
+  wrap.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    if (selected.has(input.value)) {
+      input.checked = true;
+      applied.push(input.value);
+    }
+  });
+  return applied;
+}
+
+function recommendationPackIds(recommendations = []) {
+  return Array.from(new Set((recommendations || []).flatMap((item) => item.recommendedCompatPacks || [])));
+}
+
+function renderCompatRecommendations(containerId, recommendations = [], { applyTarget = "" } = {}) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  const packsById = new Map((state.compatPacks || []).map((pack) => [pack.id, pack]));
+  const packIds = recommendationPackIds(recommendations);
+  if (!recommendations.length) {
+    wrap.innerHTML = '<div class="tiny muted">暂无命中的推荐规则；可以先保存配置或运行探针后再观察真实错误。</div>';
+    return;
+  }
+  wrap.innerHTML = `
+    <div class="compat-recommendation-toolbar">
+      <span class="tiny muted">命中 ${recommendations.length} 条规则 · 建议 ${packIds.length} 个兼容包</span>
+      <button class="btn" type="button" data-apply-compat-recommendations="${escapeHtml(applyTarget)}" ${packIds.length ? "" : "disabled"}>应用推荐</button>
+    </div>
+    ${recommendations.map((item) => {
+      const packs = (item.recommendedCompatPacks || []).map((id) => `<span class="chip good">${escapeHtml(packsById.get(id)?.label || id)}</span>`).join("");
+      const unknown = (item.unknownCompatPacks || []).map((id) => `<span class="chip warn">未知：${escapeHtml(id)}</span>`).join("");
+      const fixtures = (item.fixtures || []).map((name) => `<span class="chip">${escapeHtml(name)}</span>`).join("");
+      return `
+        <div class="compat-recommendation-card">
+          <div class="compat-recommendation-head">
+            <strong>${escapeHtml(item.id)}</strong>
+            <span class="tiny muted">${escapeHtml(item.source || "builtin")}</span>
+          </div>
+          <div class="chip-row compact">${packs}${unknown}</div>
+          ${item.reason ? `<p><span>原因</span>${escapeHtml(item.reason)}</p>` : ""}
+          ${item.impact ? `<p><span>影响</span>${escapeHtml(item.impact)}</p>` : ""}
+          ${item.risk ? `<p><span>风险</span>${escapeHtml(item.risk)}</p>` : ""}
+          ${fixtures ? `<div class="compat-recommendation-fixtures"><span class="tiny muted">Fixture</span><div class="chip-row compact">${fixtures}</div></div>` : ""}
+        </div>
+      `;
+    }).join("")}
+  `;
+  wrap.querySelectorAll("[data-apply-compat-recommendations]").forEach((button) => {
+    button.addEventListener("click", () => applyCompatRecommendations(button.dataset.applyCompatRecommendations));
+  });
+}
+
+function providerRecommendationPayload() {
+  const form = document.getElementById("provider-form");
+  const fd = new FormData(form);
+  const raw = Object.fromEntries(fd.entries());
+  return {
+    provider: {
+      id: String(raw.id || "").trim(),
+      name: String(raw.name || "").trim(),
+      presetId: String(raw.presetId || "").trim() || undefined,
+      apiFormat: raw.apiFormat || "openai_chat",
+      baseUrl: String(raw.baseUrl || "").trim(),
+      routingMode: raw.routingMode || "auto",
+      allowedClients: collectClientScopeOptions("provider-visible-clients")
+    }
+  };
+}
+
+async function refreshProviderCompatRecommendations() {
+  const run = ++providerCompatRecommendationRun;
+  const payload = providerRecommendationPayload();
+  const hasSignal = payload.provider.id || payload.provider.name || payload.provider.baseUrl;
+  if (!hasSignal) {
+    state.providerCompatRecommendations = [];
+    renderCompatRecommendations("provider-compat-recommendations", [], { applyTarget: "provider" });
+    return;
+  }
+  try {
+    const result = await invoke("compat:registry:recommend", payload);
+    if (run !== providerCompatRecommendationRun) return;
+    state.providerCompatRecommendations = result.recommendations || [];
+    renderCompatRecommendations("provider-compat-recommendations", state.providerCompatRecommendations, { applyTarget: "provider" });
+  } catch (err) {
+    if (run !== providerCompatRecommendationRun) return;
+    document.getElementById("provider-compat-recommendations").innerHTML = `<div class="tiny muted">推荐规则加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function modelRecommendationPayload() {
+  const model = collectModelForm();
+  const provider = (state.config?.providers || []).find((item) => item.id === model.providerId) || { id: model.providerId, apiFormat: "openai_chat" };
+  return { provider, model };
+}
+
+async function refreshModelCompatRecommendations() {
+  const run = ++modelCompatRecommendationRun;
+  const payload = modelRecommendationPayload();
+  const hasSignal = payload.provider?.id || payload.model?.id || payload.model?.upstreamModel;
+  if (!hasSignal) {
+    state.modelCompatRecommendations = [];
+    renderCompatRecommendations("model-compat-recommendations", [], { applyTarget: "model" });
+    return;
+  }
+  try {
+    const result = await invoke("compat:registry:recommend", payload);
+    if (run !== modelCompatRecommendationRun) return;
+    state.modelCompatRecommendations = result.recommendations || [];
+    renderCompatRecommendations("model-compat-recommendations", state.modelCompatRecommendations, { applyTarget: "model" });
+  } catch (err) {
+    if (run !== modelCompatRecommendationRun) return;
+    document.getElementById("model-compat-recommendations").innerHTML = `<div class="tiny muted">推荐规则加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function applyCompatRecommendations(target) {
+  const isModel = target === "model";
+  const recommendations = isModel ? state.modelCompatRecommendations : state.providerCompatRecommendations;
+  const packIds = recommendationPackIds(recommendations);
+  const containerId = isModel ? "model-compat-packs" : "provider-compat-packs";
+  const applied = setCompatPackOptions(containerId, packIds);
+  toast(applied.length ? `已勾选 ${applied.length} 个推荐兼容包` : "没有可应用的兼容包");
+}
+
 function collectProviderForm() {
   const form = document.getElementById("provider-form");
   const fd = new FormData(form);
@@ -948,6 +1470,7 @@ function collectProviderForm() {
     baseUrl: raw.baseUrl?.trim(),
     proxyUrl: raw.proxyUrl?.trim() || undefined,
     routingMode: raw.routingMode || "auto",
+    allowedClients: collectClientScopeOptions("provider-visible-clients"),
     compatPacks: collectCompatPackOptions("provider-compat-packs"),
     apiKeyEnv: raw.apiKeyEnv?.trim(),
     apiKey: raw.apiKey?.trim()
@@ -994,6 +1517,8 @@ function openProviderDialog(editId) {
     form.querySelector('[name="apiKeyEnv"]').value = existing.apiKeyEnv || "";
     form.querySelector('[name="apiKey"]').value = existing.apiKey || "";
     renderAuthModeOptions(providerPresetById(existing.presetId), existing.authMode || "api_key");
+    syncProviderRiskNote(existing);
+    renderClientScopeOptions("provider-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("provider-compat-packs", existing.compatPacks || []);
     state.providerDiscovery = state.config.models
       .filter((m) => m.providerId === existing.id)
@@ -1006,6 +1531,7 @@ function openProviderDialog(editId) {
         aliases: [...(m.aliases || [])],
         contextWindow: m.contextWindow,
         maxOutputTokens: m.maxOutputTokens,
+        allowedClients: m.allowedClients || ["*"],
         capabilities: {
           text: !!m.capabilities?.text,
           tools: !!m.capabilities?.tools,
@@ -1018,11 +1544,14 @@ function openProviderDialog(editId) {
   } else {
     form.querySelector('[name="id"]').readOnly = false;
     renderAuthModeOptions(null, "api_key");
+    syncProviderRiskNote(null);
+    renderClientScopeOptions("provider-visible-clients", ["*"]);
     renderCompatPackOptions("provider-compat-packs", []);
   }
   document.getElementById("provider-api-key-input").type = "password";
   document.getElementById("btn-provider-key-toggle").textContent = "显示";
   renderProviderDiscovery();
+  refreshProviderCompatRecommendations().catch(() => {});
   wrap.classList.add("open");
   form._editId = editId || null;
 }
@@ -1031,8 +1560,19 @@ document.getElementById("provider-preset-select").addEventListener("change", (e)
   const preset = providerPresetById(e.target.value);
   if (preset) applyProviderPreset(preset);
   else renderAuthModeOptions(null, "api_key");
+  syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
+  refreshProviderCompatRecommendations().catch(() => {});
 });
-document.getElementById("provider-auth-mode").addEventListener("change", syncProviderAuthControls);
+document.getElementById("provider-auth-mode").addEventListener("change", () => {
+  syncProviderAuthControls();
+  syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
+});
+document.getElementById("provider-form").addEventListener("input", (e) => {
+  if (["id", "name", "baseUrl"].includes(e.target?.name)) refreshProviderCompatRecommendations().catch(() => {});
+});
+document.getElementById("provider-form").addEventListener("change", (e) => {
+  if (["apiFormat", "routingMode"].includes(e.target?.name)) refreshProviderCompatRecommendations().catch(() => {});
+});
 document.getElementById("btn-provider-key-toggle").addEventListener("click", () => {
   const input = document.getElementById("provider-api-key-input");
   const show = input.type === "password";
@@ -1060,6 +1600,7 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
       aliases: item.aliases || [],
       contextWindow: item.contextWindow,
       maxOutputTokens: item.maxOutputTokens,
+      allowedClients: item.allowedClients || ["*"],
       capabilities: { ...item.capabilities }
     }));
   if (editId) {
@@ -1121,6 +1662,7 @@ document.getElementById("btn-provider-discover").addEventListener("click", async
       aliases: [item.id],
       contextWindow: item.contextWindow,
       maxOutputTokens: item.maxOutputTokens,
+      allowedClients: ["*"],
       capabilities: {
         text: true,
         tools: item.capabilities?.tools !== false,
@@ -1168,6 +1710,7 @@ function openModelDialog(editId) {
     form.querySelector('[name="aliases"]').value = (existing.aliases || []).join(", ");
     form.querySelector('[name="visionFallbackModelId"]').value = existing.visionFallbackModelId || "";
     form.querySelector('[name="proxyUrl"]').value = existing.proxyUrl || "";
+    renderClientScopeOptions("model-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("model-compat-packs", existing.compatPacks || []);
     if (existing.capabilities) {
       form.querySelector('[name="cap-text"]').checked = !!existing.capabilities.text;
@@ -1180,6 +1723,7 @@ function openModelDialog(editId) {
     form.querySelector('[name="contextWindow"]').value = existing.contextWindow || "";
     form.querySelector('[name="maxOutputTokens"]').value = existing.maxOutputTokens || "";
   } else {
+    renderClientScopeOptions("model-visible-clients", ["*"]);
     renderCompatPackOptions("model-compat-packs", []);
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
@@ -1191,10 +1735,17 @@ function openModelDialog(editId) {
   state.lastCapabilitySuggestion = null;
   document.getElementById("btn-model-apply-capabilities").style.display = "none";
   document.getElementById("model-test-output").textContent = "尚未测试";
+  refreshModelCompatRecommendations().catch(() => {});
   wrap.classList.add("open");
   form._editId = editId || null;
 }
 document.getElementById("btn-model-add").addEventListener("click", () => openModelDialog(null));
+document.getElementById("model-form").addEventListener("input", (e) => {
+  if (["id", "upstreamModel", "displayName", "aliases"].includes(e.target?.name)) refreshModelCompatRecommendations().catch(() => {});
+});
+document.getElementById("model-form").addEventListener("change", (e) => {
+  if (["providerId"].includes(e.target?.name)) refreshModelCompatRecommendations().catch(() => {});
+});
 
 function collectModelForm() {
   const form = document.getElementById("model-form");
@@ -1210,6 +1761,7 @@ function collectModelForm() {
     maxOutputTokens: Number(raw.maxOutputTokens) || undefined,
     visionFallbackModelId: String(raw.visionFallbackModelId || "").trim() || undefined,
     proxyUrl: String(raw.proxyUrl || "").trim() || undefined,
+    allowedClients: collectClientScopeOptions("model-visible-clients"),
     compatPacks: collectCompatPackOptions("model-compat-packs"),
     capabilities: {
       text: raw["cap-text"] === "on",
@@ -1615,10 +2167,16 @@ async function refreshUsageStats() {
         <td class="mono">${escapeHtml(row.model_id || row.requested_model || "-")}</td>
         <td>${escapeHtml(row.status || "-")}</td>
         <td>${escapeHtml(row.latency_ms || 0)} ms</td>
-        <td><button class="btn" data-request-replay="${index}">草稿回放</button></td>
+        <td><button class="btn" data-request-issue="${index}">问题包</button><button class="btn" data-request-export="${index}">导出</button><button class="btn" data-request-replay="${index}">草稿回放</button></td>
       `;
       reqTbody.appendChild(tr);
     }
+    reqTbody.querySelectorAll("[data-request-issue]").forEach((button) => {
+      button.addEventListener("click", () => copyIssueBundle(state.usageRequests[Number(button.dataset.requestIssue)]).catch((err) => toast(`复制问题包失败：${err.message}`)));
+    });
+    reqTbody.querySelectorAll("[data-request-export]").forEach((button) => {
+      button.addEventListener("click", () => exportIssueBundle(state.usageRequests[Number(button.dataset.requestExport)]).catch((err) => toast(`导出问题包失败：${err.message}`)));
+    });
     reqTbody.querySelectorAll("[data-request-replay]").forEach((button) => {
       button.addEventListener("click", () => replayRequestToConsole(state.usageRequests[Number(button.dataset.requestReplay)]));
     });
@@ -1905,6 +2463,10 @@ function renderRequestTrace(row) {
   document.getElementById("trace-subtitle").textContent = row.model_id || row.requested_model || "-";
   const replayButton = document.getElementById("btn-trace-replay");
   if (replayButton) replayButton.style.display = "";
+  const issueButton = document.getElementById("btn-trace-issue-bundle");
+  if (issueButton) issueButton.style.display = "";
+  const exportButton = document.getElementById("btn-trace-issue-export");
+  if (exportButton) exportButton.style.display = "";
   const request = parseSummary(row.request_summary);
   const response = parseSummary(row.response_summary);
   const events = [];
@@ -1921,6 +2483,38 @@ function renderRequestTrace(row) {
     events.push({ role: "user", title: "用户消息", text: request.messages.user.map((item) => item.text).join("\n\n---\n\n"), timestamp: row.ts });
   } else if (row.prompt_preview) {
     events.push({ role: "user", title: "请求内容", text: row.prompt_preview, timestamp: row.ts });
+  }
+  if (request?.conversionChain || request?.compatRules) {
+    const details = [];
+    if (request.conversionChain?.steps?.length) details.push(`协议链路：${request.conversionChain.steps.join(" -> ")}`);
+    const rules = compactCompatRules(request.compatRules || {});
+    if (rules.length) {
+      details.push("兼容规则：");
+      for (const rule of rules) {
+        const source = rule.source === "manual" ? "手动" : "自动";
+        const dirs = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
+        details.push(`- ${source} · ${rule.label || rule.id}${dirs ? ` · ${dirs}` : ""}`);
+      }
+    }
+    events.push({ role: "system", title: "协议转换 / 兼容规则", text: details.join("\n") || "无", timestamp: row.ts });
+  }
+  {
+    const details = [];
+    const errorClass = requestErrorClass(request);
+    if (errorClass) details.push(`错误分类：${errorClass}`);
+    const rectifiers = rectifierItems(request);
+    if (rectifiers.length) {
+      details.push("运行时整流：");
+      rectifiers.forEach((item) => details.push(`- ${item}`));
+    }
+    const overrides = requestOverrideItems(request);
+    if (overrides.length) {
+      details.push("请求覆盖：");
+      overrides.forEach((item) => details.push(`- ${item}`));
+    }
+    if (details.length) {
+      events.push({ role: "system", title: "运行时适配动作", text: details.join("\n"), timestamp: row.ts });
+    }
   }
   events.push(
     { role: "system", title: "入口", text: `${row.method || "POST"} ${row.path || "-"}\n${agentLabel(row.client_id)} → ${row.provider_id || "-"} / ${row.upstream_model || "-"}`, timestamp: row.ts },
@@ -1946,6 +2540,10 @@ function renderSessionTrace(row) {
   document.getElementById("trace-subtitle").textContent = row.target || row.path || "";
   const replayButton = document.getElementById("btn-trace-replay");
   if (replayButton) replayButton.style.display = "none";
+  const issueButton = document.getElementById("btn-trace-issue-bundle");
+  if (issueButton) issueButton.style.display = "none";
+  const exportButton = document.getElementById("btn-trace-issue-export");
+  if (exportButton) exportButton.style.display = "none";
   const events = (row.conversation?.messages || []).map((message) => ({
     role: message.role,
     title: roleLabel(message.role),
@@ -1967,14 +2565,28 @@ function renderTraceTimeline(events) {
     <div class="trace-event ${escapeHtml(event.role || "event")}">
       <div class="trace-dot"></div>
       <div class="trace-card">
-        <div class="message-meta">
+        <button class="trace-card-head" type="button" data-collapse-card>
           <span>${escapeHtml(event.title || roleLabel(event.role))}${event.kind ? ` · ${escapeHtml(event.kind)}` : ""}</span>
-          <span>${escapeHtml(formatDate(event.timestamp))}</span>
+          <span class="trace-card-meta">${escapeHtml(formatDate(event.timestamp))}</span>
+          <span class="trace-card-toggle">收起</span>
+        </button>
+        <div class="trace-card-body">
+          <div class="message-text">${escapeHtml(event.text || "").replace(/\n/g, "<br>")}</div>
         </div>
-        <div class="message-text">${escapeHtml(event.text || "").replace(/\n/g, "<br>")}</div>
       </div>
     </div>
   `).join("");
+  wrap.querySelectorAll("[data-collapse-card]").forEach((button) => {
+    button.addEventListener("click", () => toggleCollapseCard(button.closest(".trace-card")));
+  });
+}
+
+function toggleCollapseCard(card) {
+  if (!card) return;
+  const collapsed = !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  const toggle = card.querySelector(".trace-card-toggle, .structured-log-toggle");
+  if (toggle) toggle.textContent = collapsed ? "展开" : "收起";
 }
 
 document.getElementById("btn-traces-refresh")?.addEventListener("click", () => {
@@ -1983,6 +2595,14 @@ document.getElementById("btn-traces-refresh")?.addEventListener("click", () => {
 document.getElementById("btn-trace-replay")?.addEventListener("click", () => {
   const selected = state.traces.selected;
   if (selected?.type === "request" && selected.row) replayRequestToConsole(selected.row).catch((err) => toast(`回放失败：${err.message}`));
+});
+document.getElementById("btn-trace-issue-bundle")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) copyIssueBundle(selected.row).catch((err) => toast(`复制问题包失败：${err.message}`));
+});
+document.getElementById("btn-trace-issue-export")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) exportIssueBundle(selected.row).catch((err) => toast(`导出问题包失败：${err.message}`));
 });
 document.getElementById("trace-agent-filter")?.addEventListener("change", () => {
   state.liveLogAgent = document.getElementById("trace-agent-filter")?.value || "";
@@ -2556,15 +3176,7 @@ function pathName(value) {
 }
 
 function modelsForClient(clientId) {
-  const models = (state.config?.models || []).filter((model) => model.enabled !== false);
-  const filter = state.config?.clients?.[clientId] || { enabled: true, allowedModels: ["*"] };
-  if (filter.enabled === false) return [];
-  const allowed = new Set(filter.allowedModels || ["*"]);
-  if (allowed.has("*")) return models;
-  return models.filter((model) => {
-    const keys = [model.id, model.upstreamModel, ...(model.aliases || [])].filter(Boolean);
-    return keys.some((key) => allowed.has(key));
-  });
+  return visibleModelsForClient(state.config, clientId);
 }
 
 function responseText(body) {
@@ -2660,6 +3272,9 @@ document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("cli
   if (ov) ov.classList.remove("open");
 }));
 
+document.getElementById("backup-dialog-select")?.addEventListener("change", renderBackupPreview);
+document.getElementById("btn-backup-restore")?.addEventListener("click", restoreSelectedProfileBackup);
+
 /* Close dialogs on overlay click */
 document.querySelectorAll(".dialog-overlay").forEach((el) => {
   el.addEventListener("click", (e) => { if (e.target === el) el.classList.remove("open"); });
@@ -2719,26 +3334,40 @@ function renderStructuredLogs(entries) {
     ].filter(Boolean).join("");
     return `
       <div class="structured-log-card ${bad ? "warn" : ""}">
-        <div class="structured-log-head">
+        <button class="structured-log-head" type="button" data-collapse-card>
           <div>
             <strong>${escapeHtml(title)}</strong>
             <div class="tiny muted mono">${escapeHtml(formatDate(entry.ts))}</div>
           </div>
-          <div class="chip-row">${chips}</div>
+          <div class="structured-log-head-right">
+            <div class="chip-row">${chips}</div>
+            <span class="structured-log-toggle">收起</span>
+          </div>
+        </button>
+        <div class="structured-log-body">
+          ${entry.modelId || entry.requestedModel || entry.upstreamModel ? `
+            <dl class="structured-log-grid">
+              <dt>模型</dt><dd class="mono">${escapeHtml(entry.modelId || entry.requestedModel || entry.model || "-")}</dd>
+              <dt>上游</dt><dd class="mono">${escapeHtml(entry.providerId || "-")} / ${escapeHtml(entry.upstreamModel || "-")}</dd>
+              <dt>耗时</dt><dd>${escapeHtml(entry.ms ?? entry.latencyMs ?? "-")} ms</dd>
+              <dt>Token</dt><dd>${escapeHtml(entry.promptTokens || 0)} + ${escapeHtml(entry.completionTokens || 0)} = ${escapeHtml(entry.totalTokens || 0)}</dd>
+            </dl>
+          ` : ""}
+          ${structuredSummaryHtml(entry)}
+          ${entry.error ? summarySection("错误", `<p>${escapeHtml(entry.error)}</p>`, { error: true }) : ""}
         </div>
-        ${entry.modelId || entry.requestedModel || entry.upstreamModel ? `
-          <dl class="structured-log-grid">
-            <dt>模型</dt><dd class="mono">${escapeHtml(entry.modelId || entry.requestedModel || entry.model || "-")}</dd>
-            <dt>上游</dt><dd class="mono">${escapeHtml(entry.providerId || "-")} / ${escapeHtml(entry.upstreamModel || "-")}</dd>
-            <dt>耗时</dt><dd>${escapeHtml(entry.ms ?? entry.latencyMs ?? "-")} ms</dd>
-            <dt>Token</dt><dd>${escapeHtml(entry.promptTokens || 0)} + ${escapeHtml(entry.completionTokens || 0)} = ${escapeHtml(entry.totalTokens || 0)}</dd>
-          </dl>
-        ` : ""}
-        ${structuredSummaryHtml(entry)}
-        ${entry.error ? `<div class="structured-log-section error"><span>错误</span><p>${escapeHtml(entry.error)}</p></div>` : ""}
       </div>
     `;
   }).join("");
+  wrap.querySelectorAll("[data-collapse-card]").forEach((button) => {
+    button.addEventListener("click", () => toggleCollapseCard(button.closest(".structured-log-card")));
+  });
+  wrap.querySelectorAll("[data-collapse-section]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleCollapseCard(button.closest(".structured-log-section"));
+    });
+  });
 }
 
 function parseSummary(value) {
@@ -2775,6 +3404,23 @@ function structuredSummaryHtml(entry) {
       request.params?.maxTokens !== undefined ? `max_tokens: ${request.params.maxTokens}` : "",
       request.params?.toolChoice ? `tool_choice: ${JSON.stringify(request.params.toolChoice).slice(0, 180)}` : ""
     ].filter(Boolean)));
+    if (request.conversionChain?.steps?.length) {
+      parts.push(summaryListBlock("协议转换链路", [request.conversionChain.steps.join(" -> ")]));
+    }
+    const activeRules = compactCompatRules(request.compatRules || {});
+    if (activeRules.length) {
+      parts.push(summaryListBlock("实际兼容规则", activeRules.map((rule) => {
+        const source = rule.source === "manual" ? "手动" : "自动";
+        const dirs = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
+        return `${source} · ${rule.label || rule.id}${dirs ? ` · ${dirs}` : ""}`;
+      })));
+    }
+    const errorClass = requestErrorClass(request);
+    if (errorClass) parts.push(summaryListBlock("错误分类", [errorClass]));
+    const rectifiers = rectifierItems(request);
+    if (rectifiers.length) parts.push(summaryListBlock("运行时整流", rectifiers));
+    const overrides = requestOverrideItems(request);
+    if (overrides.length) parts.push(summaryListBlock("请求覆盖", overrides));
   } else if (entry.promptPreview) {
     parts.push(summaryBlock("请求", [entry.promptPreview]));
   }
@@ -2791,7 +3437,7 @@ function structuredSummaryHtml(entry) {
         response.stream ? "stream: true" : ""
       ].filter(Boolean)));
     }
-    if (response.error) parts.push(`<div class="structured-log-section error"><span>响应错误</span><p>${escapeHtml(response.error)}</p></div>`);
+    if (response.error) parts.push(summarySection("响应错误", `<p>${escapeHtml(response.error)}</p>`, { error: true }));
   } else if (entry.responsePreview) {
     parts.push(summaryBlock("响应", [entry.responsePreview]));
   }
@@ -2801,32 +3447,44 @@ function structuredSummaryHtml(entry) {
 function summaryBlock(title, texts) {
   const body = (texts || []).filter(Boolean).slice(0, 4).map((text) => `<p>${escapeHtml(text)}</p>`).join("");
   if (!body) return "";
-  return `<div class="structured-log-section"><span>${escapeHtml(title)}</span>${body}</div>`;
+  return summarySection(title, body);
 }
 
 function summaryListBlock(title, items) {
   const list = (items || []).filter(Boolean).slice(0, 80);
   if (!list.length) return "";
-  return `<div class="structured-log-section"><span>${escapeHtml(title)}</span><div class="chip-row">${list.map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div></div>`;
+  return summarySection(title, `<div class="chip-row">${list.map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div>`);
 }
 
 function summaryToolBlock(title, tools) {
   const list = (tools || []).filter((tool) => tool.name).slice(0, 80);
   if (!list.length) return "";
-  return `<div class="structured-log-section"><span>${escapeHtml(title)} · ${list.length}</span><div class="tool-grid">${list.map((tool) => `
+  return summarySection(`${title} · ${list.length}`, `<div class="tool-grid">${list.map((tool) => `
     <div class="tool-pill">
       <strong>${escapeHtml(tool.name)}</strong>
       <small>${escapeHtml(tool.description || `${tool.propertyCount || 0} 个参数`)}</small>
     </div>
-  `).join("")}</div></div>`;
+  `).join("")}</div>`);
 }
 
 function summaryToolCallBlock(title, calls) {
   const list = (calls || []).filter((call) => call.name).slice(0, 60);
   if (!list.length) return "";
-  return `<div class="structured-log-section"><span>${escapeHtml(title)}</span>${list.map((call) => `
+  return summarySection(title, list.map((call) => `
     <p><strong>${escapeHtml(call.name)}</strong>${call.argumentsPreview ? `<br>${escapeHtml(call.argumentsPreview)}` : ""}</p>
-  `).join("")}</div>`;
+  `).join(""));
+}
+
+function summarySection(title, body, { error = false } = {}) {
+  return `
+    <div class="structured-log-section ${error ? "error" : ""}">
+      <button class="structured-log-section-head" type="button" data-collapse-section>
+        <span>${escapeHtml(title)}</span>
+        <span class="structured-log-section-toggle">收起</span>
+      </button>
+      <div class="structured-log-section-body">${body}</div>
+    </div>
+  `;
 }
 
 onLog((entry) => {

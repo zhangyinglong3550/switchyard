@@ -1,0 +1,20 @@
+{
+  "id": "openrouter-reasoning-effort",
+  "title": "OpenRouter provider keeps reasoning effort in reasoning.effort",
+  "operation": "compat_outbound",
+  "ctx": {
+    "provider": { "id": "openrouter", "baseUrl": "https://openrouter.ai/api/v1" },
+    "model": { "id": "openrouter/deepseek/deepseek-chat-v3.1", "upstreamModel": "deepseek/deepseek-chat-v3.1" }
+  },
+  "input": {
+    "messages": [],
+    "reasoning": { "effort": "max" }
+  },
+  "expect": {
+    "output": {
+      "reasoning": { "effort": "xhigh" },
+      "thinking": { "$exists": false },
+      "reasoning_effort": { "$exists": false }
+    }
+  }
+}

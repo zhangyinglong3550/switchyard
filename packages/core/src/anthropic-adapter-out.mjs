@@ -3,6 +3,7 @@
 // produce a chat-style payload for the client adapter to finish).
 import crypto from "node:crypto";
 import { contentToText } from "./utils.mjs";
+import { SWITCHYARD_THINKING_KEY, cloneAnthropicThinkingBlocks, reasoningBlocksFromMessage } from "./reasoning.mjs";
 
 function parseDataUrl(url) {
   const m = /^data:([^;,]+);base64,(.*)$/s.exec(String(url || ""));
@@ -39,21 +40,28 @@ function contentToAnthropicContent(content) {
 export function chatToAnthropicMessages(body, upstreamModel) {
   const messages = [];
   let system = "";
-  for (const msg of body.messages || []) {
+  const inputMessages = body.messages || [];
+  for (let i = 0; i < inputMessages.length; i += 1) {
+    const msg = inputMessages[i];
     if (msg.role === "system") {
       const text = contentToText(msg.content);
       if (text) system = system ? `${system}\n${text}` : text;
       continue;
     }
     if (msg.role === "tool") {
-      messages.push({
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: msg.tool_call_id || "", content: contentToText(msg.content) }]
-      });
+      const content = [];
+      while (i < inputMessages.length && inputMessages[i]?.role === "tool") {
+        const toolMsg = inputMessages[i];
+        content.push({ type: "tool_result", tool_use_id: toolMsg.tool_call_id || "", content: contentToText(toolMsg.content) });
+        i += 1;
+      }
+      i -= 1;
+      messages.push({ role: "user", content });
       continue;
     }
     if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
       const blocks = [];
+      blocks.push(...reasoningBlocksFromMessage(msg));
       const text = contentToText(msg.content || "");
       if (text) blocks.push({ type: "text", text });
       for (const tc of msg.tool_calls) {
@@ -64,7 +72,16 @@ export function chatToAnthropicMessages(body, upstreamModel) {
       messages.push({ role: "assistant", content: blocks });
       continue;
     }
-    messages.push({ role: msg.role === "assistant" ? "assistant" : "user", content: contentToAnthropicContent(msg.content) });
+    const role = msg.role === "assistant" ? "assistant" : "user";
+    let content = contentToAnthropicContent(msg.content);
+    if (role === "assistant") {
+      const thinking = reasoningBlocksFromMessage(msg);
+      if (thinking.length) {
+        const contentBlocks = Array.isArray(content) ? content : (content ? [{ type: "text", text: content }] : []);
+        content = [...thinking, ...contentBlocks];
+      }
+    }
+    messages.push({ role, content });
   }
   const out = {
     model: upstreamModel,
@@ -97,8 +114,10 @@ export function anthropicMessagesToChatResponse(payload, upstreamModel) {
   const message = { role: "assistant", content: "" };
   const text = [];
   const tool_calls = [];
+  const thinking = [];
   for (const block of payload.content || []) {
     if (block.type === "text") text.push(block.text || "");
+    else if (block.type === "thinking" || block.type === "redacted_thinking") thinking.push({ ...block });
     else if (block.type === "tool_use") {
       tool_calls.push({
         id: block.id || `call_${crypto.randomUUID()}`,
@@ -109,6 +128,7 @@ export function anthropicMessagesToChatResponse(payload, upstreamModel) {
   }
   message.content = text.join("\n");
   if (tool_calls.length) message.tool_calls = tool_calls;
+  if (thinking.length) message[SWITCHYARD_THINKING_KEY] = thinking;
   return {
     id: payload.id || `chatcmpl_${crypto.randomUUID()}`,
     object: "chat.completion",

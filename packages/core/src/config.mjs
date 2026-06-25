@@ -11,7 +11,7 @@ export const SUPPORTED_API_FORMATS = new Set([
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
-export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "hermes", "generic-openai"]);
+export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "claude-app", "hermes", "generic-openai"]);
 
 export const DEFAULT_CONFIG = {
   host: "127.0.0.1",
@@ -20,10 +20,10 @@ export const DEFAULT_CONFIG = {
   providers: [],
   models: [],
   clients: {
-    codex: { enabled: true, allowedModels: ["*"] },
-    "claude-code": { enabled: true, allowedModels: ["*"], modelMapping: {} },
-    hermes: { enabled: true, allowedModels: ["*"] },
-    "generic-openai": { enabled: true, allowedModels: ["*"] }
+    codex: { enabled: true, allowedModels: ["*"], defaultModel: null },
+    "claude-code": { enabled: true, allowedModels: ["*"], defaultModel: null, modelMapping: {} },
+    hermes: { enabled: true, allowedModels: ["*"], defaultModel: null },
+    "generic-openai": { enabled: true, allowedModels: ["*"], defaultModel: null }
   }
 };
 
@@ -72,14 +72,17 @@ export function mergeWithDefaults(input) {
     if (Number.isFinite(input.port)) out.port = input.port;
     if (typeof input.defaultModel === "string") out.defaultModel = input.defaultModel;
     if (Array.isArray(input.providers)) out.providers = input.providers.map(normalizeKnownProvider);
-    if (Array.isArray(input.models)) out.models = input.models.map((model) => normalizeKnownModel(model, out.providers));
+    if (Array.isArray(input.models)) {
+      out.models = normalizeKnownVisionFallbacks(input.models.map((model) => normalizeKnownModel(model, out.providers)), out.providers);
+    }
     if (input.clients && typeof input.clients === "object") {
       out.clients = { ...out.clients };
       for (const [key, value] of Object.entries(input.clients)) {
         if (!value || typeof value !== "object") continue;
         const normalized = {
           enabled: value.enabled !== false,
-          allowedModels: Array.isArray(value.allowedModels) ? value.allowedModels : ["*"]
+          allowedModels: normalizeStringList(value.allowedModels, ["*"]),
+          defaultModel: typeof value.defaultModel === "string" && value.defaultModel.trim() ? value.defaultModel.trim() : null
         };
         if (value.modelMapping && typeof value.modelMapping === "object") {
           normalized.modelMapping = normalizeClientModelMapping(value.modelMapping);
@@ -102,21 +105,29 @@ export function normalizeClientModelMapping(modelMapping = {}) {
   return out;
 }
 
+function normalizeStringList(value, fallback = []) {
+  if (!Array.isArray(value)) return [...fallback];
+  const out = value.map((item) => String(item || "").trim()).filter(Boolean);
+  return out.length ? Array.from(new Set(out)) : [...fallback];
+}
+
 function normalizeKnownProvider(provider) {
   if (!provider || typeof provider !== "object") return provider;
   const withRouting = {
     ...provider,
-    routingMode: provider.routingMode || "auto"
+    routingMode: provider.routingMode || "auto",
+    allowedClients: normalizeStringList(provider.allowedClients, ["*"])
   };
   const baseUrl = String(withRouting.baseUrl || "").toLowerCase();
   const id = String(withRouting.id || "").toLowerCase();
   const name = String(withRouting.name || "").toLowerCase();
-  if (baseUrl.includes("chatgpt.com/backend-api/codex")) {
+  const looksLikeCodexOAuth = withRouting.presetId === "codex-oauth" || baseUrl.includes("chatgpt.com/backend-api/codex");
+  if (looksLikeCodexOAuth) {
     return {
       ...withRouting,
       apiFormat: "openai_responses",
-      authMode: withRouting.authMode || "codex_oauth",
-      providerType: withRouting.providerType || "codex_oauth"
+      authMode: "codex_oauth",
+      providerType: "codex_oauth"
     };
   }
   const looksLikeXiaomiMiMo = baseUrl.includes("xiaomimimo.com") || id.includes("xiaomi") || id.includes("mimo") || name.includes("xiaomi") || name.includes("mimo");
@@ -140,7 +151,10 @@ function normalizeKnownModel(model, providers = []) {
     provider?.name,
     provider?.baseUrl
   ].filter(Boolean).join(" ").toLowerCase();
-  let next = model;
+  let next = {
+    ...model,
+    allowedClients: normalizeStringList(model.allowedClients, ["*"])
+  };
   if ((haystack.includes("xiaomimimo.com") || haystack.includes("xiaomi") || haystack.includes("mimo")) && /\bmimo-v2\.5(?!-pro)\b/.test(haystack)) {
     next = {
       ...next,
@@ -174,6 +188,63 @@ function normalizeKnownModel(model, providers = []) {
   return { ...next, upstreamModel: normalized, aliases };
 }
 
+function providerText(provider) {
+  return [
+    provider?.id,
+    provider?.name,
+    provider?.displayName,
+    provider?.baseUrl
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function modelText(model) {
+  return [
+    model?.id,
+    model?.providerId,
+    model?.upstreamModel,
+    model?.displayName,
+    ...(model?.aliases || [])
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function looksLikeKnownTextOnlyModel(model, provider) {
+  const providerHaystack = providerText(provider);
+  const modelHaystack = modelText(model);
+  if (/vision|image|multimodal|janus|vl\b/.test(modelHaystack)) return false;
+  if (providerHaystack.includes("deepseek") || modelHaystack.includes("deepseek")) return true;
+  if (/\bglm-5\.2\b/.test(modelHaystack)) return true;
+  if (/\bkimi-k2\.7-code\b/.test(modelHaystack)) return true;
+  if (/\bminimax-m3\b/.test(modelHaystack)) return true;
+  return false;
+}
+
+function defaultVisionFallbackModelId(models) {
+  const preferred = models.find((model) => model.id === "xiaomi-mimo/mimo-v2.5" && (model.capabilities?.images || model.capabilities?.multimodal));
+  if (preferred) return preferred.id;
+  return "";
+}
+
+function normalizeKnownVisionFallbacks(models, providers = []) {
+  const providerMap = new Map((providers || []).map((provider) => [provider.id, provider]));
+  const fallbackModelId = defaultVisionFallbackModelId(models);
+  return models.map((model) => {
+    const provider = providerMap.get(model.providerId);
+    if (!looksLikeKnownTextOnlyModel(model, provider)) return model;
+    const next = {
+      ...model,
+      capabilities: {
+        ...(model.capabilities || {}),
+        images: false,
+        multimodal: false
+      }
+    };
+    if (!next.visionFallbackModelId && fallbackModelId && next.id !== fallbackModelId) {
+      next.visionFallbackModelId = fallbackModelId;
+    }
+    return next;
+  });
+}
+
 export function validateConfig(config) {
   if (!Array.isArray(config.providers)) throw new Error("config.providers must be an array");
   if (!Array.isArray(config.models)) throw new Error("config.models must be an array");
@@ -205,6 +276,34 @@ export function validateConfig(config) {
   return true;
 }
 
+function scopeAllows(scope, clientId) {
+  const allow = new Set(normalizeStringList(scope, ["*"]));
+  return allow.has("*") || allow.has(clientId);
+}
+
+function clientConfig(config, clientId) {
+  if (clientId === "claude-app") return config.clients?.["claude-app"] || config.clients?.["claude-code"] || { enabled: true, allowedModels: ["*"] };
+  return config.clients?.[clientId] || { enabled: true, allowedModels: ["*"] };
+}
+
+function clientScopeAllows(scope, clientId) {
+  if (scopeAllows(scope, clientId)) return true;
+  return clientId === "claude-app" && scopeAllows(scope, "claude-code");
+}
+
+export function modelVisibleToClient(config, model, clientId) {
+  if (!model || model.enabled === false) return false;
+  if (!clientId) return true;
+  const filter = clientConfig(config, clientId);
+  if (filter.enabled === false) return false;
+  const provider = (config.providers || []).find((item) => item.id === model.providerId);
+  if (!clientScopeAllows(provider?.allowedClients, clientId)) return false;
+  if (!clientScopeAllows(model.allowedClients, clientId)) return false;
+  const allow = new Set(filter.allowedModels || ["*"]);
+  const keys = [model.id, model.upstreamModel, claudeCodeDiscoveryModelId(model), claudeAppDiscoveryModelId(model), ...(model.aliases || [])].filter(Boolean);
+  return allow.has("*") || keys.some((key) => allow.has(key));
+}
+
 export function claudeCodeDiscoveryModelId(model) {
   const raw = String(model?.id || model?.upstreamModel || "").trim();
   if (!raw) return "";
@@ -219,6 +318,24 @@ export function claudeCodeDiscoveryModelId(model) {
     .slice(0, 80);
   const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
   return `claude-switchyard-${slug || "model"}-${hash}`;
+}
+
+const CLAUDE_APP_BLOCKED_MODEL_RE = /ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\bling\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic|solar|mercury|zamba|kat-coder|\bds-|dpsk/i;
+const CLAUDE_APP_ALLOWED_MODEL_RE = /claude|anthropic|sonnet|opus|haiku|fable|mythos/i;
+
+function claudeAppAcceptsModelId(value) {
+  const id = String(value || "").trim();
+  return Boolean(id && CLAUDE_APP_ALLOWED_MODEL_RE.test(id) && !CLAUDE_APP_BLOCKED_MODEL_RE.test(id));
+}
+
+export function claudeAppDiscoveryModelId(model) {
+  const raw = String(model?.id || model?.upstreamModel || "").trim();
+  if (!raw) return "";
+  const displayAlias = (model?.aliases || []).find((alias) => claudeAppAcceptsModelId(alias));
+  if (displayAlias) return displayAlias;
+  if (claudeAppAcceptsModelId(raw)) return raw;
+  const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
+  return `claude-sonnet-4-5-switchyard-${hash}`;
 }
 
 export function publicModel(model, { idOverride } = {}) {
@@ -243,21 +360,25 @@ function displayNameWithProvider(model, providerName) {
   return `${base} · ${provider}`;
 }
 
-export function anthropicModelInfo(model, providerName, { idOverride } = {}) {
-  return {
+export function anthropicModelInfo(model, providerName, { idOverride, anthropicFamilyTier, isFamilyDefault } = {}) {
+  const out = {
     type: "model",
     id: idOverride || model.id,
     display_name: displayNameWithProvider(model, providerName),
     created_at: "1970-01-01T00:00:00Z"
   };
+  if (anthropicFamilyTier) out.anthropic_family_tier = anthropicFamilyTier;
+  if (isFamilyDefault) out.is_family_default = true;
+  return out;
 }
 
 export function publicModelsForClient(config, clientId) {
   const models = clientId ? listModelsForClient(config, clientId) : config.models;
-  if (clientId === "claude-code") {
+  if (clientId === "claude-code" || clientId === "claude-app") {
     const providerNames = new Map((config.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
-    return models.map((model) => anthropicModelInfo(model, providerNames.get(model.providerId) || model.providerId, {
-      idOverride: claudeCodeDiscoveryModelId(model)
+    return models.map((model, index) => anthropicModelInfo(model, providerNames.get(model.providerId) || model.providerId, {
+      idOverride: clientId === "claude-app" ? claudeAppDiscoveryModelId(model) : claudeCodeDiscoveryModelId(model),
+      ...(clientId === "claude-app" ? { anthropicFamilyTier: "sonnet", isFamilyDefault: index === 0 } : {})
     }));
   }
   return models.map(publicModel);
@@ -268,10 +389,8 @@ export function configLocation() {
 }
 
 export function listModelsForClient(config, clientId) {
-  const filter = (config.clients && config.clients[clientId]) || { enabled: true, allowedModels: ["*"] };
+  const filter = clientConfig(config, clientId);
   if (filter.enabled === false) return [];
-  const allow = new Set(filter.allowedModels || ["*"]);
   const enabledModels = config.models.filter((model) => model.enabled !== false);
-  if (allow.has("*")) return enabledModels.slice();
-  return enabledModels.filter((model) => allow.has(model.id) || (model.aliases || []).some((alias) => allow.has(alias)));
+  return enabledModels.filter((model) => modelVisibleToClient(config, model, clientId));
 }

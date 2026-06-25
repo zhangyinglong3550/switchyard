@@ -1,0 +1,41 @@
+{
+  "id": "unsupported-image-reactive-retry",
+  "title": "Runtime rectifier replaces image blocks after unsupported image error",
+  "operation": "runtime_rectifier",
+  "apiFormat": "openai_chat",
+  "status": 400,
+  "errorPayload": {
+    "error": {
+      "message": "This model only supports text and does not support image input."
+    }
+  },
+  "input": {
+    "model": "text-only",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "describe this" },
+          { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "output": {
+      "applied": true,
+      "errorClass": "vision.unsupported-image",
+      "action": { "id": "media-unsupported-image" },
+      "body": {
+        "messages": [
+          {
+            "content": [
+              { "type": "text", "text": "describe this" },
+              { "type": "text", "text": "[Unsupported Image]" }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

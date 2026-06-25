@@ -51,6 +51,69 @@ test("codex profile · merges with existing TOML without losing user blocks", ()
   assert.ok(r.backup, "backup created");
 });
 
+test("codex profile · official direct removes Switchyard routing without touching user blocks", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    '# managed-by: managed-by-switchyard',
+    'model_provider = "custom"',
+    `model_catalog_json = "${pw.codexModelCatalogPath()}"`,
+    'openai_base_url = "http://127.0.0.1:17888/v1"',
+    'model_reasoning_effort = "low"',
+    'model = "deepseek/deepseek-v4-pro"',
+    '',
+    '[mcp]',
+    'foo = "bar"',
+    '',
+    '[model_providers.custom]',
+    'name = "Switchyard"',
+    'base_url = "http://127.0.0.1:17888/codex/v1"',
+    'wire_api = "responses"',
+    'requires_openai_auth = true',
+    ''
+  ].join("\n"), "utf8");
+
+  const result = pw.applyCodexOfficialDirect();
+  const text = fs.readFileSync(file, "utf8");
+
+  assert.equal(result.mode, "official_direct");
+  assert.equal(result.path, file);
+  assert.ok(result.backup, "backup created");
+  assert.doesNotMatch(text, /managed-by-switchyard/);
+  assert.doesNotMatch(text, /model_provider\s*=\s*"custom"/);
+  assert.doesNotMatch(text, /model_catalog_json/);
+  assert.doesNotMatch(text, /openai_base_url\s*=\s*"http:\/\/127\.0\.0\.1:17888\/v1"/);
+  assert.doesNotMatch(text, /\[model_providers\.custom\]/);
+  assert.doesNotMatch(text, /\/codex\/v1/);
+  assert.match(text, /\[mcp\]/);
+  assert.match(text, /foo = "bar"/);
+});
+
+test("codex profile · official direct preserves non-Switchyard custom provider", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    'model_provider = "custom"',
+    'model = "gpt-4.1"',
+    '',
+    '[model_providers.custom]',
+    'name = "OpenAI"',
+    'base_url = "https://api.openai.com/v1"',
+    'wire_api = "responses"',
+    'requires_openai_auth = true',
+    ''
+  ].join("\n"), "utf8");
+
+  pw.applyCodexOfficialDirect();
+  const text = fs.readFileSync(file, "utf8");
+
+  assert.match(text, /model_provider = "custom"/);
+  assert.match(text, /model = "gpt-4\.1"/);
+  assert.match(text, /\[model_providers\.custom\]/);
+  assert.match(text, /name = "OpenAI"/);
+  assert.match(text, /base_url = "https:\/\/api\.openai\.com\/v1"/);
+});
+
 test("codex profile · writes model catalog for Codex App model picker", () => {
   const file = pw.codexConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -79,21 +142,30 @@ test("codex profile · writes model catalog for Codex App model picker", () => {
   assert.equal(r.ccSwitchProfilePath, pw.ccSwitchGatewayProfilePath());
   assert.equal(r.modelCount, 2);
   const catalog = JSON.parse(fs.readFileSync(r.catalogPath, "utf8"));
-  assert.deepEqual(catalog.models.map((model) => model.slug), ["codex/gpt-5.5", "deepseek/deepseek-v4-flash"]);
+  assert.deepEqual(catalog.models.map((model) => model.slug), ["gpt-5.5", "deepseek/deepseek-v4-flash"]);
   assert.equal(catalog.models[0].display_name, "GPT-5.5 via Switchyard · codex");
   assert.equal(catalog.models[0]["x-switchyard-model-id"], "codex/gpt-5.5");
+  assert.equal(catalog.models[0]["x-switchyard-upstream-model"], "gpt-5.5");
   assert.deepEqual(catalog.models[0].input_modalities, ["text", "image"]);
   assert.equal(catalog.models[0].default_reasoning_level, "low");
+  assert.deepEqual(catalog.models[0].additional_speed_tiers, ["fast"]);
+  assert.deepEqual(catalog.models[0].service_tiers, [{
+    id: "priority",
+    name: "Fast",
+    description: "1.5x speed, increased usage"
+  }]);
   assert.equal(catalog.models[1].display_name, "DeepSeek V4 Flash · deepseek");
   assert.equal(catalog.models[1].supported_in_api, true);
+  assert.deepEqual(catalog.models[1].additional_speed_tiers, []);
+  assert.deepEqual(catalog.models[1].service_tiers, []);
   const profile = fs.readFileSync(r.path, "utf8");
-  assert.match(profile, /model = "codex\/gpt-5\.5"/);
+  assert.match(profile, /model = "gpt-5\.5"/);
   const cache = JSON.parse(fs.readFileSync(r.cachePath, "utf8"));
   assert.equal(cache.client_version, "0.142.0");
   assert.equal(cache.etag, 'W/"switchyard-2"');
-  assert.deepEqual(cache.models.map((model) => model.slug), ["codex/gpt-5.5", "deepseek/deepseek-v4-flash"]);
+  assert.deepEqual(cache.models.map((model) => model.slug), ["gpt-5.5", "deepseek/deepseek-v4-flash"]);
   const ccSwitchCatalog = JSON.parse(fs.readFileSync(r.ccSwitchCatalogPath, "utf8"));
-  assert.deepEqual(ccSwitchCatalog.models.map((model) => model.slug), ["codex/gpt-5.5", "deepseek/deepseek-v4-flash"]);
+  assert.deepEqual(ccSwitchCatalog.models.map((model) => model.slug), ["gpt-5.5", "deepseek/deepseek-v4-flash"]);
   const ccSwitchProfile = fs.readFileSync(r.ccSwitchProfilePath, "utf8");
   assert.match(ccSwitchProfile, /model_provider = "custom"/);
   assert.match(ccSwitchProfile, /model_catalog_json = ".*cc-switch-model-catalog\.json"/);
@@ -151,10 +223,10 @@ test("codex profile · repairs model cache drift when Switchyard custom provider
   assert.equal(result.ok, true);
   assert.equal(result.cacheChanged, true);
   const cache = JSON.parse(fs.readFileSync(pw.codexModelsCachePath(), "utf8"));
-  assert.deepEqual(cache.models.map((model) => model.slug), ["codex/gpt-5.5", "deepseek/deepseek-v4-flash"]);
+  assert.deepEqual(cache.models.map((model) => model.slug), ["gpt-5.5", "deepseek/deepseek-v4-flash"]);
   assert.equal(cache.models[0].display_name, "GPT-5.5 · Codex");
   const catalog = JSON.parse(fs.readFileSync(pw.codexModelCatalogPath(), "utf8"));
-  assert.deepEqual(catalog.models.map((model) => model.slug), ["codex/gpt-5.5", "deepseek/deepseek-v4-flash"]);
+  assert.deepEqual(catalog.models.map((model) => model.slug), ["gpt-5.5", "deepseek/deepseek-v4-flash"]);
 });
 
 test("codex profile · skips model cache repair when custom provider is not Switchyard", () => {
@@ -184,6 +256,41 @@ test("codex profile · skips model cache repair when custom provider is not Swit
 
   assert.equal(result.skipped, true);
   assert.equal(fs.readFileSync(pw.codexModelsCachePath(), "utf8"), before);
+});
+
+test("profile artifacts · syncs Codex and Claude Code model caches from visible models", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    'model_provider = "custom"',
+    `model_catalog_json = "${pw.codexModelCatalogPath()}"`,
+    "",
+    "[model_providers.custom]",
+    'name = "Switchyard"',
+    'base_url = "http://127.0.0.1:17888/codex/v1"',
+    ""
+  ].join("\n"), "utf8");
+
+  const result = pw.syncClientModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    codexDefaultModel: "codex/gpt-5.5",
+    codexModels: [
+      { id: "codex/gpt-5.5", providerId: "codex", providerName: "Codex", upstreamModel: "gpt-5.5", displayName: "GPT-5.5" }
+    ],
+    claudeCodeModels: [
+      { id: "deepseek/deepseek-v4-pro", providerId: "deepseek", providerName: "DeepSeek", upstreamModel: "deepseek-v4-pro" }
+    ]
+  });
+
+  assert.equal(result.codex.ok, true);
+  assert.equal(result.claudeCode.modelCount, 1);
+  const codexCache = JSON.parse(fs.readFileSync(pw.codexModelsCachePath(), "utf8"));
+  assert.deepEqual(codexCache.models.map((model) => model.slug), ["gpt-5.5"]);
+  const claudeCache = JSON.parse(fs.readFileSync(pw.claudeCodeGatewayModelsCachePath(), "utf8"));
+  assert.equal(claudeCache.baseUrl, "http://127.0.0.1:17888/claude-code");
+  assert.equal(claudeCache.models.length, 1);
+  assert.equal(claudeCache.models[0].display_name, "deepseek-v4-pro · DeepSeek");
 });
 
 test("codex profile · model catalog display names include provider to disambiguate duplicates", () => {
@@ -374,7 +481,6 @@ test("claude-code profile · writes gateway model cache for full /model picker",
 
 test("claude-code model slots · keep fast models in Haiku instead of pinning Sonnet", () => {
   const env = pw.claudeCodeModelEnv({
-    defaultModel: "deepseek/deepseek-v4-flash",
     models: [
       { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" },
       { id: "deepseek/deepseek-v4-pro", providerId: "deepseek", upstreamModel: "deepseek-v4-pro" },
@@ -388,6 +494,20 @@ test("claude-code model slots · keep fast models in Haiku instead of pinning So
   assert.equal(env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL);
   assert.match(env.ANTHROPIC_DEFAULT_OPUS_MODEL, /^claude-switchyard-opencode-go-kimi-k2.7-code-/);
   assert.match(env.ANTHROPIC_DEFAULT_FABLE_MODEL, /^claude-switchyard-opencode-go-glm-5.2-/);
+});
+
+test("claude-code model slots · explicit fast agent default becomes the active default", () => {
+  const env = pw.claudeCodeModelEnv({
+    defaultModel: "deepseek/deepseek-v4-flash",
+    models: [
+      { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" },
+      { id: "deepseek/deepseek-v4-pro", providerId: "deepseek", upstreamModel: "deepseek-v4-pro" }
+    ]
+  });
+
+  assert.match(env.ANTHROPIC_MODEL, /^claude-switchyard-deepseek-deepseek-v4-flash-/);
+  assert.equal(env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+  assert.match(env.ANTHROPIC_DEFAULT_SONNET_MODEL, /^claude-switchyard-deepseek-deepseek-v4-pro-/);
 });
 
 test("claude-code model slots · ignore Codex GPT default when third-party models exist", () => {
@@ -432,6 +552,26 @@ test("claude-code model slots · explicit mapping overrides automatic slot picks
   assert.match(env.ANTHROPIC_DEFAULT_OPUS_MODEL, /^claude-switchyard-opencode-go-glm-5.2-/);
   assert.match(env.ANTHROPIC_DEFAULT_FABLE_MODEL, /^claude-switchyard-coding-plan-kimi-k2.7-code-/);
   assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, "GLM 5.2");
+});
+
+test("claude-code model slots · agent default model overrides stale default slot mapping", () => {
+  const env = pw.claudeCodeModelEnv({
+    defaultModel: "coding-plan/GLM-5.2",
+    models: [
+      { id: "codex/gpt-5.5", providerId: "codex", upstreamModel: "gpt-5.5", displayName: "GPT-5.5" },
+      { id: "coding-plan/GLM-5.2", providerId: "coding-plan", upstreamModel: "GLM-5.2", displayName: "GLM-5.2" },
+      { id: "huoshan-agent/glm-5.2", providerId: "huoshan-agent", upstreamModel: "glm-5.2", displayName: "glm-5.2" }
+    ],
+    modelMapping: {
+      default: "codex/gpt-5.5",
+      haiku: "huoshan-agent/glm-5.2",
+      sonnet: "coding-plan/GLM-5.2"
+    }
+  });
+
+  assert.match(env.ANTHROPIC_MODEL, /^claude-switchyard-coding-plan-glm-5.2-/);
+  assert.equal(env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL);
+  assert.ok(!env.ANTHROPIC_MODEL.includes("codex-gpt-5.5"));
 });
 
 test("hermes profile · creates file when absent", () => {
@@ -506,6 +646,20 @@ test("restoreLatest · skips backups identical to current file", () => {
   const r = pw.restoreLatest(file);
   assert.equal(r.ok, true);
   assert.match(fs.readFileSync(file, "utf8"), /original/);
+});
+
+test("restoreProfileBackup · restores selected backup by name", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "current\n", "utf8");
+  fs.mkdirSync(process.env.SWITCHYARD_BACKUP_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-01-000Z.bak"), "newer\n", "utf8");
+  fs.writeFileSync(path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-00-000Z.bak"), "selected\n", "utf8");
+
+  const r = pw.restoreProfileBackup("codex", "config.toml.2099-01-01T00-00-00-000Z.bak");
+  assert.equal(r.ok, true);
+  assert.equal(r.backupName, "config.toml.2099-01-01T00-00-00-000Z.bak");
+  assert.equal(fs.readFileSync(file, "utf8"), "selected\n");
 });
 
 test("restoreProfile · returns no-backup when file never backed up", () => {

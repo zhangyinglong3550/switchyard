@@ -3,6 +3,7 @@ import { resolveRoute } from "./router.mjs";
 import { dispatchChat } from "./upstream/dispatch.mjs";
 
 const DESC_MAX_CHARS = 2000;
+const CONTEXT_MAX_CHARS = 1200;
 
 function modelSupportsImages(model) {
   return Boolean(model?.capabilities?.images || model?.capabilities?.multimodal);
@@ -55,25 +56,24 @@ function descriptionMarker(text) {
   return `[vision fallback: the original request contained image input. A configured vision model described it for this text-only model:\n${clamp(text)}]`;
 }
 
-function describePromptContent(chatBody) {
+function describePromptContent(message, imagePart, imageIndex) {
   const content = [];
-  const context = (chatBody.messages || [])
-    .map((msg) => contentToText(msg.content))
-    .filter(Boolean)
-    .join("\n")
-    .slice(0, 1000);
-  if (context) content.push({ type: "text", text: `User request context:\n${context}` });
-  for (const msg of chatBody.messages || []) {
-    if (!Array.isArray(msg.content)) continue;
-    for (const part of msg.content) {
-      const normalized = toVisionContentPart(part);
-      if (normalized) content.push(normalized);
-    }
-  }
-  return content.length ? content : [{ type: "text", text: "Describe the attached image." }];
+  const context = contentToText(message?.content).trim().slice(0, CONTEXT_MAX_CHARS);
+  const label = imageIndex ? ` #${imageIndex}` : "";
+  content.push({
+    type: "text",
+    text: [
+      `Describe only the attached image${label}.`,
+      "Ignore any previous images or prior assistant answers in the conversation.",
+      context ? `Nearby user text:\n${context}` : ""
+    ].filter(Boolean).join("\n")
+  });
+  const normalized = toVisionContentPart(imagePart);
+  if (normalized) content.push(normalized);
+  return content;
 }
 
-async function describeWithFallback(config, fallbackModelId, chatBody, opts = {}) {
+async function describeWithFallback(config, fallbackModelId, message, imagePart, opts = {}) {
   const fallbackRoute = resolveRoute(config, fallbackModelId, { clientId: opts.clientId });
   if (!fallbackRoute) return { text: "", error: `vision fallback model not found: ${fallbackModelId}` };
   const result = await dispatchChat(fallbackRoute.provider, fallbackRoute.upstreamModel, {
@@ -84,7 +84,7 @@ async function describeWithFallback(config, fallbackModelId, chatBody, opts = {}
         role: "system",
         content: "You describe images for a text-only model. Be factual, transcribe visible text, and focus on details relevant to the user request. Output only the description."
       },
-      { role: "user", content: describePromptContent(chatBody) }
+      { role: "user", content: describePromptContent(message, imagePart, opts.imageIndex) }
     ],
     stream: false
   }, { clientId: opts.clientId, fetchImpl: opts.fetchImpl, proxyUrl: fallbackRoute.model.proxyUrl });
@@ -93,9 +93,47 @@ async function describeWithFallback(config, fallbackModelId, chatBody, opts = {}
   return { text: contentToText(result.payload?.choices?.[0]?.message?.content || "") };
 }
 
-function replaceImages(content, marker) {
-  if (!Array.isArray(content)) return content;
-  return content.map((part) => isImagePart(part) ? { type: "text", text: marker } : part);
+async function replaceImagesWithFallback(config, route, chatBody, opts = {}) {
+  const fallbackModelId = route.model.visionFallbackModelId;
+  const cache = new Map();
+  const results = [];
+  let imageCount = 0;
+  const messages = [];
+  for (const message of chatBody.messages || []) {
+    if (!Array.isArray(message?.content) || !message.content.some(isImagePart)) {
+      messages.push(message);
+      continue;
+    }
+    const content = [];
+    for (const part of message.content) {
+      if (!isImagePart(part)) {
+        content.push(part);
+        continue;
+      }
+      imageCount += 1;
+      const url = imageUrlFromPart(part);
+      const cacheKey = url || `image:${imageCount}`;
+      let outcome = cache.get(cacheKey);
+      if (!outcome) {
+        outcome = await describeWithFallback(config, fallbackModelId, message, part, {
+          ...opts,
+          imageIndex: imageCount
+        });
+        cache.set(cacheKey, outcome);
+        results.push({ ok: !outcome.error, error: outcome.error || "" });
+      }
+      const marker = descriptionMarker(outcome.error ? `The image could not be described: ${outcome.error}` : outcome.text);
+      content.push({ type: "text", text: marker });
+    }
+    messages.push({ ...message, content });
+  }
+  return {
+    messages,
+    imageCount,
+    fallbackCount: results.length,
+    fallbackOk: results.length > 0 && results.every((item) => item.ok),
+    fallbackError: results.map((item) => item.error).filter(Boolean).join("; ")
+  };
 }
 
 export async function applyVisionFallback(config, route, chatBody, opts = {}) {
@@ -117,20 +155,18 @@ export async function applyVisionFallback(config, route, chatBody, opts = {}) {
     return { ...chatBody, _switchyardVision: { ...baseDiagnostic, mode: "fallback_self" } };
   }
 
-  const outcome = await describeWithFallback(config, route.model.visionFallbackModelId, chatBody, opts);
-  const marker = descriptionMarker(outcome.error ? `The image could not be described: ${outcome.error}` : outcome.text);
+  const outcome = await replaceImagesWithFallback(config, route, chatBody, opts);
   return {
     ...chatBody,
     _switchyardVision: {
       ...baseDiagnostic,
       mode: "fallback",
       fallbackModelId: route.model.visionFallbackModelId,
-      fallbackOk: !outcome.error,
-      fallbackError: outcome.error || ""
+      imageCount: outcome.imageCount,
+      fallbackCount: outcome.fallbackCount,
+      fallbackOk: outcome.fallbackOk,
+      fallbackError: outcome.fallbackError
     },
-    messages: (chatBody.messages || []).map((msg) => ({
-      ...msg,
-      content: replaceImages(msg.content, marker)
-    }))
+    messages: outcome.messages
   };
 }

@@ -5,14 +5,36 @@ import { recordRequestEvent } from "./request-log-store.mjs";
 
 const RING = [];
 const RING_LIMIT = 500;
+const DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024;
 const SUBSCRIBERS = new Set();
 let writeStream = null;
 
+function configuredLogMaxBytes() {
+  const value = Number(process.env.SWITCHYARD_LOG_MAX_BYTES || DEFAULT_LOG_MAX_BYTES);
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : DEFAULT_LOG_MAX_BYTES;
+}
+
+function dropOversizedLogFile(file) {
+  const maxBytes = configuredLogMaxBytes();
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size < maxBytes) return;
+    if (writeStream && !writeStream.closed) {
+      writeStream.destroy();
+      writeStream = null;
+    }
+    fs.rmSync(file, { force: true });
+  } catch {
+    // Missing or unreadable log files are handled by createWriteStream below.
+  }
+}
+
 function ensureWriteStream() {
-  if (writeStream && !writeStream.closed) return writeStream;
   const dir = logDir();
   ensureDir(dir);
   const file = path.join(dir, "gateway.log");
+  dropOversizedLogFile(file);
+  if (writeStream && !writeStream.closed) return writeStream;
   writeStream = fs.createWriteStream(file, { flags: "a" });
   return writeStream;
 }

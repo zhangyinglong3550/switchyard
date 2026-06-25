@@ -111,3 +111,47 @@ test("codex history unify · rewrites source providers with backups", (t) => {
   assert.match(fs.readFileSync(customRollout, "utf8"), /"model_provider":"custom"/);
   assert.match(fs.readFileSync(switchyardRollout, "utf8"), /"model_provider":"custom"/);
 });
+
+test("codex history unify · dry-run target openai reports affected custom/switchyard threads", (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const { db, customRollout, switchyardRollout } = setupState();
+
+  const result = history.unifyCodexHistory({ dryRun: true, targetProvider: "openai" });
+  assert.equal(result.ok, true);
+  assert.equal(result.dryRun, true);
+  assert.equal(result.targetProvider, "openai");
+  assert.equal(result.affectedThreads, 2);
+  assert.deepEqual(result.counts, { switchyard: 1, custom: 1 });
+  const rows = sqliteJson(db, "SELECT id, model_provider FROM threads ORDER BY id");
+  assert.deepEqual(rows, [
+    { id: "thread-custom", model_provider: "custom" },
+    { id: "thread-openai", model_provider: "openai" },
+    { id: "thread-switchyard", model_provider: "switchyard" }
+  ]);
+  assert.match(fs.readFileSync(customRollout, "utf8"), /"model_provider":"custom"/);
+  assert.match(fs.readFileSync(switchyardRollout, "utf8"), /"model_provider":"switchyard"/);
+});
+
+test("codex history unify · rewrites source providers to openai with backups", (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const { db, openaiRollout, customRollout, switchyardRollout } = setupState();
+
+  const result = history.unifyCodexHistory({ targetProvider: "openai" });
+  assert.equal(result.ok, true);
+  assert.equal(result.dryRun, false);
+  assert.equal(result.targetProvider, "openai");
+  assert.equal(result.affectedThreads, 2);
+  assert.equal(result.backedUpRollouts, 2);
+  assert.equal(result.updatedRollouts, 2);
+  assert.ok(fs.existsSync(path.join(result.backupRoot, "state_5.sqlite")));
+  assert.ok(fs.existsSync(path.join(result.backupRoot, "sessions", "custom.jsonl")));
+  const rows = sqliteJson(db, "SELECT id, model_provider FROM threads ORDER BY id");
+  assert.deepEqual(rows, [
+    { id: "thread-custom", model_provider: "openai" },
+    { id: "thread-openai", model_provider: "openai" },
+    { id: "thread-switchyard", model_provider: "openai" }
+  ]);
+  assert.match(fs.readFileSync(openaiRollout, "utf8"), /"model_provider":"openai"/);
+  assert.match(fs.readFileSync(customRollout, "utf8"), /"model_provider":"openai"/);
+  assert.match(fs.readFileSync(switchyardRollout, "utf8"), /"model_provider":"openai"/);
+});

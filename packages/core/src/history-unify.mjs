@@ -4,8 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_HOME, ensureDir } from "./utils.mjs";
 
-const DEFAULT_SOURCE_PROVIDERS = ["openai", "switchyard", "deepseek", "ccswitch_gateway"];
-const TARGET_PROVIDER = "custom";
+const DEFAULT_TARGET_PROVIDER = "custom";
+const KNOWN_PROVIDERS = ["custom", "openai", "switchyard", "deepseek", "ccswitch_gateway"];
+
+export function defaultSourceProvidersFor(targetProvider = DEFAULT_TARGET_PROVIDER) {
+  return KNOWN_PROVIDERS.filter((p) => p !== targetProvider);
+}
 
 export function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -80,8 +84,8 @@ function replaceSessionMetaProvider(filePath, targetProvider) {
 }
 
 export function unifyCodexHistory({
-  sourceProviders = DEFAULT_SOURCE_PROVIDERS,
-  targetProvider = TARGET_PROVIDER,
+  targetProvider = DEFAULT_TARGET_PROVIDER,
+  sourceProviders = defaultSourceProvidersFor(targetProvider),
   dryRun = false
 } = {}) {
   const stateDb = codexStateDbPath();

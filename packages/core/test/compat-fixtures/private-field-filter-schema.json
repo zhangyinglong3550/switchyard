@@ -1,0 +1,55 @@
+{
+  "id": "private-field-filter-schema",
+  "title": "Private _ fields are removed except schema property names",
+  "operation": "private_field_filter",
+  "input": {
+    "model": "model",
+    "_internal": "drop",
+    "messages": [
+      { "role": "user", "content": "hi", "_trace": "drop" }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Lookup",
+          "_internal": "drop",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "_field": { "type": "string" },
+              "name": { "type": "string", "_private": "drop" }
+            },
+            "$defs": {
+              "_kept": { "type": "string" }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "expect": {
+    "output": {
+      "_internal": { "$exists": false },
+      "messages": [
+        { "role": "user", "content": "hi", "_trace": { "$exists": false } }
+      ],
+      "tools": [
+        {
+          "function": {
+            "_internal": { "$exists": false },
+            "parameters": {
+              "properties": {
+                "_field": { "type": "string" },
+                "name": { "type": "string", "_private": { "$exists": false } }
+              },
+              "$defs": {
+                "_kept": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

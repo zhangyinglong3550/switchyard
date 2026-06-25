@@ -1,0 +1,42 @@
+{
+  "id": "thinking-signature-rectifier",
+  "title": "Runtime rectifier removes invalid thinking signature history",
+  "operation": "runtime_rectifier",
+  "apiFormat": "anthropic_messages",
+  "status": 400,
+  "errorPayload": {
+    "error": {
+      "message": "invalid signature in thinking block"
+    }
+  },
+  "input": {
+    "model": "deepseek-v4-pro",
+    "thinking": { "type": "enabled", "budget_tokens": 1024 },
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          { "type": "thinking", "thinking": "old", "signature": "bad" },
+          { "type": "tool_use", "id": "call_1", "name": "Read", "input": { "file_path": "a.md" } }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "output": {
+      "applied": true,
+      "errorClass": "thinking.signature-invalid",
+      "action": { "id": "thinking-signature" },
+      "body": {
+        "thinking": { "$exists": false },
+        "messages": [
+          {
+            "content": [
+              { "type": "tool_use", "id": "call_1", "name": "Read" }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

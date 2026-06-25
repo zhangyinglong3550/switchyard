@@ -26,6 +26,12 @@ function wrapContent(content) {
 
 export const glmContentTextPatch = {
   id: "glm-content-text",
+  label: "GLM 文本块格式化",
+  description: "部分 GLM 兼容接口不接受裸字符串 content，要求 typed text block。",
+  trigger: "provider/model 名称命中 GLM、Zhipu、Coding Plan 或手动启用 glm 规则。",
+  changes: ["把 message.content: string 改为 [{ type: \"text\", text }]"],
+  risk: "只改写文本消息结构；如果上游只接受裸字符串，可能需要关闭该规则。",
+  tests: ["glm-content-text · wraps bare string content into array for GLM providers"],
   match(ctx) { return targeted(ctx); },
   outbound(body) {
     if (!body || !Array.isArray(body.messages)) return body;

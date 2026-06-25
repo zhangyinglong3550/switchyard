@@ -208,7 +208,7 @@ test("importer · inline api keys are preserved for same-machine import by defau
   const { tmp, dbPath } = makeFixtureDb();
   insertProvider(dbPath, {
     id: "x", app_type: "claude", name: "VendorX",
-    cfg: { env: { ANTHROPIC_BASE_URL: "https://x.example.com", ANTHROPIC_AUTH_TOKEN: "sk-LIVE-KEY-DO-NOT-COMMIT" } }
+    cfg: { env: { ANTHROPIC_BASE_URL: "https://x.example.com", ANTHROPIC_AUTH_TOKEN: "TEST_INLINE_KEY_DO_NOT_COMMIT" } }
   });
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   fs.mkdirSync(path.join(tmp, ".cc-switch"), { recursive: true });
@@ -221,11 +221,11 @@ test("importer · inline api keys are preserved for same-machine import by defau
     const p = r.config.providers.find((p) => p.id === "vendorx");
     assert.ok(p);
     assert.ok(p.apiKeyEnv);
-    assert.equal(p.apiKey, "sk-LIVE-KEY-DO-NOT-COMMIT");
+    assert.equal(p.apiKey, "TEST_INLINE_KEY_DO_NOT_COMMIT");
     const meta = r.importMeta.providers.find((p) => p.slug === "vendorx");
     assert.equal(meta.hasInlineKey, true);
-    assert.equal(meta.keyPreview, "sk-L••••MMIT");
-    assert.equal(JSON.stringify(r.importMeta).includes("sk-LIVE-KEY-DO-NOT-COMMIT"), false);
+    assert.equal(meta.keyPreview, "TEST••••MMIT");
+    assert.equal(JSON.stringify(r.importMeta).includes("TEST_INLINE_KEY_DO_NOT_COMMIT"), false);
   } finally { process.env.HOME = prevHome; }
 });
 
@@ -233,7 +233,7 @@ test("importer · includeKeys=false keeps previous redacted behavior", async (t)
   const { tmp, dbPath } = makeFixtureDb();
   insertProvider(dbPath, {
     id: "x", app_type: "claude", name: "VendorX",
-    cfg: { env: { ANTHROPIC_BASE_URL: "https://x.example.com", ANTHROPIC_AUTH_TOKEN: "sk-LIVE-KEY-DO-NOT-COMMIT" } }
+    cfg: { env: { ANTHROPIC_BASE_URL: "https://x.example.com", ANTHROPIC_AUTH_TOKEN: "TEST_INLINE_KEY_DO_NOT_COMMIT" } }
   });
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   fs.mkdirSync(path.join(tmp, ".cc-switch"), { recursive: true });
@@ -244,7 +244,7 @@ test("importer · includeKeys=false keeps previous redacted behavior", async (t)
     const mod = await import(`../src/importers/ccswitch.mjs?v=${Date.now()}`);
     const r = mod.importProviders({ includeKeys: false });
     const dump = JSON.stringify(r);
-    assert.equal(dump.includes("sk-LIVE-KEY-DO-NOT-COMMIT"), false);
+    assert.equal(dump.includes("TEST_INLINE_KEY_DO_NOT_COMMIT"), false);
     const p = r.config.providers.find((p) => p.id === "vendorx");
     assert.ok(p);
     assert.ok(p.apiKeyEnv);

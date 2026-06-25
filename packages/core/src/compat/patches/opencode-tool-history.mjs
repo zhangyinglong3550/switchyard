@@ -38,6 +38,12 @@ function reorderMessages(messages) {
 
 export const opencodeToolHistoryPatch = {
   id: "opencode-tool-history",
+  label: "OpenCode 工具历史排序",
+  description: "OpenCode Go 代理层对工具结果位置更敏感，可能拒绝乱序历史。",
+  trigger: "provider/model 名称命中 OpenCode，或手动启用 opencode-go 规则。",
+  changes: ["把 pending tool_result 移到对应 assistant tool_calls 后面"],
+  risk: "会重排历史消息；只用于 OpenCode 兼容路径。",
+  tests: ["opencode-tool-history · reorders tool_results after their assistant message"],
   match(ctx) { return targeted(ctx); },
   outbound(body) {
     if (!body || !Array.isArray(body.messages)) return body;

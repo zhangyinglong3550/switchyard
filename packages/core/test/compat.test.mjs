@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { registerPatch, applyOutbound, applyInbound, listPatchIds, resetPatches, registerBuiltinPatches, listCompatPacks } from "../src/compat/index.mjs";
+import {
+  registerPatch,
+  applyOutbound,
+  applyInbound,
+  listPatchIds,
+  resetPatches,
+  registerBuiltinPatches,
+  listCompatPacks,
+  activePatchDescriptors
+} from "../src/compat/index.mjs";
 
 test("compat registry only applies patches whose match() returns true", () => {
   resetPatches();
@@ -68,5 +77,49 @@ test("compat packs can force provider/model scoped builtin patches", () => {
     { provider: { id: "custom-provider" }, model: { id: "custom-provider/custom-model" } }
   );
   assert.equal(typeof vanilla.messages[0].content, "string", "unconfigured models stay untouched");
+  resetPatches();
+});
+
+test("compat rules expose automatic and forced activation metadata", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const auto = activePatchDescriptors({
+    provider: { id: "deepseek" },
+    model: { id: "deepseek/deepseek-v4-pro", providerId: "deepseek" },
+    direction: "inbound"
+  });
+  const deepseek = auto.find((rule) => rule.id === "deepseek-reasoning");
+  assert.equal(deepseek.source, "auto");
+  assert.equal(deepseek.direction, "inbound");
+  assert.match(deepseek.label, /DeepSeek|reasoning/i);
+  assert.ok(deepseek.trigger);
+  assert.ok(deepseek.risk);
+  const deepseekOutbound = activePatchDescriptors({
+    provider: { id: "deepseek" },
+    model: { id: "deepseek/deepseek-v4-pro", providerId: "deepseek" },
+    direction: "outbound"
+  });
+  assert.equal(deepseekOutbound.some((rule) => rule.id === "deepseek-reasoning"), false);
+
+  const forced = activePatchDescriptors({
+    provider: { id: "custom-provider", compatPacks: ["glm"] },
+    model: { id: "custom/model", providerId: "custom-provider" },
+    direction: "outbound"
+  });
+  const glm = forced.find((rule) => rule.id === "glm-content-text");
+  assert.equal(glm.source, "manual");
+  assert.ok(glm.changes.length > 0);
+  resetPatches();
+});
+
+test("tool-history-adjacent does not auto-activate for native Anthropic upstreams", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const outbound = activePatchDescriptors({
+    provider: { id: "deepseek", apiFormat: "anthropic_messages" },
+    model: { id: "deepseek/deepseek-v4-pro", providerId: "deepseek" },
+    direction: "outbound"
+  });
+  assert.equal(outbound.some((rule) => rule.id === "tool-history-adjacent"), false);
   resetPatches();
 });

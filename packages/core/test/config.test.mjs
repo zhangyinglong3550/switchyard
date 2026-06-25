@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { mergeWithDefaults, validateConfig, listModelsForClient, publicModelsForClient, initConfig, loadConfig, saveConfig } from "../src/config.mjs";
+import { resolveRoute } from "../src/router.mjs";
 
 test("mergeWithDefaults fills client filters", () => {
   const cfg = mergeWithDefaults({ providers: [], models: [] });
@@ -36,6 +37,20 @@ test("mergeWithDefaults preserves Claude Code model mapping", () => {
     haiku: "deepseek/deepseek-v4-flash",
     opus: "opencode-go/glm-5.2"
   });
+});
+
+test("mergeWithDefaults preserves per-agent default model", () => {
+  const cfg = mergeWithDefaults({
+    providers: [],
+    models: [],
+    clients: {
+      codex: { enabled: true, allowedModels: ["*"], defaultModel: "codex/gpt-5.5" },
+      "claude-code": { enabled: true, allowedModels: ["*"], defaultModel: "deepseek/deepseek-v4-pro" }
+    }
+  });
+
+  assert.equal(cfg.clients.codex.defaultModel, "codex/gpt-5.5");
+  assert.equal(cfg.clients["claude-code"].defaultModel, "deepseek/deepseek-v4-pro");
 });
 
 test("validateConfig rejects duplicate provider id", () => {
@@ -101,6 +116,45 @@ test("listModelsForClient hides disabled models", () => {
   assert.deepEqual(listModelsForClient(cfg, "codex").map((m) => m.id), ["m1"]);
 });
 
+test("listModelsForClient applies provider and model visible agent scopes", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "p-codex", apiFormat: "openai_chat", baseUrl: "http://x", allowedClients: ["codex"] },
+      { id: "p-all", apiFormat: "openai_chat", baseUrl: "http://x" }
+    ],
+    models: [
+      { id: "p-codex/a", providerId: "p-codex", upstreamModel: "a" },
+      { id: "p-codex/b", providerId: "p-codex", upstreamModel: "b", allowedClients: ["claude-code"] },
+      { id: "p-all/c", providerId: "p-all", upstreamModel: "c", allowedClients: ["claude-code"] },
+      { id: "p-all/d", providerId: "p-all", upstreamModel: "d" }
+    ],
+    clients: {
+      codex: { enabled: true, allowedModels: ["*"] },
+      "claude-code": { enabled: true, allowedModels: ["*"] }
+    }
+  });
+
+  assert.deepEqual(listModelsForClient(cfg, "codex").map((m) => m.id), ["p-codex/a", "p-all/d"]);
+  assert.deepEqual(listModelsForClient(cfg, "claude-code").map((m) => m.id), ["p-all/c", "p-all/d"]);
+});
+
+test("resolveRoute uses per-agent default model before global default", () => {
+  const cfg = mergeWithDefaults({
+    defaultModel: "p/global",
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: "http://x" }],
+    models: [
+      { id: "p/global", providerId: "p", upstreamModel: "global" },
+      { id: "p/codex", providerId: "p", upstreamModel: "codex" }
+    ],
+    clients: {
+      codex: { enabled: true, allowedModels: ["*"], defaultModel: "p/codex" }
+    }
+  });
+
+  const route = resolveRoute(cfg, "", { clientId: "codex" });
+  assert.equal(route.model.id, "p/codex");
+});
+
 test("publicModelsForClient returns Anthropic model-list shape for Claude Code", () => {
   const cfg = mergeWithDefaults({
     providers: [{ id: "deepseek", name: "DeepSeek", apiFormat: "openai_chat", baseUrl: "http://x" }],
@@ -134,6 +188,24 @@ test("mergeWithDefaults normalizes known misclassified providers", () => {
   assert.equal(cfg.providers[2].authMode, "codex_oauth");
   assert.equal(cfg.providers[2].providerType, "codex_oauth");
   assert.equal(cfg.providers[2].routingMode, "auto");
+});
+
+test("mergeWithDefaults forces Codex OAuth preset to the dedicated auth path", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      {
+        id: "codex",
+        presetId: "codex-oauth",
+        apiFormat: "openai_chat",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "api_key",
+        providerType: "openai"
+      }
+    ]
+  });
+  assert.equal(cfg.providers[0].apiFormat, "openai_responses");
+  assert.equal(cfg.providers[0].authMode, "codex_oauth");
+  assert.equal(cfg.providers[0].providerType, "codex_oauth");
 });
 
 test("mergeWithDefaults normalizes provider-specific display model tags", () => {
@@ -172,6 +244,32 @@ test("mergeWithDefaults marks Xiaomi MiMo V2.5 as multimodal", () => {
   assert.equal(cfg.models[0].capabilities.multimodal, true);
   assert.equal(cfg.models[1].capabilities.images, undefined);
   assert.equal(cfg.models[1].capabilities.multimodal, undefined);
+});
+
+test("mergeWithDefaults corrects known text-only models misclassified as multimodal", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "deepseek", name: "DeepSeek", apiFormat: "openai_chat", baseUrl: "https://api.deepseek.com/v1" },
+      { id: "coding-plan", name: "火山Coding plan", apiFormat: "openai_chat", baseUrl: "https://ark.cn-beijing.volces.com/api/v3" },
+      { id: "xiaomi-mimo", name: "Xiaomi MiMo", apiFormat: "openai_chat", baseUrl: "https://api.xiaomimimo.com/v1" }
+    ],
+    models: [
+      { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash", capabilities: { text: true, images: true, multimodal: true } },
+      { id: "coding-plan/GLM-5.2", providerId: "coding-plan", upstreamModel: "GLM-5.2", capabilities: { text: true, images: true, multimodal: true } },
+      { id: "coding-plan/Kimi-K2.7-Code", providerId: "coding-plan", upstreamModel: "Kimi-K2.7-Code", capabilities: { text: true, images: true, multimodal: true } },
+      { id: "coding-plan/minimax-m3", providerId: "coding-plan", upstreamModel: "minimax-m3", capabilities: { text: true, images: true, multimodal: true } },
+      { id: "xiaomi-mimo/mimo-v2.5", providerId: "xiaomi-mimo", upstreamModel: "mimo-v2.5", capabilities: { text: true, stream: true } }
+    ]
+  });
+  for (const id of ["deepseek/deepseek-v4-flash", "coding-plan/GLM-5.2", "coding-plan/Kimi-K2.7-Code", "coding-plan/minimax-m3"]) {
+    const model = cfg.models.find((item) => item.id === id);
+    assert.equal(model.capabilities.images, false);
+    assert.equal(model.capabilities.multimodal, false);
+    assert.equal(model.visionFallbackModelId, "xiaomi-mimo/mimo-v2.5");
+  }
+  const vision = cfg.models.find((item) => item.id === "xiaomi-mimo/mimo-v2.5");
+  assert.equal(vision.capabilities.images, true);
+  assert.equal(vision.capabilities.multimodal, true);
 });
 
 test("initConfig/loadConfig/saveConfig round trip in tempdir", () => {

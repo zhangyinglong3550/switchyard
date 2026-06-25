@@ -1,0 +1,72 @@
+{
+  "id": "claude-code-tool-concurrency",
+  "title": "Claude Code parallel tool_use/tool_result survives Anthropic to Chat conversion",
+  "operation": "anthropic_to_chat",
+  "upstreamModel": "deepseek-v4-pro",
+  "input": {
+    "model": "claude-switchyard-deepseek-deepseek-v4-pro-demo",
+    "max_tokens": 128,
+    "tools": [
+      {
+        "name": "Read",
+        "description": "Read a local file",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": { "type": "string" }
+          },
+          "required": ["file_path"]
+        }
+      }
+    ],
+    "messages": [
+      { "role": "user", "content": "read two files" },
+      {
+        "role": "assistant",
+        "content": [
+          { "type": "tool_use", "id": "toolu_a", "name": "Read", "input": { "file_path": "a.md" } },
+          { "type": "tool_use", "id": "toolu_b", "name": "Read", "input": { "file_path": "b.md" } }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          { "type": "tool_result", "tool_use_id": "toolu_a", "content": "A content" },
+          { "type": "tool_result", "tool_use_id": "toolu_b", "content": [{ "type": "text", "text": "B content" }] },
+          { "type": "text", "text": "continue" }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "output": {
+      "model": "deepseek-v4-pro",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "Read",
+            "parameters": {
+              "properties": {
+                "file_path": { "type": "string" }
+              }
+            }
+          }
+        }
+      ],
+      "messages": [
+        { "role": "user", "content": "read two files" },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            { "id": "toolu_a", "function": { "name": "Read", "arguments": "{\"file_path\":\"a.md\"}" } },
+            { "id": "toolu_b", "function": { "name": "Read", "arguments": "{\"file_path\":\"b.md\"}" } }
+          ]
+        },
+        { "role": "tool", "tool_call_id": "toolu_a", "content": "A content" },
+        { "role": "tool", "tool_call_id": "toolu_b", "content": "B content" },
+        { "role": "user", "content": "continue" }
+      ]
+    }
+  }
+}

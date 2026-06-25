@@ -49,3 +49,26 @@ test("desktop logs · appendLog persists requestLog events to SQLite", async (t)
   assert.equal(rows[0].model_id, "p/a");
   assert.equal(rows[0].total_tokens, 7);
 });
+
+test("desktop logs · drops gateway.log before append when it exceeds max bytes", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-logs-"));
+  const logDir = path.join(tmp, "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(path.join(logDir, "gateway.log"), "x".repeat(256));
+  process.env.SWITCHYARD_LOG_DIR = logDir;
+  process.env.SWITCHYARD_LOG_MAX_BYTES = "128";
+  t.after(async () => {
+    try { await logs.closeLogStreamForTest(); } catch {}
+    delete process.env.SWITCHYARD_LOG_DIR;
+    delete process.env.SWITCHYARD_LOG_MAX_BYTES;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const logs = await import(`../../../apps/desktop/src/logs.mjs?v=${Date.now()}-${Math.random()}`);
+  logs.appendLog({ level: "info", msg: "after rotation" });
+  await logs.closeLogStreamForTest();
+
+  const text = fs.readFileSync(path.join(logDir, "gateway.log"), "utf8");
+  assert.match(text, /after rotation/);
+  assert.equal(text.includes("x".repeat(128)), false);
+});

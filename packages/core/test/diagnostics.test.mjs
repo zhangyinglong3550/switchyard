@@ -8,6 +8,9 @@ test("diagnostics · classifies common gateway failures with repair hints", asyn
   assert.equal(mod.classifyGatewayError("Model `switchyard:xiaomi/foo` was not found in this provider's model listing").category, "model_not_found");
   assert.equal(mod.classifyGatewayError("Extra inputs are not permitted, field: '_modelId'").category, "schema");
   assert.equal(mod.classifyGatewayError("This model does not support image input").category, "capability");
+  assert.equal(mod.classifyGatewayError("The `content[].thinking` in the thinking mode must be passed back to the API.").category, "protocol_state");
+  assert.equal(mod.classifyGatewayError("400 due to tool use concurrency issues").category, "tool_result_order");
+  assert.equal(mod.classifyGatewayError("unsupported role: developer").category, "role_compat");
   assert.equal(mod.classifyGatewayError("unexpected boom").category, "unknown");
   assert.match(mod.classifyGatewayError("401 invalid api key").hint, /密钥|Key/i);
 });
@@ -86,4 +89,29 @@ test("diagnostics · detects client configuration drift from config contents", a
   assert.equal(drifted.codex.status, "drifted");
   assert.equal(drifted["claude-code"].status, "drifted");
   assert.equal(drifted.hermes.status, "drifted");
+});
+
+test("diagnostics · builds compatibility profile and rule recommendations from probes", async () => {
+  const mod = await import("../../../apps/desktop/src/diagnostics.mjs");
+  const profile = mod.buildCompatibilityProfile({
+    provider: { id: "custom", apiFormat: "anthropic_messages" },
+    model: { id: "custom/model", providerId: "custom" },
+    results: {
+      text: { ok: true },
+      stream: { ok: true },
+      tools: { ok: true },
+      "tool-thinking": { ok: false, error: "The `content[].thinking` in the thinking mode must be passed back to the API." },
+      "parallel-tools": { ok: false, error: "tool use concurrency issues" },
+      "developer-role": { ok: false, error: "unsupported role: developer" },
+      "schema-strictness": { ok: false, error: "Extra inputs are not permitted, field: '$schema'" }
+    },
+    activeRules: [{ id: "anthropic-thinking-roundtrip", source: "adapter", label: "Thinking round-trip" }]
+  });
+  assert.equal(profile.protocol, "anthropic_messages");
+  assert.equal(profile.flags.requiresThinkingRoundtrip, true);
+  assert.equal(profile.flags.requiresToolResultsTogether, true);
+  assert.equal(profile.flags.supportsDeveloperRole, false);
+  assert.equal(profile.flags.schemaStrictness, "high");
+  assert.ok(profile.recommendations.some((item) => item.ruleId === "developer-to-system"));
+  assert.ok(profile.activeRules[0].source === "adapter");
 });

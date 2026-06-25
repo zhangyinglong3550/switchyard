@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { ensureDir, logDir, nowIso } from "../../../packages/core/src/utils.mjs";
 
 const DEFAULT_RETAIN_DAYS = 14;
 const DEFAULT_MAX_ROWS = 10000;
+const DEFAULT_MAX_BYTES = 200 * 1024 * 1024;
 let initialized = false;
 let writeCount = 0;
 let cleanupTimer = null;
@@ -34,6 +36,72 @@ function intValue(value) {
   if (Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Math.trunc(Number(value));
   return 0;
+}
+
+function compactMessageList(messages = [], maxItems = 2) {
+  if (!Array.isArray(messages)) return [];
+  return messages.slice(0, maxItems).map((message) => ({
+    ...message,
+    text: typeof message?.text === "string" && message.text.length > 300
+      ? `${message.text.slice(0, 300)}...`
+      : message?.text
+  }));
+}
+
+function compactSummaryForStorage(summary) {
+  if (!summary || typeof summary !== "object") return summary;
+  const out = { ...summary };
+  if (summary.messages && typeof summary.messages === "object") {
+    out.messages = {
+      roleCounts: summary.messages.roleCounts || {},
+      images: intValue(summary.messages.images),
+      skills: Array.isArray(summary.messages.skills) ? summary.messages.skills.slice(0, 40) : [],
+      system: compactMessageList(summary.messages.system, 1),
+      user: compactMessageList(summary.messages.user, 3),
+      assistant: compactMessageList(summary.messages.assistant, 2),
+      tool: compactMessageList(summary.messages.tool, 2)
+    };
+  }
+  if (Array.isArray(summary.tools)) out.tools = summary.tools.slice(0, 40);
+  return out;
+}
+
+function jsonSummary(value, max = 12000) {
+  if (!value) return null;
+  const compact = compactSummaryForStorage(value);
+  const text = JSON.stringify(compact);
+  if (text.length <= max) return text;
+  const envelope = {
+    truncated: true,
+    protocol: compact?.protocol || "",
+    modelId: compact?.modelId || "",
+    providerId: compact?.providerId || "",
+    upstreamModel: compact?.upstreamModel || "",
+    conversionChain: compact?.conversionChain || null,
+    compatRules: compact?.compatRules || null,
+    rectifiers: compact?.rectifiers || null,
+    requestOverrides: compact?.requestOverrides || null,
+    params: compact?.params || null,
+    vision: compact?.vision || null,
+    toolCount: compact?.toolCount || 0,
+    streamDiagnostics: compact?.streamDiagnostics || null,
+    status: compact?.status,
+    stream: compact?.stream,
+    finishReason: compact?.finishReason,
+    usage: compact?.usage || null,
+    error: compact?.error || "",
+    text: typeof compact?.text === "string" ? compact.text.slice(0, 800) : undefined,
+    reasoning: typeof compact?.reasoning === "string" ? compact.reasoning.slice(0, 800) : undefined,
+    toolCalls: Array.isArray(compact?.toolCalls) ? compact.toolCalls.slice(0, 20) : undefined,
+    messages: compact?.messages || null
+  };
+  const fallback = JSON.stringify(envelope);
+  return fallback.length <= max ? fallback : JSON.stringify({ truncated: true, streamDiagnostics: compact?.streamDiagnostics || null });
+}
+
+function maxBytesValue(value = process.env.SWITCHYARD_REQUEST_LOG_MAX_BYTES) {
+  const parsed = Number(value ?? DEFAULT_MAX_BYTES);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : DEFAULT_MAX_BYTES;
 }
 
 export function initRequestLogStore() {
@@ -103,8 +171,8 @@ function sanitizeEvent(entry) {
     total_tokens: intValue(entry.totalTokens),
     prompt_preview: entry.promptPreview ? String(entry.promptPreview).slice(0, 1200) : null,
     response_preview: entry.responsePreview ? String(entry.responsePreview).slice(0, 1200) : null,
-    request_summary: entry.requestSummary ? JSON.stringify(entry.requestSummary).slice(0, 12000) : null,
-    response_summary: entry.responseSummary ? JSON.stringify(entry.responseSummary).slice(0, 12000) : null,
+    request_summary: jsonSummary(entry.requestSummary),
+    response_summary: jsonSummary(entry.responseSummary),
     error: entry.error ? String(entry.error).slice(0, 500) : null
   };
 }
@@ -119,6 +187,41 @@ export function recordRequestEvent(entry) {
   writeCount += 1;
   if (writeCount % 50 === 0) cleanupRequestLogs();
   return row;
+}
+
+function requestLogDiskBytes() {
+  const db = requestLogDbPath();
+  let total = 0;
+  for (const file of [db, `${db}-wal`, `${db}-shm`]) {
+    try { total += fs.statSync(file).size; } catch {}
+  }
+  return total;
+}
+
+function compactRequestLogDb() {
+  try { runSql("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"); } catch {}
+}
+
+function requestLogRowCount() {
+  const rows = runSql("SELECT COUNT(*) AS count FROM request_logs;", { json: true });
+  return intValue(rows?.[0]?.count);
+}
+
+function enforceRequestLogMaxBytes(maxBytes) {
+  const limit = maxBytesValue(maxBytes);
+  compactRequestLogDb();
+  while (requestLogDiskBytes() > limit) {
+    const count = requestLogRowCount();
+    if (count <= 0) break;
+    const deleteCount = count <= 1 ? 1 : Math.ceil(count / 2);
+    runSql(`
+      DELETE FROM request_logs
+      WHERE id IN (
+        SELECT id FROM request_logs ORDER BY ts ASC, id ASC LIMIT ${deleteCount}
+      );
+    `);
+    compactRequestLogDb();
+  }
 }
 
 function whereClause(filters = {}) {
@@ -207,7 +310,7 @@ export function usageDaily(filters = {}) {
   `, { json: true }).slice(0, limit * 200);
 }
 
-export function cleanupRequestLogs({ retainDays = DEFAULT_RETAIN_DAYS, maxRows = DEFAULT_MAX_ROWS, now = new Date() } = {}) {
+export function cleanupRequestLogs({ retainDays = DEFAULT_RETAIN_DAYS, maxRows = DEFAULT_MAX_ROWS, maxBytes = maxBytesValue(), now = new Date() } = {}) {
   initRequestLogStore();
   const cutoff = new Date(now.getTime() - Math.max(1, retainDays) * 24 * 60 * 60 * 1000).toISOString();
   runSql(`DELETE FROM request_logs WHERE ts < ${valueSql(cutoff)};`);
@@ -217,6 +320,7 @@ export function cleanupRequestLogs({ retainDays = DEFAULT_RETAIN_DAYS, maxRows =
       SELECT id FROM request_logs ORDER BY ts DESC, id DESC LIMIT ${Math.max(1, intValue(maxRows))}
     );
   `);
+  enforceRequestLogMaxBytes(maxBytes);
 }
 
 export function scheduleRequestLogCleanup({ intervalMs = 6 * 60 * 60 * 1000 } = {}) {

@@ -1,0 +1,50 @@
+{
+  "id": "codex-responses-to-deepseek-thinking",
+  "title": "Codex Responses reasoning encrypted_content restores Anthropic thinking before tool_result",
+  "operation": "responses_to_anthropic_messages",
+  "chatModel": "deepseek-v4-pro",
+  "upstreamModel": "deepseek-v4-pro",
+  "input": {
+    "input": [
+      {
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [{ "type": "summary_text", "text": "selected a tool" }],
+        "content": [{ "type": "reasoning_text", "text": "selected a tool" }],
+        "encrypted_content": "switchyard:anthropic-thinking:v1:W3sidHlwZSI6InRoaW5raW5nIiwidGhpbmtpbmciOiJzZWxlY3RlZCBhIHRvb2wiLCJzaWduYXR1cmUiOiJzaWdfMTIzIn1d"
+      },
+      {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "Read",
+        "arguments": "{\"file_path\":\"a.md\"}"
+      },
+      {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "file a"
+      }
+    ]
+  },
+  "expect": {
+    "output": {
+      "model": "deepseek-v4-pro",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            { "type": "thinking", "thinking": "selected a tool", "signature": "sig_123" },
+            { "type": "tool_use", "id": "call_1", "name": "Read", "input": { "file_path": "a.md" } }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            { "type": "tool_result", "tool_use_id": "call_1", "content": "file a" }
+          ]
+        }
+      ]
+    }
+  }
+}

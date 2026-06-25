@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "registry.deepseek.reasoning",
+      "providerIdPattern": "deepseek",
+      "providerHostPattern": "deepseek",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["deepseek"],
+      "reason": "DeepSeek Chat 兼容接口会返回 reasoning_content，并且多轮 thinking 需要按 Chat 模型规则回传。",
+      "impact": "启用 role-normalize、tool-history-adjacent、reasoning-options、reasoning-state、chat-reasoning 和 deepseek-reasoning。",
+      "risk": "如果该供应商代理已经自行转换 reasoning 字段，可能产生重复 reasoning 元数据。",
+      "fixtures": ["codex-responses-to-deepseek-thinking.json", "thinking-signature-rectifier.json"]
+    },
+    {
+      "id": "registry.glm.content-text",
+      "providerIdPattern": "glm|zhipu|z-ai|zai|coding-plan|agentplan",
+      "providerHostPattern": "bigmodel|zhipu|z-ai|zai|coding-plan|agentplan",
+      "modelPattern": "glm|z-ai|zai",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["glm"],
+      "reason": "GLM / 智谱类 OpenAI-compatible 接口常要求 typed content block，并有 provider-specific thinking 字段。",
+      "impact": "启用 role-normalize、reasoning-options、reasoning-state、chat-reasoning 和 glm-content-text。",
+      "risk": "如果上游只接受裸字符串 content，应关闭 glm-content-text 或不要应用该推荐。",
+      "fixtures": ["glm-content-text.json"]
+    },
+    {
+      "id": "registry.kimi.strict-tools",
+      "providerIdPattern": "kimi|moonshot",
+      "providerHostPattern": "moonshot|kimi",
+      "modelPattern": "kimi|moonshot",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["kimi"],
+      "reason": "Kimi / Moonshot 对工具 JSON Schema 更严格，常拒绝部分 JSON Schema 元字段。",
+      "impact": "启用 tool-name-normalize、strict-tool-schema 和 kimi-tool-schema。",
+      "risk": "复杂工具 schema 的表达力会被收窄；只建议在目标 Kimi provider/model 上启用。",
+      "fixtures": ["private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.openrouter.reasoning-tools",
+      "providerIdPattern": "openrouter",
+      "providerHostPattern": "openrouter",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["reasoning-chat", "strict-tools"],
+      "reason": "OpenRouter 会代理多种 reasoning/chat 模型，reasoning 参数和严格工具 schema 需要按模型族修正。",
+      "impact": "启用通用 Chat reasoning 适配和严格工具 schema 清理。",
+      "risk": "OpenRouter 代理的非 reasoning 模型通常也可接受；若某个模型不支持工具或 reasoning，可下沉到模型维度单独配置。",
+      "fixtures": ["openrouter-reasoning-effort.json", "private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.siliconflow.reasoning",
+      "providerIdPattern": "siliconflow",
+      "providerHostPattern": "siliconflow",
+      "modelPattern": "deepseek|qwen|glm|kimi",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["reasoning-chat", "role-normalize"],
+      "reason": "SiliconFlow 等聚合接口会用 provider-specific 字段开启 thinking，且部分模型不接受 developer/未知角色。",
+      "impact": "启用 reasoning-options、reasoning-state、chat-reasoning 和 role-normalize。",
+      "risk": "不同模型族 thinking 开关不同，建议用探针或 fixture 验证后保留。",
+      "fixtures": ["siliconflow-enable-thinking.json"]
+    },
+    {
+      "id": "registry.dashscope.qwen",
+      "providerIdPattern": "dashscope|bailian|aliyun|qwen",
+      "providerHostPattern": "dashscope|bailian|aliyun|alibaba",
+      "modelPattern": "qwen|qwq",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["reasoning-chat", "strict-tools", "role-normalize"],
+      "reason": "DashScope / Qwen OpenAI-compatible 链路常见差异集中在 reasoning 参数、工具 schema 和角色字段。",
+      "impact": "启用通用 Chat reasoning、严格工具 schema 和角色归一。",
+      "risk": "部分非推理 Qwen 模型可能不需要 reasoning 适配，可改为模型级配置。",
+      "fixtures": ["private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.volcengine.doubao",
+      "providerIdPattern": "volc|ark|doubao|byteplus|huoshan",
+      "providerHostPattern": "volc|volces|ark|byteplus|huoshan",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["role-normalize", "strict-tools"],
+      "reason": "火山 / 豆包兼容接口通常对角色和工具 schema 更严格。",
+      "impact": "启用 role-normalize、tool-name-normalize 和 strict-tool-schema。",
+      "risk": "如果供应商代理已做 schema 清理，重复清理一般安全，但可能隐藏复杂 schema 能力。",
+      "fixtures": ["private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.minimax.strict-chat",
+      "providerIdPattern": "minimax",
+      "providerHostPattern": "minimax",
+      "modelPattern": "minimax|abab|m1|m2|m3",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["reasoning-chat", "strict-tools", "role-normalize"],
+      "reason": "MiniMax OpenAI-compatible 模型在工具 schema、角色和 reasoning 字段上容易与 Agent 历史不完全一致。",
+      "impact": "启用通用 Chat reasoning、严格工具 schema 和角色归一。",
+      "risk": "对普通文本模型可能偏保守，可按模型级别关闭。",
+      "fixtures": ["private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.modelscope.strict-chat",
+      "providerIdPattern": "modelscope",
+      "providerHostPattern": "modelscope",
+      "apiFormat": "openai_chat",
+      "recommendedCompatPacks": ["reasoning-chat", "strict-tools", "role-normalize"],
+      "reason": "ModelScope 代理多模型时，常见不兼容集中在 reasoning、工具 schema 和 developer role。",
+      "impact": "启用通用 Chat reasoning、严格工具 schema 和角色归一。",
+      "risk": "聚合平台模型差异大，建议保留 Issue Bundle 和 fixture 作为验证证据。",
+      "fixtures": ["private-field-filter-schema.json"]
+    },
+    {
+      "id": "registry.opencode.glm",
+      "providerIdPattern": "opencode|agnes",
+      "providerHostPattern": "opencode|agnes",
+      "modelPattern": "glm",
+      "recommendedCompatPacks": ["opencode-go", "glm"],
+      "reason": "OpenCode Go / Agnes 代理 GLM 时，工具历史和 GLM typed content 都可能需要修正。",
+      "impact": "启用 OpenCode Go 工具历史修复、严格工具 schema、GLM typed content 和 reasoning 适配。",
+      "risk": "opencode-glm-no-tools 会移除 GLM tools；若确认该模型已稳定支持工具，应不要应用 opencode-go。",
+      "fixtures": ["claude-code-tool-concurrency.json", "glm-content-text.json"]
+    },
+    {
+      "id": "registry.codex.official-gpt",
+      "providerIdPattern": "codex|openai",
+      "providerHostPattern": "chatgpt\\.com|api\\.openai\\.com",
+      "modelPattern": "gpt-5|codex",
+      "recommendedCompatPacks": ["official-gpt"],
+      "reason": "官方 GPT / Codex 链路需要清理非 OpenAI 参数，并补齐 Codex GPT 请求默认字段。",
+      "impact": "启用 official-gpt-fallback。",
+      "risk": "只适合官方 OpenAI / Codex provider，不要用于普通 OpenAI-compatible 中转。",
+      "fixtures": ["responses-function-call-stream.json"]
+    }
+  ]
+}

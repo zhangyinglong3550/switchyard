@@ -11,11 +11,13 @@ import { listRequestLogs, usageByModel, usageByAgentModel, usageDaily } from "./
 import { createProviderHealthMonitor } from "./provider-health.mjs";
 import { buildTestRequest, TEST_IMAGE_DATA_URL, TEST_IMAGE_LABEL } from "./test-console.mjs";
 import {
+  buildCompatibilityProfile,
   buildReplayDraft,
   classifyGatewayError,
   doctorClientConfigs,
   suggestCapabilitiesFromProbeResults
 } from "./diagnostics.mjs";
+import { buildIssueBundleReport, issueBundleFileStem, saveIssueBundleFiles } from "./issue-bundle.mjs";
 import {
   deleteKeychainSecret,
   describeKeychainSecret,
@@ -42,10 +44,11 @@ import { listAgentPlugins, addPluginSource, removePluginSource } from "./agent-p
 import { importProviders } from "../../../packages/core/src/importers/ccswitch.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import {
-  applyProfile, restoreProfile,
+  applyProfile, restoreProfile, restoreProfileBackup,
   profileTargets, listBackups,
   previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile,
-  syncCodexModelArtifacts
+  syncClientModelArtifacts,
+  CODEX_ACCESS_MODES
 } from "../../../packages/core/src/profile-writer.mjs";
 import { unifyCodexHistory } from "../../../packages/core/src/history-unify.mjs";
 import {
@@ -59,11 +62,20 @@ import {
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
 import { resolveRoute } from "../../../packages/core/src/router.mjs";
-import { listCompatPacks } from "../../../packages/core/src/compat/index.mjs";
+import {
+  activePatchDescriptors,
+  listCompatPacks,
+  registerBuiltinPatches
+} from "../../../packages/core/src/compat/index.mjs";
+import {
+  recommendCompatRules,
+  registryRecommendationsForConfig
+} from "../../../packages/core/src/compat/registry.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
 let codexArtifactTimer = null;
+registerBuiltinPatches();
 
 function modelsForProfile(cfg, models) {
   const providerNames = new Map((cfg.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
@@ -73,23 +85,75 @@ function modelsForProfile(cfg, models) {
   }));
 }
 
+function clientDefaultModel(cfg, clientId, visibleModels = []) {
+  const matches = (value) => value && visibleModels.some((model) => model.id === value || model.upstreamModel === value || (model.aliases || []).includes(value));
+  const clientValue = cfg.clients?.[clientId]?.defaultModel;
+  if (matches(clientValue)) return clientValue;
+  if (clientId === "codex") {
+    if (matches(cfg.defaultModel)) return cfg.defaultModel;
+    return visibleModels?.[0]?.id || "";
+  }
+  return "";
+}
+
+function codexProfileMode(mode) {
+  return mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT
+    ? CODEX_ACCESS_MODES.OFFICIAL_DIRECT
+    : CODEX_ACCESS_MODES.SWITCHYARD_PROXY;
+}
+
+const COMPAT_DIRECTIONS = ["outbound", "inbound", "stream"];
+
+function activeCompatRulesByDirection(provider, model) {
+  const out = {};
+  for (const direction of COMPAT_DIRECTIONS) {
+    out[direction] = activePatchDescriptors({ provider, model, direction });
+  }
+  return out;
+}
+
+function flattenCompatRules(rulesByDirection) {
+  return COMPAT_DIRECTIONS.flatMap((direction) => rulesByDirection?.[direction] || []);
+}
+
+function activeCompatSnapshot(cfg) {
+  const providersById = new Map((cfg.providers || []).map((provider) => [provider.id, provider]));
+  const providers = {};
+  const models = {};
+  for (const provider of cfg.providers || []) {
+    providers[provider.id] = activeCompatRulesByDirection(provider, null);
+  }
+  for (const model of cfg.models || []) {
+    const provider = providersById.get(model.providerId);
+    models[model.id] = activeCompatRulesByDirection(provider, model);
+  }
+  return { providers, models };
+}
+
 function syncCodexArtifacts(reason = "manual") {
   try {
     const cfg = readConfig();
-    const visibleModels = listModelsForClient(cfg, "codex");
-    const result = syncCodexModelArtifacts({
-      defaultModel: cfg.defaultModel || visibleModels?.[0]?.id,
-      models: modelsForProfile(cfg, visibleModels)
+    const codexModels = listModelsForClient(cfg, "codex");
+    const claudeCodeModels = listModelsForClient(cfg, "claude-code");
+    const result = syncClientModelArtifacts({
+      host: cfg.host,
+      port: cfg.port,
+      codexDefaultModel: clientDefaultModel(cfg, "codex", codexModels),
+      codexModels: modelsForProfile(cfg, codexModels),
+      claudeCodeModels: modelsForProfile(cfg, claudeCodeModels)
     });
-    if (result.ok && (result.catalogChanged || result.cacheChanged)) {
+    const codexChanged = result.codex?.ok && (result.codex.catalogChanged || result.codex.cacheChanged);
+    const claudeChanged = result.claudeCode?.ok && result.claudeCode.cacheChanged;
+    if (codexChanged || claudeChanged) {
       appendLog({
         level: "info",
-        msg: "codex model artifacts synced",
+        msg: "client model artifacts synced",
         reason,
-        modelCount: result.modelCount,
-        cachePath: result.cachePath,
-        cacheChanged: result.cacheChanged,
-        catalogChanged: result.catalogChanged
+        codexModelCount: result.codex?.modelCount || 0,
+        claudeCodeModelCount: result.claudeCode?.modelCount || 0,
+        codexCacheChanged: Boolean(result.codex?.cacheChanged),
+        codexCatalogChanged: Boolean(result.codex?.catalogChanged),
+        claudeCodeCacheChanged: Boolean(result.claudeCode?.cacheChanged)
       });
     }
     return result;
@@ -275,6 +339,9 @@ ipcMain.handle("provider-health:refresh", async (_e, payload = {}) => {
   return { ok: true, rows, snapshot: getProviderHealthMonitor().snapshot() };
 });
 ipcMain.handle("compat:packs", () => listCompatPacks());
+ipcMain.handle("compat:active", () => activeCompatSnapshot(readConfig()));
+ipcMain.handle("compat:registry:snapshot", () => registryRecommendationsForConfig(readConfig()));
+ipcMain.handle("compat:registry:recommend", (_e, payload = {}) => recommendCompatRules(payload));
 ipcMain.handle("provider:discover-models", async (_e, provider) => {
   const probe = { ...provider };
   const baseUrl = String(probe.baseUrl || "").replace(/\/+$/, "");
@@ -395,6 +462,8 @@ ipcMain.handle("diagnostics:run", async () => {
       providerId: row.provider_id,
       status: row.status,
       error: row.error || row.response_preview || "",
+      requestSummary: row.request_summary || "",
+      responseSummary: row.response_summary || "",
       classification: classifyGatewayError(row.error || row.response_summary || row.response_preview || "")
     }));
   return {
@@ -410,23 +479,26 @@ ipcMain.handle("diagnostics:run", async () => {
   };
 });
 
-ipcMain.handle("profile:apply", async (_e, { clientId }) => {
+ipcMain.handle("profile:apply", async (_e, { clientId, mode } = {}) => {
   const status = statusFromServer();
-  if (!status.running) throw new Error("Gateway not running");
+  const profileMode = clientId === "codex" ? codexProfileMode(mode) : undefined;
+  if (!status.running && profileMode !== CODEX_ACCESS_MODES.OFFICIAL_DIRECT) throw new Error("Gateway not running");
   const cfg = readConfig();
   const visibleModels = listModelsForClient(cfg, clientId);
   const opts = {
-    host: status.host,
-    port: status.port,
-    defaultModel: cfg.defaultModel || (clientId === "claude-code" ? undefined : visibleModels?.[0]?.id),
+    host: status.running ? status.host : cfg.host,
+    port: status.running ? status.port : cfg.port,
+    mode: profileMode,
+    defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
     models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   const result = applyProfile(clientId, opts);
-  if (clientId === "codex") syncCodexArtifacts("profile-apply");
+  if (clientId === "codex" && profileMode !== CODEX_ACCESS_MODES.OFFICIAL_DIRECT) syncCodexArtifacts("profile-apply");
   appendLog({
     level: "info",
     msg: `profile applied: ${clientId}`,
+    mode: profileMode || null,
     path: result.path,
     backup: result.backup || null,
     visibleModels: visibleModels.length,
@@ -438,8 +510,8 @@ ipcMain.handle("profile:apply", async (_e, { clientId }) => {
   });
   return result;
 });
-ipcMain.handle("codex-history:unify", (_e, { dryRun } = {}) => {
-  const result = unifyCodexHistory({ dryRun: dryRun === true });
+ipcMain.handle("codex-history:unify", (_e, { dryRun, targetProvider } = {}) => {
+  const result = unifyCodexHistory({ dryRun: dryRun === true, targetProvider });
   appendLog({
     level: result.ok ? "info" : "warn",
     msg: dryRun ? "codex history unify preview" : "codex history unified",
@@ -447,8 +519,8 @@ ipcMain.handle("codex-history:unify", (_e, { dryRun } = {}) => {
   });
   return result;
 });
-ipcMain.handle("profile:restore", (_e, { clientId }) => {
-  const result = restoreProfile(clientId);
+ipcMain.handle("profile:restore", (_e, { clientId, backupName } = {}) => {
+  const result = backupName ? restoreProfileBackup(clientId, backupName) : restoreProfile(clientId);
   appendLog({ level: "info", msg: `profile restored: ${clientId}`, ...result });
   return result;
 });
@@ -459,17 +531,23 @@ ipcMain.handle("profile:status", (_e, { clientId }) => {
   const exists = fs.existsSync(file);
   let current = null;
   if (exists) { try { current = fs.readFileSync(file, "utf8"); } catch {} }
-  const backups = listBackups(file);
-  return { exists, current: current ? current.slice(0, 600) : null, backups: backups.length };
+  const backups = listBackups(file).map((entry) => ({
+    name: entry.name,
+    full: entry.full,
+    mtimeMs: entry.mtimeMs || 0,
+    size: entry.size || 0
+  }));
+  return { exists, current: current ? current.slice(0, 600) : null, backups: backups.length, backupItems: backups };
 });
-ipcMain.handle("profile:preview", (_e, { clientId }) => {
+ipcMain.handle("profile:preview", (_e, { clientId, mode } = {}) => {
   const status = statusFromServer();
   const cfg = readConfig();
   const visibleModels = listModelsForClient(cfg, clientId);
   const opts = {
     host: status.running ? status.host : "127.0.0.1",
     port: status.running ? status.port : 17888,
-    defaultModel: cfg.defaultModel || (clientId === "claude-code" ? undefined : visibleModels?.[0]?.id),
+    mode: clientId === "codex" ? codexProfileMode(mode) : undefined,
+    defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
     models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
@@ -576,6 +654,20 @@ ipcMain.handle("capabilities:apply", (_e, { modelId, capabilities } = {}) => {
   return { ok: true, model: cfg.models[index], path: result.path };
 });
 ipcMain.handle("request:replay", (_e, payload = {}) => buildReplayDraft(payload.row || payload));
+ipcMain.handle("request:issue-bundle", (_e, payload = {}) => buildIssueBundleReport(payload.row || payload));
+ipcMain.handle("request:issue-bundle:save", async (_e, payload = {}) => {
+  const report = buildIssueBundleReport(payload.row || payload);
+  const defaultPath = path.join(app.getPath("downloads"), `${issueBundleFileStem(report.bundle)}.md`);
+  const selected = await dialog.showSaveDialog({
+    title: "导出 Switchyard 脱敏问题包",
+    defaultPath,
+    filters: [{ name: "Markdown", extensions: ["md"] }]
+  });
+  if (selected.canceled || !selected.filePath) return { ok: false, canceled: true };
+  const result = saveIssueBundleFiles(report, selected.filePath);
+  shell.showItemInFolder(result.markdownPath);
+  return result;
+});
 
 function providerDiagnostic(provider) {
   let keySource = "未配置";
@@ -696,7 +788,15 @@ async function dispatchCapabilityProbe(provider, model, upstreamModel, body) {
 async function probeModelCapabilities(payload = {}) {
   const cfg = readConfig();
   const { model, provider, upstreamModel } = resolveProbeTarget(cfg, payload);
-  const requested = payload.probes || { text: true, stream: true, tools: true, vision: true, reasoning: true };
+  const requested = payload.probes || {
+    text: true,
+    stream: true,
+    tools: true,
+    vision: true,
+    reasoning: true,
+    developerRole: true,
+    schemaStrictness: true
+  };
   const results = {};
   if (requested.text !== false) {
     results.text = await dispatchCapabilityProbe(provider, model, upstreamModel, baseProbeBody(model, {
@@ -723,6 +823,39 @@ async function probeModelCapabilities(payload = {}) {
       tool_choice: "auto"
     }));
   }
+  if (requested.developerRole || requested["developer-role"]) {
+    results["developer-role"] = await dispatchCapabilityProbe(provider, model, upstreamModel, baseProbeBody(model, {
+      messages: [
+        { role: "developer", content: "You are running a compatibility probe. Keep the answer short." },
+        { role: "user", content: "Reply with the single word: ok" }
+      ]
+    }));
+  }
+  if (requested.schemaStrictness || requested["schema-strictness"]) {
+    results["schema-strictness"] = await dispatchCapabilityProbe(provider, model, upstreamModel, baseProbeBody(model, {
+      messages: [{ role: "user", content: "Reply with plain text. Do not call tools." }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "switchyard_schema_probe",
+          description: "A harmless schema compatibility probe.",
+          parameters: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            type: "object",
+            properties: {
+              value: {
+                anyOf: [{ type: "string" }],
+                examples: ["ok"],
+                default: null
+              }
+            },
+            additionalProperties: { type: "string" }
+          }
+        }
+      }],
+      tool_choice: "auto"
+    }));
+  }
   if (requested.vision) {
     results.vision = await dispatchCapabilityProbe(provider, model, upstreamModel, baseProbeBody(model, {
       messages: [{
@@ -740,13 +873,21 @@ async function probeModelCapabilities(payload = {}) {
     }));
     results.reasoning = { ...result, ok: Boolean(result.reasoning || model.capabilities?.reasoning) };
   }
+  const compatRules = activeCompatRulesByDirection(provider, model);
   return {
     ok: Object.values(results).some((result) => result.ok),
     modelId: model.id,
     providerId: provider.id,
     upstreamModel,
     results,
-    suggestion: suggestCapabilitiesFromProbeResults(model, results)
+    suggestion: suggestCapabilitiesFromProbeResults(model, results),
+    compatRules,
+    compatibilityProfile: buildCompatibilityProfile({
+      provider,
+      model,
+      results,
+      activeRules: flattenCompatRules(compatRules)
+    })
   };
 }
 

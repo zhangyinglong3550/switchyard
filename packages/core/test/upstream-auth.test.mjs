@@ -49,6 +49,27 @@ test("provider auth · api_key and none modes remain isolated", async () => {
   );
 });
 
+test("codex oauth auth · provider is ready only when codex login token exists", async () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-codex-ready-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = tmpHome;
+  try {
+    const mod = await import(`../src/upstream/clients.mjs?v=${Date.now()}`);
+    const provider = { id: "codex", authMode: "codex_oauth", providerType: "codex_oauth", baseUrl: "https://chatgpt.com/backend-api/codex" };
+    assert.equal(mod.providerReady(provider), false);
+
+    fs.mkdirSync(path.join(tmpHome, ".codex"), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, ".codex", "auth.json"), JSON.stringify({
+      tokens: { access_token: fakeJwt({}) }
+    }), "utf8");
+
+    assert.equal(mod.providerReady(provider), true);
+  } finally {
+    process.env.HOME = prevHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
 test("provider endpoint · canonicalizes OpenCode Go base URL to the v1 API root", async () => {
   const mod = await import(`../src/upstream/clients.mjs?v=${Date.now()}`);
   assert.equal(

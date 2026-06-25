@@ -55,6 +55,11 @@ const CODEX_PROVIDER = "custom";
 const SWITCHYARD_ENV_KEY = "SWITCHYARD_KEY";
 const MARKER = "managed-by-switchyard";
 
+export const CODEX_ACCESS_MODES = Object.freeze({
+  SWITCHYARD_PROXY: "switchyard_proxy",
+  OFFICIAL_DIRECT: "official_direct"
+});
+
 const CODEX_MODEL_TEMPLATE = {
   slug: "switchyard/default",
   display_name: "Switchyard Default",
@@ -66,6 +71,8 @@ const CODEX_MODEL_TEMPLATE = {
     { effort: "high", description: "Greater reasoning depth" },
     { effort: "xhigh", description: "Extra high reasoning depth" }
   ],
+  additional_speed_tiers: [],
+  service_tiers: [],
   shell_type: "shell_command",
   visibility: "list",
   supported_in_api: true,
@@ -135,6 +142,69 @@ function stripSwitchyardCodexBlock(text, { replaceModel = false } = {}) {
     out.push(line);
   }
   // Collapse trailing blank lines
+  while (out.length && out[out.length - 1].trim() === "") out.pop();
+  return out.join("\n");
+}
+
+function stripSwitchyardManagedCodexBlock(text, { replaceModel = false } = {}) {
+  if (!text) return "";
+  const customBlock = tomlSectionText(text, "model_providers.custom");
+  const hasSwitchyardMarker = /managed-by-switchyard|switchyard-managed/i.test(text);
+  const customIsSwitchyard =
+    /\bname\s*=\s*["']Switchyard["']/i.test(customBlock) ||
+    /\bbase_url\s*=\s*["'][^"']*\/codex\/v1\/?["']/i.test(customBlock);
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let seenTable = false;
+  let afterManagedMarker = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    const providerMatch = /^\[model_providers\.(switchyard|custom)\]/.exec(trimmed);
+    if (providerMatch) {
+      const block = [line];
+      let next = index + 1;
+      while (next < lines.length && !/^\[[^\]]+\]/.test(lines[next].trim())) {
+        block.push(lines[next]);
+        next += 1;
+      }
+      const blockText = block.join("\n");
+      const isSwitchyardBlock =
+        providerMatch[1] === "switchyard" ||
+        /\bname\s*=\s*["']Switchyard["']/i.test(blockText) ||
+        /\bbase_url\s*=\s*["'][^"']*\/codex\/v1\/?["']/i.test(blockText);
+      seenTable = true;
+      afterManagedMarker = false;
+      if (!isSwitchyardBlock) out.push(...block);
+      index = next - 1;
+      continue;
+    }
+    if (/^\[[^\]]+\]/.test(trimmed)) {
+      seenTable = true;
+      afterManagedMarker = false;
+      out.push(line);
+      continue;
+    }
+    const isManagedMarker =
+      /^#\s*managed-by:\s*switchyard/.test(trimmed) ||
+      /^#\s*managed-by:\s*managed-by-switchyard/.test(trimmed);
+    if (isManagedMarker) {
+      afterManagedMarker = true;
+      continue;
+    }
+    const isTopLevel = !seenTable;
+    const isManagedProvider = /^model_provider\s*=\s*["']?switchyard["']?\s*(?:#.*)?$/.test(trimmed) ||
+      (/^model_provider\s*=\s*["']?custom["']?\s*(?:#.*)?$/.test(trimmed) && (customIsSwitchyard || hasSwitchyardMarker || afterManagedMarker));
+    const shouldStripManagedTopLevel = isTopLevel && (customIsSwitchyard || hasSwitchyardMarker || afterManagedMarker);
+    if (/^model_provider\s*=/.test(trimmed) && (afterManagedMarker || isManagedProvider)) continue;
+    if (/^model_catalog_json\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
+    if (/^openai_base_url\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
+    if (/^model_reasoning_effort\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
+    if (/^model\s*=/.test(trimmed) && replaceModel && shouldStripManagedTopLevel) continue;
+    if (/^model\s*=/.test(trimmed) && afterManagedMarker) continue;
+    if (trimmed !== "") afterManagedMarker = false;
+    out.push(line);
+  }
   while (out.length && out[out.length - 1].trim() === "") out.pop();
   return out.join("\n");
 }
@@ -215,8 +285,47 @@ function codexCatalogDisplayName(model, slug) {
   return `${base} · ${provider}`;
 }
 
+const CODEX_PRIORITY_SERVICE_TIER = {
+  id: "priority",
+  name: "Fast",
+  description: "1.5x speed, increased usage"
+};
+
+function isOfficialCodexModel({ providerId, upstreamModel }) {
+  if (!/^(codex|official-gpt)$/i.test(String(providerId || ""))) return false;
+  return /^gpt-5(?:$|[._-])/.test(String(upstreamModel || "").toLowerCase());
+}
+
+function supportsCodexPriorityTier({ providerId, upstreamModel }) {
+  if (!/^(codex|openai|official-gpt)$/i.test(String(providerId || ""))) return false;
+  const model = String(upstreamModel || "").toLowerCase();
+  if (!/^gpt-5(?:$|[._-])/.test(model)) return false;
+  return !/(mini|spark|auto-review)/.test(model);
+}
+
+function codexCatalogSlugForModel(model) {
+  const id = String(model?.id || model?.upstreamModel || "").trim();
+  const upstreamModel = String(model?.upstreamModel || id).trim();
+  const providerId = String(model?.providerId || "").trim();
+  if (isOfficialCodexModel({ providerId, upstreamModel })) return upstreamModel;
+  return id;
+}
+
+function modelMatchesId(model, id) {
+  const value = String(id || "").trim();
+  if (!value) return false;
+  return model?.id === value || model?.upstreamModel === value || (model?.aliases || []).includes(value);
+}
+
+function codexDefaultModelForCatalog({ models = [], defaultModel } = {}) {
+  const value = String(defaultModel || "").trim();
+  if (!value) return null;
+  const match = (Array.isArray(models) ? models : []).find((model) => modelMatchesId(model, value));
+  return match ? codexCatalogSlugForModel(match) : value;
+}
+
 function codexCatalogModelFrom(model, index = 0) {
-  const slug = String(model?.id || model?.upstreamModel || "").trim();
+  const slug = codexCatalogSlugForModel(model);
   if (!slug) return null;
   const contextWindow = Number.isFinite(model?.contextWindow) ? model.contextWindow : CODEX_MODEL_TEMPLATE.context_window;
   const hasVisionFallback = Boolean(model?.visionFallbackModelId);
@@ -224,12 +333,15 @@ function codexCatalogModelFrom(model, index = 0) {
   const providerId = String(model?.providerId || "").trim();
   const upstreamModel = String(model?.upstreamModel || slug).trim();
   const isOfficialGpt = /^(codex|openai|official-gpt)$/i.test(providerId) || /\bgpt[-_\w.]*/i.test(upstreamModel);
+  const supportsPriority = supportsCodexPriorityTier({ providerId, upstreamModel });
   return {
     ...CODEX_MODEL_TEMPLATE,
     slug,
     display_name: codexCatalogDisplayName(model, slug),
     description: `${model?.providerName || model?.providerId || "Switchyard"} via Switchyard.`,
     default_reasoning_level: isOfficialGpt ? "low" : CODEX_MODEL_TEMPLATE.default_reasoning_level,
+    additional_speed_tiers: supportsPriority ? ["fast"] : [],
+    service_tiers: supportsPriority ? [{ ...CODEX_PRIORITY_SERVICE_TIER }] : [],
     priority: 100 + index,
     input_modalities: supportsImages ? ["text", "image"] : ["text"],
     context_window: contextWindow,
@@ -448,6 +560,11 @@ export function mergeCodexProfile(existing, { host, port, defaultModel } = {}) {
   return `${topLevel}\n\n${stripped.replace(/\s+$/, "")}\n\n${providerBlock}\n`;
 }
 
+export function mergeCodexOfficialDirectProfile(existing) {
+  const stripped = stripSwitchyardManagedCodexBlock(existing || "", { replaceModel: true });
+  return stripped.replace(/\s+$/, "") + "\n";
+}
+
 // ---------- Claude Code (JSON) ----------
 
 const CLAUDE_MODEL_ENV_KEYS = [
@@ -535,14 +652,48 @@ export function writeClaudeCodeGatewayModelsCache({ host, port, models, fetchedA
   return { path: outPath, modelCount: cache.models.length };
 }
 
+export function syncClaudeCodeModelArtifacts({ host, port, models = [] } = {}) {
+  const cache = buildClaudeCodeGatewayModelsCache({ host, port, models });
+  const cachePath = claudeCodeGatewayModelsCachePath();
+  if (!cache.models.length) return { ok: false, skipped: true, reason: "no-models", cachePath, modelCount: 0 };
+  const cacheChanged = writeJsonIfChanged(cachePath, cache);
+  try { fs.chmodSync(cachePath, 0o600); } catch {}
+  return { ok: true, cachePath, cacheChanged, modelCount: cache.models.length, cache };
+}
+
+export function syncClientModelArtifacts({
+  host,
+  port,
+  codexModels = [],
+  codexDefaultModel,
+  claudeCodeModels = [],
+  forceCodex = false
+} = {}) {
+  return {
+    codex: syncCodexModelArtifacts({
+      models: codexModels,
+      defaultModel: codexDefaultModel,
+      force: forceCodex
+    }),
+    claudeCode: syncClaudeCodeModelArtifacts({
+      host,
+      port,
+      models: claudeCodeModels
+    })
+  };
+}
+
 export function claudeCodeModelEnv({ models = [], defaultModel, modelMapping } = {}) {
   const all = distinctModels(models);
   if (!all.length) return {};
   const nonCodex = all.filter((model) => !/\bcodex\b/i.test(String(model.providerId || "")));
   const pool = nonCodex.length ? nonCodex : all;
   const isFast = (model) => /\b(haiku|mini|flash|lite|small|air|fast)\b/i.test(modelSearchText(model));
-  const explicitDefault = pool.find((model) => model.id === defaultModel);
-  const defaultCandidate = explicitDefault && !isFast(explicitDefault) ? explicitDefault : null;
+  const explicitDefault = findMappedClaudeCodeModel(all, { default: defaultModel }, "default");
+  const usableExplicitDefault = explicitDefault && (!/\bcodex\b/i.test(String(explicitDefault.providerId || "")) || !nonCodex.length)
+    ? explicitDefault
+    : null;
+  const defaultCandidate = usableExplicitDefault && !isFast(usableExplicitDefault) ? usableExplicitDefault : null;
   const isStrong = (model) => {
     const text = modelSearchText(model);
     if (/\b(haiku|mini|flash|lite|small|air|fast)\b/i.test(text)) return false;
@@ -559,7 +710,7 @@ export function claudeCodeModelEnv({ models = [], defaultModel, modelMapping } =
   const sonnet = mapped.sonnet || defaultCandidate || pickModel(pool, (model) => !isFast(model), new Set([haiku?.id])) || pool[0];
   const opus = mapped.opus || pickModel(pool, isStrong, new Set([haiku?.id, sonnet?.id])) || sonnet;
   const fable = mapped.fable || pickModel(pool, isStrong, new Set([haiku?.id, sonnet?.id, opus?.id])) || opus || sonnet;
-  const defaultSlot = mapped.default || sonnet;
+  const defaultSlot = usableExplicitDefault || mapped.default || sonnet;
   const slot = (name, model) => ({
     [`ANTHROPIC_DEFAULT_${name}_MODEL`]: claudeCodeModelId(model),
     [`ANTHROPIC_DEFAULT_${name}_MODEL_NAME`]: modelLabel(model)
@@ -618,6 +769,9 @@ export function mergeHermesProfile(existing, { host, port } = {}) {
 // ---------- Preview adapters ----------
 
 export function previewCodexProfile(target) {
+  if (target?.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) {
+    return mergeCodexOfficialDirectProfile(readText(codexConfigPath()));
+  }
   return renderCodexProfile(target);
 }
 export function previewClaudeCodeProfile(target) {
@@ -749,8 +903,25 @@ export function listBackups(filePath) {
   const prefix = `${path.basename(filePath)}.`;
   return fs.readdirSync(dir)
     .filter((name) => name.startsWith(prefix) && name.endsWith(".bak"))
-    .map((name) => ({ name, full: path.join(dir, name) }))
+    .map((name) => {
+      const full = path.join(dir, name);
+      let stat = null;
+      try { stat = fs.statSync(full); } catch {}
+      return {
+        name,
+        full,
+        mtimeMs: stat?.mtimeMs || 0,
+        size: stat?.size || 0
+      };
+    })
     .sort((a, b) => (a.name < b.name ? 1 : -1));
+}
+
+export function restoreBackup(filePath, backupName) {
+  const selected = listBackups(filePath).find((entry) => entry.name === backupName || entry.full === backupName);
+  if (!selected) return { ok: false, reason: "backup-not-found" };
+  fs.copyFileSync(selected.full, filePath);
+  return { ok: true, restoredFrom: selected.full, backupName: selected.name };
 }
 
 export function restoreLatest(filePath) {
@@ -790,13 +961,14 @@ function writeText(file, text) {
 export function applyCodex({ host, port, defaultModel, models, dryRun } = {}) {
   const file = codexConfigPath();
   const existing = readText(file);
-  const next = mergeCodexProfile(existing, { host, port, defaultModel });
+  const profileDefaultModel = codexDefaultModelForCatalog({ models, defaultModel });
+  const next = mergeCodexProfile(existing, { host, port, defaultModel: profileDefaultModel });
   const catalog = buildCodexModelCatalog({ models, defaultModel });
   const catalogPath = codexModelCatalogPath();
   const cachePath = codexModelsCachePath();
   const ccSwitchCatalogPath = ccSwitchCodexModelCatalogPath();
   const ccSwitchProfilePath = ccSwitchGatewayProfilePath();
-  const ccSwitchProfile = renderCcSwitchGatewayProfile({ host, port, defaultModel });
+  const ccSwitchProfile = renderCcSwitchGatewayProfile({ host, port, defaultModel: profileDefaultModel });
   const cache = buildCodexModelsCache({ catalog });
   if (dryRun) {
     return {
@@ -828,6 +1000,24 @@ export function applyCodex({ host, port, defaultModel, models, dryRun } = {}) {
     ccSwitchProfileBackup: ccSwitchProfileResult.backup || null,
     modelCount: catalog.models.length
   };
+}
+
+export function applyCodexOfficialDirect({ dryRun } = {}) {
+  const file = codexConfigPath();
+  const existing = readText(file);
+  const next = mergeCodexOfficialDirectProfile(existing);
+  if (dryRun) {
+    return {
+      mode: CODEX_ACCESS_MODES.OFFICIAL_DIRECT,
+      path: file,
+      preview: next,
+      existing,
+      auth: "codex_official_login",
+      note: "Switchyard removed its managed Codex proxy config. Codex official auth remains owned by Codex App/CLI."
+    };
+  }
+  const result = writeText(file, next);
+  return { ...result, mode: CODEX_ACCESS_MODES.OFFICIAL_DIRECT, auth: "codex_official_login" };
 }
 
 export function applyClaudeCode({ host, port, defaultModel, models, dryRun, modelMapping } = {}) {
@@ -863,8 +1053,11 @@ export function applyHermes({ host, port, defaultModel, models, dryRun } = {}) {
   return { ...result, yamlPath: yamlResult.path, yamlBackup: yamlResult.backup };
 }
 
-export function applyProfile(id, opts) {
-  if (id === "codex") return applyCodex(opts);
+export function applyProfile(id, opts = {}) {
+  if (id === "codex") {
+    if (opts.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) return applyCodexOfficialDirect(opts);
+    return applyCodex(opts);
+  }
   if (id === "claude-code") return applyClaudeCode(opts);
   if (id === "hermes") return applyHermes(opts);
   throw new Error(`Unknown profile id: ${id}`);
@@ -874,6 +1067,13 @@ export function restoreProfile(id) {
   if (id === "codex") return restoreLatest(codexConfigPath());
   if (id === "claude-code") return restoreLatest(claudeCodeConfigPath());
   if (id === "hermes") return restoreLatest(hermesConfigPath());
+  throw new Error(`Unknown profile id: ${id}`);
+}
+
+export function restoreProfileBackup(id, backupName) {
+  if (id === "codex") return restoreBackup(codexConfigPath(), backupName);
+  if (id === "claude-code") return restoreBackup(claudeCodeConfigPath(), backupName);
+  if (id === "hermes") return restoreBackup(hermesConfigPath(), backupName);
   throw new Error(`Unknown profile id: ${id}`);
 }
 

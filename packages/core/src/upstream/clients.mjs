@@ -100,6 +100,18 @@ export function providerAuthHeaders(provider, scheme) {
   return { Authorization: `Bearer ${key}` };
 }
 
+function requestOverrideHeaders(opts) {
+  const headers = opts?.requestHeaders;
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const name = String(key || "").trim();
+    if (!name || value == null) continue;
+    out[name] = String(value);
+  }
+  return out;
+}
+
 function joinUrl(baseUrl, suffix) {
   return `${String(baseUrl || "").replace(/\/+$/, "")}${suffix}`;
 }
@@ -171,13 +183,13 @@ async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKee
 
 export async function callOpenAIChat(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/chat/completions");
-  return postJson(url, body, providerAuthHeaders(provider, "bearer"), opts);
+  return postJson(url, body, { ...providerAuthHeaders(provider, "bearer"), ...requestOverrideHeaders(opts) }, opts);
 }
 
 export async function callOpenAIResponses(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/responses");
   const codexOAuth = isCodexOAuthProvider(provider);
-  return postJson(url, body, providerAuthHeaders(provider, "bearer"), {
+  return postJson(url, body, { ...providerAuthHeaders(provider, "bearer"), ...requestOverrideHeaders(opts) }, {
     ...opts,
     noKeepAlive: opts?.noKeepAlive ?? codexOAuth,
     retryOnFetchError: opts?.retryOnFetchError ?? codexOAuth
@@ -186,7 +198,7 @@ export async function callOpenAIResponses(provider, body, opts) {
 
 export async function callAnthropicMessages(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/v1/messages");
-  return postJson(url, body, providerAuthHeaders(provider, "anthropic"), opts);
+  return postJson(url, body, { ...providerAuthHeaders(provider, "anthropic"), ...requestOverrideHeaders(opts) }, opts);
 }
 
 export function providerReady(provider) {
