@@ -12,7 +12,7 @@
 
 - 在 **Codex** 里只能用官方模型，DeepSeek 的思考和速度、Kimi 的性价比、GLM 的性价比——全和你无关
 - 换成 **Claude Code**，又要重新配置一遍 API Key，两边的模型列表从来不统一
-- **cc-switch** 能让 Claude Code 看到第三方模型，但 Codex 不行；换个工具又要重新折腾
+- **cc-switch** 能配置三方模型，但每次切换都需要点击一下启用某个供应商的模型，相关agent仅能看到该供应商下的模型
 - 模型多了以后根本不知道哪个挂了、哪个可用——打开终端一条条 `curl` 试？还是盲猜？
 - DeepSeek 不支持贴图，报错了也不知道为什么；想换个支持视觉的模型又要切来切去
 - 想看某个代理发了什么 prompt、为什么那个请求失败了——日志散落在各个地方，根本拼不起来
@@ -21,8 +21,8 @@
 
 ---
 
-<!-- 截图占位：总览页 -->
-![总览](docs/assets/screenshots/01-overview.png)
+![Switchyard 总览](docs/assets/screenshots/01-overview.png)
+
 
 ---
 
@@ -36,8 +36,8 @@ Switchyard 把你在所有平台申请的模型——OpenAI、DeepSeek、Kimi、
 
 > 你不再需要记「Codex 用的是哪个 key」「Claude Code 配了哪几个模型」。一个地方改，全部自动同步。
 
-<!-- 截图占位：Codex 模型选择器展示所有供应商模型 -->
-<!-- 截图占位：Claude Code /model 列表展示跨供应商模型 -->
+![Codex 模型选择器](docs/assets/screenshots/02-codex-models.png)
+![Claude Code 模型列表](docs/assets/screenshots/03-claude-code-models.png)
 
 **支持的供应商（持续扩充）：**
 
@@ -66,8 +66,8 @@ Switchyard 把你在所有平台申请的模型——OpenAI、DeepSeek、Kimi、
 - 每个供应商的协议兼容性：是否存在不支持的参数、Schema 不匹配等潜在问题
 - 按模型 / 供应商 / 代理的切面统计请求成功率、平均延迟、Token 消耗
 
-<!-- 截图占位：诊断中心 - 可用性面板 -->
-<!-- 截图占位：诊断中心 - 兼容性报告 -->
+![诊断中心 - 可用性面板](docs/assets/screenshots/04-diagnostics-availability.png)
+![诊断中心 - 兼容性报告](docs/assets/screenshots/05-diagnostics-compatibility.png)
 
 错误自动分类（认证失败、上游拒绝、协议不兼容、网络不可达），每条都有明确的修复建议。一键导出 sanitized 诊断包，自动剥离敏感信息，可以直接发给同事排查。
 
@@ -84,7 +84,9 @@ Switchyard 解析 Codex、Claude Code、Hermes 的本地会话存档，提供统
 - 支持会话内容格式化渲染——Codex 的 Responses Protocol、Claude Code 的 Messages Protocol 统一展示
 - 在官方直连模式和代理模式间切换时，**已有会话的 model_provider 自动迁移，对话记录不丢失**
 
-<!-- 截图占位：会话页 - 会话列表 + 格式化展示 -->
+![会话列表](docs/assets/screenshots/06-sessions-list.png)
+
+![会话详情](docs/assets/screenshots/07-sessions-detail.png)
 
 ---
 
@@ -98,7 +100,7 @@ Switchyard 解析 Codex、Claude Code、Hermes 的本地会话存档，提供统
 - 请求方法和路径的协议信息、上游模型路由
 - 每条请求可展开查看详细元信息：协议转换链、激活的兼容补丁、请求覆盖
 
-<!-- 截图占位：调用可视化 - 展开单条请求详情 -->
+![调用可视化](docs/assets/screenshots/08-call-visualization.png)
 
 这意味着你可以：
 - **学习 Codex / Claude Code 如何构造 prompt**，把优秀工程实践用在自己的场景里
@@ -116,8 +118,8 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 - **接入腾讯 Skill Hub**：搜索官方和社区的 Skills，一键安装
 - 支持 Marketplace 管理：浏览、安装、卸载
 
-<!-- 截图占位：Skills 页 - Hub 浏览 -->
-<!-- 截图占位：Skills 页 - 搜索安装 -->
+![Skills Hub 浏览](docs/assets/screenshots/10-skillhub.png)
+![Skills 搜索安装](docs/assets/screenshots/09-skills.png)
 
 ---
 
@@ -125,13 +127,13 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 
 **让 DeepSeek 这样不支持图片的模型也能"看图"。**
 
-很多高性价比模型的 API 不支持图片输入（如 DeepSeek v3、Kimi），Switchyard 内置视觉 Fallback 引擎：
+很多高性价比模型的 API 不支持图片输入（如 DeepSeek v4-pro、GLM5.2），Switchyard 内置视觉 Fallback 引擎：
 
 > 贴图 → Switchyard 自动用视觉模型描述图片 → 将文字描述注入 prompt → 发送给目标模型
 
-<!-- 截图占位：在 Codex 里给 DeepSeek 贴图，回复正确识别图片内容 -->
+![DeepSeek 识图](docs/assets/screenshots/11-vision-fallback.png)
 
-配置简单：在模型配置中开启「视觉 Fallback」并指定一个兜底视觉模型（如 GPT-5.5 / GLM-5.2）。之后所有向该模型发送的图片请求，都会自动走描述→注入流程。
+配置简单：在模型配置中开启「视觉 Fallback」并指定一个兜底视觉模型（如 xiaomi V2.5）。之后所有向该模型发送的图片请求，都会自动走描述→注入流程。
 
 ---
 
@@ -142,11 +144,11 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 | 方式 | 原理 | 风险 |
 |------|------|------|
 | **官方直连**（推荐） | Codex 直接调用 OpenAI 官方 API，Switchyard 仅提供 model_provider 元数据 | 无封号风险 |
-| **代理模式** | 请求经过 Switchyard 网关转发，使用 OAuth 令牌代理到 ChatGPT Codex | ⚠️ 存在被识别为代理、导致封号的风险 |
+| **代理模式** | 请求经过 Switchyard 网关转发，使用 OAuth 令牌代理到 ChatGPT Codex | ⚠️ 尽管像Hermes，ccswitch等开源项目做了官方调用header特征提取兼容，但是不排除官方更新特征，存在被识别为代理、导致封号的风险 |
 
 **我们强烈建议 Codex 用户使用官方直连方式。** 在客户端配置页面可以一键切换两种模式。使用代理模式前请充分评估风险。
 
-<!-- 截图占位：客户端页 - Codex 接入模式切换 -->
+![接入模式切换](docs/assets/screenshots/12-official-direct.png)
 
 ---
 
