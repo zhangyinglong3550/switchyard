@@ -1,6 +1,6 @@
 {
   "name": "switchyard",
-  "version": "0.5.1",
+  "version": "1.0.0",
   "description": "Local multi-client LLM gateway and desktop control panel for Codex, Claude Code, Hermes and other OpenAI-compatible / Anthropic-compatible tools.",
   "license": "MIT",
   "repository": {
