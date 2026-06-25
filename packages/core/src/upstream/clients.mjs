@@ -148,7 +148,7 @@ export function proxyDispatcher(proxyUrl) {
 
 function shouldRetryFetchError(err) {
   const code = err?.cause?.code || err?.code || "";
-  return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(code) || /fetch failed|terminated/i.test(err?.message || "");
+  return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "HPE_INVALID_EOF_STATE"].includes(code) || /fetch failed|terminated|HPE_INVALID_EOF_STATE/i.test(err?.message || "");
 }
 
 async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKeepAlive = false, retryOnFetchError = false } = {}) {

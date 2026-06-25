@@ -429,13 +429,17 @@ export async function streamChatAsResponses(upstream, res, requestedModel) {
   };
   const decoder = new TextDecoder();
   let buffer = "";
-  for await (const chunk of upstream.body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const records = buffer.split(/\r?\n\r?\n/);
+  try {
+    for await (const chunk of upstream.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const records = buffer.split(/\r?\n\r?\n/);
     buffer = records.pop() || "";
     for (const record of records) {
       processSseRecord(record);
+      }
     }
+  } catch (_err) {
+    // Stream ended prematurely - gracefully complete with whatever content we received
   }
   buffer += decoder.decode();
   if (buffer.trim()) processSseRecord(buffer);

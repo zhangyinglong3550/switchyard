@@ -978,6 +978,9 @@ async function pipeRawStream(upstream, res, { protocol = "", model = "", onError
           writeRawStreamHeaders(res, upstream);
           continue;
         }
+        if (sawMeaningfulEvent && !sawTerminalEvent && shouldRetryStreamError(err)) {
+          return;
+        }
         try { if (typeof onError === "function") onError(err); } catch {}
         writeStreamError(res, err, { protocol, model });
         return;

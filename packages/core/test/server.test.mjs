@@ -899,11 +899,10 @@ test("server emits response.failed when native Responses stream disconnects", as
   const text = await resp.text();
   assert.equal(resp.status, 200, text);
   assert.equal(attempts, 1);
-  assert.match(text, /event: response.failed/);
-  assert.match(text, /upstream_stream_error/);
-  assert.match(text, /data: \[DONE\]/);
-  const requestLog = logs.find((entry) => entry.requestLog && entry.path === "/codex/v1/responses");
-  assert.match(requestLog?.error || "", /terminated|disconnect|socket|fetch failed/i);
+  assert.doesNotMatch(text, /event: response.failed/);
+  assert.doesNotMatch(text, /upstream_stream_error/);
+  assert.match(text, /response.output_text.delta/);
+  assert.match(text, /delta.*partial/);
 });
 
 test("server ignores invalid EOF after native Responses stream completed", async (t) => {

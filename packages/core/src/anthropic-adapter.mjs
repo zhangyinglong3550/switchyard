@@ -152,8 +152,14 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel) {
         if (!data || data === "[DONE]") continue;
         const event = safeJsonParse(data);
         if (!event) continue;
-        const delta = event.choices?.[0]?.delta?.content;
-        const deltaText = typeof delta === "string" ? delta : contentToText(delta);
+        const choice = event.choices?.[0] || {};
+        const delta = choice.delta || {};
+        const deltaContent = delta.content;
+        const deltaReasoning = delta.reasoning_content;
+        let deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
+        if (!deltaText && typeof deltaReasoning === "string" && deltaReasoning.length > 0) {
+          deltaText = deltaReasoning;
+        }
         if (!deltaText) continue;
         writeEvent(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: deltaText } });
       }
