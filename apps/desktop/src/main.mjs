@@ -197,12 +197,12 @@ function createMainWindow() {
     appendLog({ level: level === 0 ? "info" : "warn", msg: `renderer: ${message}` });
   });
   // 点窗口关闭按钮（叉）时，不退出应用，只隐藏窗口，网关继续后台运行。
-  // 只有走托盘菜单 / 应用菜单的“退出”（isQuitting=true）才真正退出。
+  // 只有走托盘菜单 / 应用菜单的"退出"（isQuitting=true）才真正退出。
+  // macOS 保留 Dock 图标，方便用户点击恢复窗口。
   win.on("close", (event) => {
     if (!isQuitting) {
       event.preventDefault();
       win.hide();
-      if (process.platform === "darwin") app.dock?.hide();
     }
   });
   mainWindow = win;
@@ -1113,6 +1113,11 @@ app.on("activate", () => {
 // macOS 本就默认不退出；这里对所有平台统一保活，真正退出走托盘菜单。
 app.on("window-all-closed", () => {
   // 不调用 app.quit()，应用驻留后台。
+});
+
+// macOS: 点击 Dock 图标时恢复窗口（关窗隐藏后重新唤出）。
+app.on("activate", () => {
+  showMainWindow();
 });
 
 // 真正退出前统一做收尾清理（停网关 / 监控）。无论从托盘“退出”、
