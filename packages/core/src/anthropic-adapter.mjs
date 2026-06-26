@@ -288,7 +288,7 @@ export async function streamAnthropicAsChat(upstream, res, requestedModel) {
   // 追踪 content_block index → tool_call 状态
   const toolCalls = new Map(); // blockIndex → { id, name, argumentsBuffer, chatIndex }
   let nextToolCallIndex = 0;
-  let finishReason = null;
+  const state = { finishReason: null };
   let streamError = null;
   const decoder = new TextDecoder();
   let buffer = "";
@@ -319,14 +319,14 @@ export async function streamAnthropicAsChat(upstream, res, requestedModel) {
       for (const record of records) {
         const parsed = parseAnthropicSseRecord(record);
         if (!parsed) continue;
-        handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++ });
+        handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++, state });
       }
     }
     // 处理剩余 buffer
     buffer += decoder.decode();
     if (buffer.trim()) {
       const parsed = parseAnthropicSseRecord(buffer);
-      if (parsed) handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++ });
+      if (parsed) handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++, state });
     }
   } catch (err) {
     streamError = err;
@@ -338,7 +338,7 @@ export async function streamAnthropicAsChat(upstream, res, requestedModel) {
   }
 
   // 发送结束 chunk
-  writeChatChunk({}, { finishReason: finishReason || "stop" });
+  writeChatChunk({}, { finishReason: state.finishReason || "stop" });
   res.write("data: [DONE]\n\n");
   res.end();
 }
@@ -363,7 +363,7 @@ function parseAnthropicSseRecord(record) {
 
 // 处理单个 Anthropic 事件，翻译成 Chat SSE chunk
 function handleAnthropicEvent({ event, data }, ctx) {
-  const { writeChatChunk, toolCalls, getNextToolCallIndex } = ctx;
+  const { writeChatChunk, toolCalls, getNextToolCallIndex, state } = ctx;
 
   switch (event) {
     case "message_start": {
@@ -427,11 +427,11 @@ function handleAnthropicEvent({ event, data }, ctx) {
     case "message_delta": {
       const delta = data.delta || {};
       if (delta.stop_reason === "tool_use") {
-        finishReason = "tool_calls";
+        state.finishReason = "tool_calls";
       } else if (delta.stop_reason === "end_turn" || delta.stop_reason === "stop_sequence") {
-        finishReason = "stop";
+        state.finishReason = "stop";
       } else if (delta.stop_reason === "max_tokens") {
-        finishReason = "length";
+        state.finishReason = "length";
       }
       break;
     }
