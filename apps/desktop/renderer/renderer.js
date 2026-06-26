@@ -510,7 +510,7 @@ const CODEX_PROFILE_MODES = {
 const PROFILE_META = {
   codex: { label: "Codex", file: "~/.codex/config.toml", entry: "/codex/v1", note: "可选择官方直连或 Switchyard 三方代理。三方代理写入 model_provider = custom；官方直连会移除 Switchyard 管理块，认证交给 Codex App/CLI。" },
   "claude-code": { label: "Claude Code", file: "~/.claude/settings.json", entry: "/claude-code", note: "写入 env.ANTHROPIC_BASE_URL；ANTHROPIC_AUTH_TOKEN 读取 ${SWITCHYARD_KEY}" },
-  hermes: { label: "Hermes", file: "~/.hermes/config.json", entry: "/hermes/v1", note: "写入 baseUrl，apiKeyEnv = SWITCHYARD_KEY" }
+  hermes: { label: "Hermes", file: "~/.hermes/config.yaml", entry: "/hermes/v1", note: "写入 model.provider = switchyard 及 providers.switchyard（base_url + api_key + 模型清单）。Hermes 只读取 config.yaml。" }
 };
 
 const CLAUDE_CODE_MAPPING_SLOTS = [
