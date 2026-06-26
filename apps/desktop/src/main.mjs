@@ -1,5 +1,5 @@
 // Electron main process for Switchyard.
-import { app, BrowserWindow, ipcMain, shell, dialog } from "electron";
+import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -75,6 +75,11 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
 let codexArtifactTimer = null;
+// 托盘常驻 + 关窗保活：mainWindow 保留主窗口引用，tray 为系统托盘，
+// isQuitting 标记是否真正退出（区分“点叉隐藏”与“菜单/托盘退出”）。
+let mainWindow = null;
+let tray = null;
+let isQuitting = false;
 registerBuiltinPatches();
 
 function modelsForProfile(cfg, models) {
@@ -191,7 +196,55 @@ function createMainWindow() {
   win.webContents.on("console-message", (_e, level, message) => {
     appendLog({ level: level === 0 ? "info" : "warn", msg: `renderer: ${message}` });
   });
+  // 点窗口关闭按钮（叉）时，不退出应用，只隐藏窗口，网关继续后台运行。
+  // 只有走托盘菜单 / 应用菜单的“退出”（isQuitting=true）才真正退出。
+  win.on("close", (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      win.hide();
+      if (process.platform === "darwin") app.dock?.hide();
+    }
+  });
+  mainWindow = win;
   return win;
+}
+
+// 显示主窗口（从托盘恢复 / macOS 点 Dock 时调用）。
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
+  }
+  if (process.platform === "darwin") app.dock?.show();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// 创建系统托盘图标与右键菜单（显示窗口 / 退出）。
+function createTray() {
+  if (tray) return tray;
+  const trayIconPath = path.resolve(__dirname, "..", "assets", "tray.png");
+  let image = nativeImage.createFromPath(trayIconPath);
+  // macOS 菜单栏按 22px 高度显示，避免大图变形。
+  if (process.platform === "darwin" && !image.isEmpty()) {
+    image = image.resize({ width: 18, height: 18 });
+  }
+  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray.setToolTip("Switchyard");
+  const menu = Menu.buildFromTemplate([
+    { label: "显示窗口", click: () => showMainWindow() },
+    { type: "separator" },
+    {
+      label: "退出 Switchyard",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  tray.setContextMenu(menu);
+  // 单击托盘图标（Windows/Linux 习惯）唤出窗口；macOS 用右键菜单。
+  tray.on("click", () => showMainWindow());
+  return tray;
 }
 
 ipcMain.handle("config:read", () => readConfig());
@@ -1021,8 +1074,20 @@ async function searchSkillHub({ keyword = "", limit = 20 } = {}) {
   };
 }
 
+// 单实例锁：应用关窗后驻留后台，若用户再次启动，不开新实例（避免重复
+// 拉起网关导致端口冲突），而是唤出已有窗口。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.exit(0); // 第二实例直接退出，跳过清理钩子（它未启动网关）
+} else {
+  app.on("second-instance", () => {
+    showMainWindow();
+  });
+}
+
 app.whenReady().then(async () => {
   const win = createMainWindow();
+  createTray();
   subscribeLogs((entry) => {
     if (!win.isDestroyed()) win.webContents.send("gateway:log", entry);
   });
@@ -1039,10 +1104,35 @@ app.whenReady().then(async () => {
   }
 });
 
-app.on("window-all-closed", async () => {
-  stopCodexArtifactMonitor();
-  await stopGateway();
-  app.quit();
+// macOS：点 Dock 图标 / 应用被激活时，恢复主窗口。
+app.on("activate", () => {
+  showMainWindow();
+});
+
+// 关窗保活：窗口全部关闭时不退出（网关继续后台跑，托盘常驻）。
+// macOS 本就默认不退出；这里对所有平台统一保活，真正退出走托盘菜单。
+app.on("window-all-closed", () => {
+  // 不调用 app.quit()，应用驻留后台。
+});
+
+// 真正退出前统一做收尾清理（停网关 / 监控）。无论从托盘“退出”、
+// Cmd+Q 还是系统关机触发，都先异步清理再放行退出。
+let cleanedUp = false;
+app.on("before-quit", (event) => {
+  isQuitting = true;
+  if (cleanedUp) return; // 清理已完成，放行本次退出
+  event.preventDefault();
+  (async () => {
+    try {
+      stopCodexArtifactMonitor();
+      await stopGateway();
+    } catch (err) {
+      appendLog({ level: "error", msg: "gateway stop on quit failed", error: err?.message || String(err) });
+    } finally {
+      cleanedUp = true;
+      app.quit();
+    }
+  })();
 });
 
 function apiFormatModelUrls(baseUrl, apiFormat) {
