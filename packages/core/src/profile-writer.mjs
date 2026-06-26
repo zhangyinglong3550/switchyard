@@ -47,7 +47,7 @@ export function profileTargets() {
   return {
     codex: codexConfigPath(),
     "claude-code": claudeCodeConfigPath(),
-    hermes: hermesConfigPath()
+    hermes: hermesYamlConfigPath()
   };
 }
 
@@ -778,7 +778,8 @@ export function previewClaudeCodeProfile(target) {
   return JSON.stringify(renderClaudeCodeProfile(target), null, 2);
 }
 export function previewHermesProfile(target) {
-  return JSON.stringify(renderHermesProfile(target), null, 2);
+  // 预览真正会写入的 config.yaml 内容（Hermes 只读 YAML）。
+  return mergeHermesYamlProfile(readText(hermesYamlConfigPath()), target);
 }
 
 function yamlScalar(value) {
@@ -1040,17 +1041,14 @@ export function applyClaudeCode({ host, port, defaultModel, models, dryRun, mode
 }
 
 export function applyHermes({ host, port, defaultModel, models, dryRun } = {}) {
-  const file = hermesConfigPath();
-  const existing = readJsonSafe(file);
-  const merged = mergeHermesProfile(existing, { host, port });
-  const text = JSON.stringify(merged, null, 2) + "\n";
+  // Hermes 只读取 ~/.hermes/config.yaml，不读 config.json，
+  // 因此这里只写 YAML，避免产生 Hermes 永远不会读取的死文件。
   const yamlFile = hermesYamlConfigPath();
   const existingYaml = readText(yamlFile);
   const yamlText = mergeHermesYamlProfile(existingYaml, { host, port, defaultModel, models });
-  if (dryRun) return { path: file, preview: text, existing, yamlPath: yamlFile, yamlPreview: yamlText, yamlExisting: existingYaml };
-  const result = writeText(file, text);
+  if (dryRun) return { path: yamlFile, preview: yamlText, existing: existingYaml };
   const yamlResult = writeText(yamlFile, yamlText);
-  return { ...result, yamlPath: yamlResult.path, yamlBackup: yamlResult.backup };
+  return { ...yamlResult, yamlPath: yamlResult.path, yamlBackup: yamlResult.backup };
 }
 
 export function applyProfile(id, opts = {}) {
@@ -1066,7 +1064,7 @@ export function applyProfile(id, opts = {}) {
 export function restoreProfile(id) {
   if (id === "codex") return restoreLatest(codexConfigPath());
   if (id === "claude-code") return restoreLatest(claudeCodeConfigPath());
-  if (id === "hermes") return restoreLatest(hermesConfigPath());
+  if (id === "hermes") return restoreLatest(hermesYamlConfigPath());
   throw new Error(`Unknown profile id: ${id}`);
 }
 

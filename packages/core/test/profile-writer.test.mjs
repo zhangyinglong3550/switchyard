@@ -574,14 +574,20 @@ test("claude-code model slots · agent default model overrides stale default slo
   assert.ok(!env.ANTHROPIC_MODEL.includes("codex-gpt-5.5"));
 });
 
-test("hermes profile · creates file when absent", () => {
-  const file = pw.hermesConfigPath();
+test("hermes profile · creates YAML config when absent", () => {
+  const file = pw.hermesYamlConfigPath();
   if (fs.existsSync(file)) fs.unlinkSync(file);
-  pw.applyHermes({ host: "127.0.0.1", port: 17888 });
-  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-  assert.equal(parsed.baseUrl, "http://127.0.0.1:17888/hermes/v1");
-  assert.equal(parsed.apiKey, "switchyard-local");
-  assert.equal(parsed.apiKeyEnv, "SWITCHYARD_KEY");
+  // 不应再写 config.json（Hermes 不读取它）
+  const jsonFile = pw.hermesConfigPath();
+  if (fs.existsSync(jsonFile)) fs.unlinkSync(jsonFile);
+
+  pw.applyHermes({ host: "127.0.0.1", port: 17888, defaultModel: "deepseek/deepseek-v4-flash" });
+
+  const text = fs.readFileSync(file, "utf8");
+  assert.match(text, /provider: switchyard/);
+  assert.match(text, /base_url: http:\/\/127\.0\.0\.1:17888\/hermes\/v1/);
+  assert.match(text, /api_key: switchyard-local/);
+  assert.equal(fs.existsSync(jsonFile), false, "不应再创建 config.json");
 });
 
 test("hermes profile · switches YAML config to Switchyard without dropping providers", () => {
@@ -672,7 +678,7 @@ test("restoreProfile · returns no-backup when file never backed up", () => {
 });
 
 test("profile dry-run · does not write to disk", () => {
-  const file = pw.hermesConfigPath();
+  const file = pw.hermesYamlConfigPath();
   const before = fs.readFileSync(file, "utf8");
   const r = pw.applyHermes({ host: "10.0.0.1", port: 99999, dryRun: true });
   const after = fs.readFileSync(file, "utf8");

@@ -312,9 +312,10 @@ function detectClaudeCodeConfig(settings, urls) {
   return statusResult("drifted", "Claude Code 配置未指向 Switchyard", { expected: urls.claudeCode });
 }
 
-function detectHermesConfig(jsonConfig, yamlText, urls) {
-  if (jsonConfig == null && yamlText == null) return statusResult("missing", "未找到 Hermes 配置", { expected: urls.hermes });
-  const text = `${asText(jsonConfig)}\n${asText(yamlText)}`;
+function detectHermesConfig(yamlText, urls) {
+  // Hermes 只读取 config.yaml，因此诊断只看 YAML。
+  if (yamlText == null) return statusResult("missing", "未找到 Hermes 配置", { expected: urls.hermes });
+  const text = asText(yamlText);
   if (text.includes(urls.hermes) || text.includes(`${urls.origin}/v1`)) {
     return statusResult("ok", "Hermes 已指向 Switchyard", { expected: urls.hermes });
   }
@@ -326,7 +327,7 @@ export function doctorClientConfigContents(options = {}) {
   return {
     codex: detectCodexConfig(options.codexText, urls),
     "claude-code": detectClaudeCodeConfig(options.claudeSettings, urls),
-    hermes: detectHermesConfig(options.hermesJson, options.hermesYamlText, urls)
+    hermes: detectHermesConfig(options.hermesYamlText, urls)
   };
 }
 
@@ -352,11 +353,10 @@ function readJsonMaybe(file) {
 export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = os.homedir() } = {}) {
   const codexPath = path.join(home, ".codex", "config.toml");
   const claudePath = path.join(home, ".claude", "settings.json");
-  const hermesJsonPath = path.join(home, ".hermes", "config.json");
+  // Hermes 只读取 config.yaml；config.json 不再参与诊断。
   const hermesYamlPath = path.join(home, ".hermes", "config.yaml");
   const codexText = readTextMaybe(codexPath);
   const claudeSettings = readJsonMaybe(claudePath);
-  const hermesJson = readJsonMaybe(hermesJsonPath);
   const hermesYamlText = readTextMaybe(hermesYamlPath);
 
   const contents = doctorClientConfigContents({
@@ -364,7 +364,6 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     port,
     codexText: typeof codexText === "string" ? codexText : null,
     claudeSettings: claudeSettings && !claudeSettings.unreadable ? claudeSettings : null,
-    hermesJson: hermesJson && !hermesJson.unreadable ? hermesJson : null,
     hermesYamlText: typeof hermesYamlText === "string" ? hermesYamlText : null
   });
 
@@ -373,13 +372,11 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     paths: {
       codex: codexPath,
       "claude-code": claudePath,
-      hermesJson: hermesJsonPath,
-      hermesYaml: hermesYamlPath
+      hermes: hermesYamlPath
     },
     errors: [
       codexText?.unreadable && { client: "codex", ...codexText },
       claudeSettings?.unreadable && { client: "claude-code", ...claudeSettings },
-      hermesJson?.unreadable && { client: "hermes", ...hermesJson },
       hermesYamlText?.unreadable && { client: "hermes", ...hermesYamlText }
     ].filter(Boolean)
   };

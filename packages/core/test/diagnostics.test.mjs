@@ -71,7 +71,6 @@ test("diagnostics · detects client configuration drift from config contents", a
       'wire_api = "responses"'
     ].join("\n"),
     claudeSettings: { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:17888/claude-code" } },
-    hermesJson: { baseUrl: "http://127.0.0.1:17888/hermes/v1" },
     hermesYamlText: "provider: switchyard\nbase_url: http://127.0.0.1:17888/hermes/v1\n"
   });
   assert.equal(ok.codex.status, "ok");
@@ -83,8 +82,7 @@ test("diagnostics · detects client configuration drift from config contents", a
     port: 17888,
     codexText: 'model_provider = "openai"',
     claudeSettings: { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
-    hermesJson: { baseUrl: "https://example.com/v1" },
-    hermesYamlText: ""
+    hermesYamlText: "provider: openrouter\nbase_url: https://example.com/v1\n"
   });
   assert.equal(drifted.codex.status, "drifted");
   assert.equal(drifted["claude-code"].status, "drifted");
