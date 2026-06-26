@@ -274,6 +274,183 @@ export function countTokensApprox(body) {
   return { input_tokens: Math.ceil(text.length / 4) };
 }
 
+// Anthropic SSE → OpenAI Chat SSE 实时流式翻译器。
+// 读取 Anthropic Messages stream（event: xxx / data: {...} 格式），
+// 逐事件翻译成 OpenAI Chat Completions stream（data: {...} 格式）。
+export async function streamAnthropicAsChat(upstream, res, requestedModel) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+  const id = `chatcmpl_${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  // 追踪 content_block index → tool_call 状态
+  const toolCalls = new Map(); // blockIndex → { id, name, argumentsBuffer, chatIndex }
+  let nextToolCallIndex = 0;
+  let finishReason = null;
+  let streamError = null;
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  // 写入一条 Chat SSE data 事件
+  const writeChatChunk = (delta, opts = {}) => {
+    const chunk = {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: requestedModel,
+      choices: [{
+        index: 0,
+        delta,
+        finish_reason: opts.finishReason ?? null
+      }]
+    };
+    if (opts.usage) chunk.usage = opts.usage;
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  };
+
+  try {
+    for await (const chunk of upstream.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      // SSE 记录以空行分隔
+      const records = buffer.split(/\r?\n\r?\n/);
+      buffer = records.pop() || "";
+      for (const record of records) {
+        const parsed = parseAnthropicSseRecord(record);
+        if (!parsed) continue;
+        handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++ });
+      }
+    }
+    // 处理剩余 buffer
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      const parsed = parseAnthropicSseRecord(buffer);
+      if (parsed) handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++ });
+    }
+  } catch (err) {
+    streamError = err;
+  }
+
+  // 如果上游报错或中断，发一个错误 delta
+  if (streamError) {
+    writeChatChunk({ content: `\n[stream error: ${streamError?.message || streamError}]` });
+  }
+
+  // 发送结束 chunk
+  writeChatChunk({}, { finishReason: finishReason || "stop" });
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+// 解析一条 Anthropic SSE 记录，返回 { event, data } 或 null
+function parseAnthropicSseRecord(record) {
+  let eventName = "";
+  const dataLines = [];
+  for (const line of record.split(/\r?\n/)) {
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (!eventName && !dataLines.length) return null;
+  const dataText = dataLines.join("\n");
+  const data = dataText ? safeJsonParse(dataText) : {};
+  if (!data) return null;
+  return { event: eventName, data };
+}
+
+// 处理单个 Anthropic 事件，翻译成 Chat SSE chunk
+function handleAnthropicEvent({ event, data }, ctx) {
+  const { writeChatChunk, toolCalls, getNextToolCallIndex } = ctx;
+
+  switch (event) {
+    case "message_start": {
+      // 发送初始 chunk，带 role
+      writeChatChunk({ role: "assistant", content: "" });
+      break;
+    }
+    case "content_block_start": {
+      const block = data.content_block || {};
+      const index = data.index ?? 0;
+      if (block.type === "tool_use") {
+        const chatIndex = getNextToolCallIndex();
+        toolCalls.set(index, {
+          id: block.id || `call_${crypto.randomUUID()}`,
+          name: block.name || "",
+          argumentsBuffer: "",
+          chatIndex
+        });
+        // 发送 tool_call 起始 delta
+        writeChatChunk({
+          tool_calls: [{
+            index: chatIndex,
+            id: block.id || `call_${crypto.randomUUID()}`,
+            type: "function",
+            function: { name: block.name || "", arguments: "" }
+          }]
+        });
+      }
+      // text 块不需要起始 delta，等 delta 事件推送内容
+      break;
+    }
+    case "content_block_delta": {
+      const delta = data.delta || {};
+      const index = data.index ?? 0;
+      if (delta.type === "text_delta") {
+        writeChatChunk({ content: delta.text || "" });
+      } else if (delta.type === "thinking_delta") {
+        // thinking 内容映射到 reasoning_content（OpenAI 扩展字段）
+        writeChatChunk({ reasoning_content: delta.thinking || "" });
+      } else if (delta.type === "input_json_delta") {
+        // tool_use 参数增量
+        const entry = toolCalls.get(index);
+        if (entry) {
+          entry.argumentsBuffer += delta.partial_json || "";
+          writeChatChunk({
+            tool_calls: [{
+              index: entry.chatIndex,
+              function: { arguments: delta.partial_json || "" }
+            }]
+          });
+        }
+      } else if (delta.type === "signature_delta") {
+        // signature 不映射到 chat 格式，跳过
+      }
+      break;
+    }
+    case "content_block_stop": {
+      // tool_use block 结束时不需要额外操作
+      break;
+    }
+    case "message_delta": {
+      const delta = data.delta || {};
+      if (delta.stop_reason === "tool_use") {
+        finishReason = "tool_calls";
+      } else if (delta.stop_reason === "end_turn" || delta.stop_reason === "stop_sequence") {
+        finishReason = "stop";
+      } else if (delta.stop_reason === "max_tokens") {
+        finishReason = "length";
+      }
+      break;
+    }
+    case "message_stop": {
+      // finishReason 已在 message_delta 中设置
+      break;
+    }
+    case "error": {
+      const msg = data?.error?.message || data?.error || "upstream error";
+      writeChatChunk({ content: `\n[upstream error: ${msg}]` });
+      break;
+    }
+    case "ping":
+    default:
+      // 忽略 ping 和未知事件
+      break;
+  }
+}
+
 function writeEvent(res, event, data) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);

@@ -3,6 +3,7 @@
 // what upstream protocol the chosen provider speaks. Compat patches plug in via
 // applyOutbound/applyInbound and are provider/model targeted.
 import http from "node:http";
+import crypto from "node:crypto";
 import { loadConfig, listModelsForClient, publicModelsForClient } from "./config.mjs";
 import { resolveRoute } from "./router.mjs";
 import { buildCodexModelCatalog } from "./profile-writer.mjs";
@@ -11,7 +12,7 @@ import { readJsonResponse } from "./upstream/clients.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { responsesToChat, chatToResponse, streamChatAsResponses } from "./openai-adapter.mjs";
-import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
+import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
 registerBuiltinPatches();
 
@@ -600,16 +601,31 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
   recordRequestSummary(requestRecord, chatBody, route, "openai_chat");
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
-    // For stream we currently only support direct openai_chat passthrough.
-    // Non-openai_chat streaming is a V0.3+ item.
-    if ((route.provider.apiFormat || "openai_chat") !== "openai_chat") {
-      requestRecord.error = "stream over non-openai_chat upstream is not supported yet";
-      json(res, 501, { error: "stream over non-openai_chat upstream is not supported yet" });
+    // 流式支持 openai_chat 直通和 anthropic_messages 翻译两种模式。
+    const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, stream: true, proxyUrl: route.model.proxyUrl });
+    if (result.kind === "stream") {
+      recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
+      if (result.translate === "anthropic") {
+        // Anthropic SSE → OpenAI Chat SSE 实时翻译
+        return streamAnthropicAsChat(result.upstream, res, body.model);
+      }
+      // openai_chat 直通
+      return pipeStream(result.upstream, res, { provider: route.provider, model: route.model });
+    }
+    // 上游不支持流式或返回错误，fallback 到非流式 + 合成 SSE
+    if (result.kind === "error") {
+      requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
+      recordResponseSummary(requestRecord, result.payload, { stream: true, status: result.status, error: requestRecord.error });
+      json(res, result.status, result.payload);
       return;
     }
-    const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, stream: true, proxyUrl: route.model.proxyUrl });
-    recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
-    return pipeStream(result.upstream, res, { provider: route.provider, model: route.model });
+    // 非预期情况，fallback 到非流式
+    const responsePayload = result.rawPayload || result.payload;
+    recordUsage(requestRecord, responsePayload);
+    recordResponsePreview(requestRecord, responsePayload);
+    recordResponseSummary(requestRecord, responsePayload, { stream: true, status: result.status });
+    emit({ level: "info", msg: "chat", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat, syntheticStream: true });
+    return streamChatPayloadAsSse(res, result.payload, body.model);
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
   recordDispatchCompatibility(requestRecord, result);
@@ -779,6 +795,50 @@ function streamResponsePayload(res, payload) {
     writeSse(res, "response.output_item.done", { type: "response.output_item.done", output_index: outputIndex, item });
   });
   writeSse(res, "response.completed", { type: "response.completed", response: payload });
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+// 合成 Chat SSE 流（将完整 chat completion payload 拆成 SSE 事件序列）
+function streamChatPayloadAsSse(res, payload, requestedModel) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+  const id = payload?.id || `chatcmpl_${crypto.randomUUID()}`;
+  const created = payload?.created || Math.floor(Date.now() / 1000);
+  const choice = payload?.choices?.[0] || {};
+  const message = choice.message || {};
+  const writeChunk = (delta, finishReason = null) => {
+    res.write(`data: ${JSON.stringify({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: requestedModel,
+      choices: [{ index: 0, delta, finish_reason: finishReason }]
+    })}\n\n`);
+  };
+  // 起始 chunk
+  writeChunk({ role: "assistant", content: "" });
+  // 文本内容
+  const text = contentToText(message.content);
+  if (text) writeChunk({ content: text });
+  // tool_calls
+  if (Array.isArray(message.tool_calls)) {
+    message.tool_calls.forEach((tc, index) => {
+      writeChunk({
+        tool_calls: [{
+          index,
+          id: tc.id || `call_${crypto.randomUUID()}`,
+          type: "function",
+          function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" }
+        }]
+      });
+    });
+  }
+  // 结束 chunk
+  writeChunk({}, choice.finish_reason || "stop");
   res.write("data: [DONE]\n\n");
   res.end();
 }
