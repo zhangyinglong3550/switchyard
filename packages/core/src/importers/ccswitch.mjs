@@ -2,6 +2,14 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { execSync } from "node:child_process";
+import { createRequire } from "node:module";
+
+function betterSqlite() {
+  try {
+    const require = createRequire(import.meta.url);
+    return require("better-sqlite3");
+  } catch { return null; }
+}
 
 const DB_PATH = path.join(os.homedir(), ".cc-switch", "cc-switch.db");
 
@@ -142,12 +150,22 @@ export function filterImportedConfig(result, selection = {}) {
 
 export function importProviders({ sqlite3Cli, includeKeys = true, selection } = {}) {
   if (!fs.existsSync(DB_PATH)) return { ok: false, error: "cc-switch db not found", path: DB_PATH };
-  const cli = sqlite3Cli || "sqlite3";
   let rows;
-  try {
-    const out = execSync(`"${cli}" -json "${DB_PATH}" "SELECT id, app_type, name, settings_config, category, provider_type FROM providers"`, { encoding: "utf8", timeout: 5000, maxBuffer: 20 * 1024 * 1024 });
-    rows = JSON.parse(out || "[]");
-  } catch (err) { return { ok: false, error: `sqlite3 read: ${err.message}`, path: DB_PATH }; }
+  const DB = betterSqlite();
+  if (DB) {
+    try {
+      const db = new DB(DB_PATH, { readonly: true });
+      try {
+        rows = db.prepare("SELECT id, app_type, name, settings_config, category, provider_type FROM providers").all();
+      } finally { db.close(); }
+    } catch (err) { return { ok: false, error: `sqlite3 read: ${err.message}`, path: DB_PATH }; }
+  } else {
+    const cli = sqlite3Cli || "sqlite3";
+    try {
+      const out = execSync(`"${cli}" -json "${DB_PATH}" "SELECT id, app_type, name, settings_config, category, provider_type FROM providers"`, { encoding: "utf8", timeout: 5000, maxBuffer: 20 * 1024 * 1024 });
+      rows = JSON.parse(out || "[]");
+    } catch (err) { return { ok: false, error: `sqlite3 read: ${err.message}`, path: DB_PATH }; }
+  }
   if (!rows.length) return { ok: false, error: "no providers", path: DB_PATH };
 
   // Merge same-name rows across app_types
