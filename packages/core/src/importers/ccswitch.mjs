@@ -11,6 +11,19 @@ function betterSqlite() {
   } catch { return null; }
 }
 
+// 解析可用的 sqlite3 CLI 路径（打包内置 / 系统 PATH）
+function resolveSqlite3Cli() {
+  if (process.env.SWITCHYARD_SQLITE3 && fs.existsSync(process.env.SWITCHYARD_SQLITE3)) {
+    return process.env.SWITCHYARD_SQLITE3;
+  }
+  // Electron 打包后 resources 目录下的 sqlite3.exe
+  if (process.resourcesPath) {
+    const bundled = path.join(process.resourcesPath, "win", "sqlite3.exe");
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  return process.platform === "win32" ? "sqlite3.exe" : "sqlite3";
+}
+
 const DB_PATH = path.join(os.homedir(), ".cc-switch", "cc-switch.db");
 
 export function findDb() { return fs.existsSync(DB_PATH) ? DB_PATH : null; }
@@ -158,9 +171,13 @@ export function importProviders({ sqlite3Cli, includeKeys = true, selection } = 
       try {
         rows = db.prepare("SELECT id, app_type, name, settings_config, category, provider_type FROM providers").all();
       } finally { db.close(); }
-    } catch (err) { return { ok: false, error: `sqlite3 read: ${err.message}`, path: DB_PATH }; }
-  } else {
-    const cli = sqlite3Cli || "sqlite3";
+    } catch {
+      // native 模块加载失败（ABI 不匹配 / 打包路径问题），fallback 到 CLI
+      rows = null;
+    }
+  }
+  if (!rows) {
+    const cli = sqlite3Cli || resolveSqlite3Cli();
     try {
       const out = execSync(`"${cli}" -json "${DB_PATH}" "SELECT id, app_type, name, settings_config, category, provider_type FROM providers"`, { encoding: "utf8", timeout: 5000, maxBuffer: 20 * 1024 * 1024 });
       rows = JSON.parse(out || "[]");

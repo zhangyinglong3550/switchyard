@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { ensureDir, logDir, nowIso } from "../../../packages/core/src/utils.mjs";
 
 const DEFAULT_RETAIN_DAYS = 14;
@@ -9,19 +10,79 @@ const DEFAULT_MAX_BYTES = 200 * 1024 * 1024;
 let initialized = false;
 let writeCount = 0;
 let cleanupTimer = null;
+let _dbHandle = null;
 
 export function requestLogDbPath() {
   return process.env.SWITCHYARD_REQUEST_LOG_DB || path.join(logDir(), "requests.sqlite3");
 }
 
-function sqlite3Cli() {
-  return process.env.SWITCHYARD_SQLITE3 || "sqlite3";
+// 尝试加载 better-sqlite3 native 模块
+function loadBetterSqlite() {
+  try {
+    const require = createRequire(import.meta.url);
+    return require("better-sqlite3");
+  } catch {
+    return null;
+  }
 }
 
+// 解析可用的 sqlite3 CLI 路径（打包内置 / 系统 PATH）
+function resolveSqlite3Cli() {
+  if (process.env.SWITCHYARD_SQLITE3 && fs.existsSync(process.env.SWITCHYARD_SQLITE3)) {
+    return process.env.SWITCHYARD_SQLITE3;
+  }
+  if (process.resourcesPath) {
+    const bundled = path.join(process.resourcesPath, "win", "sqlite3.exe");
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  return process.platform === "win32" ? "sqlite3.exe" : "sqlite3";
+}
+
+function sqlite3Cli() {
+  return resolveSqlite3Cli();
+}
+
+// 优先使用 better-sqlite3（native 模块，性能更好且不依赖外部命令）
+function getDbHandle() {
+  if (_dbHandle) return _dbHandle;
+  const BetterSqlite = loadBetterSqlite();
+  if (!BetterSqlite) return null;
+  try {
+    const dbPath = requestLogDbPath();
+    ensureDir(path.dirname(dbPath));
+    _dbHandle = new BetterSqlite(dbPath);
+    _dbHandle.pragma("journal_mode = WAL");
+    return _dbHandle;
+  } catch {
+    // native 模块加载失败（ABI 不匹配 / 打包路径问题），回退到 CLI
+    _dbHandle = false; // 标记为不可用，避免重复尝试
+    return null;
+  }
+}
+
+// 统一 SQL 执行入口：优先 better-sqlite3，fallback 到 sqlite3 CLI
 function runSql(sql, { json = false } = {}) {
-  const db = requestLogDbPath();
-  ensureDir(path.dirname(db));
-  const args = json ? ["-json", db, sql] : [db, sql];
+  // 优先 native 模块
+  const db = getDbHandle();
+  if (db) {
+    try {
+      if (json) {
+        // 查询语句（SELECT / PRAGMA table_info），返回行数据
+        const rows = db.prepare(sql).all();
+        return rows;
+      }
+      // DDL/DML（可能多语句），用 exec
+      db.exec(sql);
+      return "";
+    } catch (err) {
+      // native 执行失败，fallback 到 CLI
+    }
+  }
+
+  // fallback 到 sqlite3 CLI
+  const dbPath = requestLogDbPath();
+  ensureDir(path.dirname(dbPath));
+  const args = json ? ["-json", dbPath, sql] : [dbPath, sql];
   const out = execFileSync(sqlite3Cli(), args, { encoding: "utf8", timeout: 5000, maxBuffer: 10 * 1024 * 1024 });
   return json ? JSON.parse(out || "[]") : out;
 }
