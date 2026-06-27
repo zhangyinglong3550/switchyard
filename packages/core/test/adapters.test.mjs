@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { responsesToChat, chatToResponse } from "../src/openai-adapter.mjs";
+import { responsesToChat, chatToResponse, extractNamespaceMap } from "../src/openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic } from "../src/anthropic-adapter.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesStreamToChatResponse } from "../src/openai-adapter-out.mjs";
@@ -303,4 +303,105 @@ test("Codex Responses round-trips Anthropic thinking blocks before tool results"
   assert.deepEqual(out.messages[0].content[0], { type: "thinking", thinking: "selected a tool", signature: "sig_123" });
   assert.equal(out.messages[0].content[1].type, "tool_use");
   assert.equal(out.messages[1].content[0].type, "tool_result");
+});
+
+test("responsesToChat drops tool_search (cannot be bridged to chat models)", () => {
+  const chat = responsesToChat({
+    input: "use chrome",
+    tools: [
+      { type: "function", name: "exec_command", description: "run", parameters: { type: "object" } },
+      { type: "tool_search", execution: "client", description: "# Tool discovery", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }
+    ]
+  }, "u-model");
+  const names = chat.tools.map((t) => t.function?.name);
+  assert.ok(!names.includes("tool_search"), "tool_search must not be forwarded to chat models");
+  assert.deepEqual(names, ["exec_command"]);
+});
+
+test("responsesToChat flattens namespace tools with namespace__fn names", () => {
+  const chat = responsesToChat({
+    input: "hi",
+    tools: [
+      { type: "namespace", name: "codex_app", tools: [
+        { type: "function", name: "navigate_to_codex_page", description: "nav", parameters: { type: "object" } },
+        { type: "function", name: "read_thread_terminal", description: "read", parameters: { type: "object" } }
+      ] }
+    ]
+  }, "u-model");
+  const names = chat.tools.map((t) => t.function?.name);
+  assert.ok(names.includes("codex_app__navigate_to_codex_page"));
+  assert.ok(names.includes("codex_app__read_thread_terminal"));
+});
+
+test("responsesToChat drops unsupported hosted tools (web_search)", () => {
+  const chat = responsesToChat({
+    input: "hi",
+    tools: [
+      { type: "function", name: "exec_command", description: "run", parameters: { type: "object" } },
+      { type: "web_search", external_web_access: true }
+    ]
+  }, "u-model");
+  const names = chat.tools.map((t) => t.function?.name);
+  assert.deepEqual(names, ["exec_command"]);
+});
+
+test("chatToResponse unflattens namespace tool call and preserves the namespace", () => {
+  const namespaceMap = extractNamespaceMap([
+    { type: "namespace", name: "codex_app", tools: [{ type: "function", name: "navigate_to_codex_page" }] }
+  ]);
+  const out = chatToResponse({
+    choices: [{
+      message: {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_1", function: { name: "codex_app__navigate_to_codex_page", arguments: "{\"url\":\"/x\"}" } }]
+      }
+    }]
+  }, "u-model", { namespaceMap });
+  const fc = out.output.find((o) => o.type === "function_call");
+  assert.ok(fc, "function_call item should be emitted");
+  assert.equal(fc.name, "navigate_to_codex_page");
+  assert.equal(fc.namespace, "codex_app");
+  assert.equal(fc.arguments, "{\"url\":\"/x\"}");
+  assert.ok(!out.output.some((o) => o.type === "tool_search_call"), "no tool_search_call should be produced");
+});
+
+test("chatToResponse keeps normal tool calls as function_call without namespace", () => {
+  const out = chatToResponse({
+    choices: [{
+      message: {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_2", function: { name: "exec_command", arguments: "{}" } }]
+      }
+    }]
+  }, "u-model");
+  const fc = out.output.find((o) => o.type === "function_call");
+  assert.ok(fc, "function_call item should be emitted");
+  assert.equal(fc.name, "exec_command");
+  assert.equal(fc.namespace, undefined);
+});
+
+test("chatToResponse restores tool name when upstream rewrites underscore count (StepFun)", () => {
+  // StepFun 会把拍平后的 `namespace__fn` 里的 `__` 改写成 `___`，导致精确匹配失败。
+  // 下划线归一化兜底应能正确还原 name/namespace，避免 Codex 收到不存在的工具名而中断。
+  const namespaceMap = extractNamespaceMap([
+    { type: "namespace", name: "mcp__codex_apps__github", tools: [
+      { type: "function", name: "get_user_login", parameters: { type: "object" } }
+    ] }
+  ]);
+  // 上游回传的名字: github 和 get_user_login 之间是 3 个下划线(应为 2 个)
+  const out = chatToResponse({
+    choices: [{
+      message: {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_3", function: { name: "mcp__codex_apps__github___get_user_login", arguments: "{}" } }]
+      }
+    }]
+  }, "u-model", { namespaceMap });
+  const fc = out.output.find((o) => o.type === "function_call");
+  assert.ok(fc, "function_call item should be emitted");
+  assert.equal(fc.name, "get_user_login", "工具名应还原为 get_user_login 而非 _get_user_login");
+  assert.equal(fc.namespace, "mcp__codex_apps__github");
 });

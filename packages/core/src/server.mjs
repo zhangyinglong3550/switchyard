@@ -11,7 +11,7 @@ import { dispatchChat, dispatchResponses } from "./upstream/dispatch.mjs";
 import { readJsonResponse } from "./upstream/clients.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
-import { responsesToChat, chatToResponse, streamChatAsResponses } from "./openai-adapter.mjs";
+import { responsesToChat, chatToResponse, streamChatAsResponses, extractNamespaceMap } from "./openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
 registerBuiltinPatches();
@@ -704,6 +704,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     return;
   }
   let chatBody = { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id };
+  const namespaceMap = extractNamespaceMap(body.tools);
   recordPrompt(requestRecord, chatBody.messages);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
@@ -741,7 +742,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       recordResponsePreview(requestRecord, responsePayload);
       recordResponseSummary(requestRecord, responsePayload, { stream: true, status: fallback.status });
       emit({ level: "info", msg: "responses", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat, syntheticStream: true });
-      return streamResponsePayload(res, chatToResponse(fallback.payload, body.model));
+      return streamResponsePayload(res, chatToResponse(fallback.payload, body.model, { namespaceMap }));
     }
     const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
     if (!result.upstream?.ok) {
@@ -752,7 +753,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       return;
     }
     recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
-    return streamChatAsResponses(result.upstream, res, body.model);
+    return streamChatAsResponses(result.upstream, res, body.model, { namespaceMap });
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
   recordDispatchCompatibility(requestRecord, result);
@@ -766,7 +767,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
   recordUsage(requestRecord, responsePayload);
   recordResponsePreview(requestRecord, responsePayload);
   recordResponseSummary(requestRecord, responsePayload, { status: result.status });
-  json(res, 200, chatToResponse(result.payload, body.model));
+  json(res, 200, chatToResponse(result.payload, body.model, { namespaceMap }));
   emit({ level: "info", msg: "responses", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat });
 }
 

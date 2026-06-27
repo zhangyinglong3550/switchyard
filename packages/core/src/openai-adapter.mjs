@@ -45,6 +45,44 @@ function responsesRoleToChatRole(role) {
   return "user";
 }
 
+// Codex App 把插件工具（如 @Chrome）作为 namespace 工具下发。第三方 Chat 模型不认识
+// namespace，需要把它们拍平成 `namespace__fn` 形式的普通函数；回包时再还原。
+export function extractNamespaceMap(tools) {
+  if (!Array.isArray(tools)) return {};
+  const map = {};
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || tool.type !== "namespace") continue;
+    const namespace = tool.name || "";
+    const functions = tool.functions || tool.tools || [];
+    for (const fn of functions) {
+      if (fn && typeof fn === "object" && fn.name) {
+        map[`${namespace}__${fn.name}`] = { namespace, name: fn.name };
+      }
+    }
+  }
+  return map;
+}
+
+function unflattenToolName(name, namespaceMap = {}) {
+  // 1. 精确命中（上游原样回传我们拍平的名字）
+  if (namespaceMap[name]) return namespaceMap[name];
+  // 2. 兜底：部分上游（如 StepFun）会改写工具名里的下划线数量（把 `__` 变成 `___`），
+  //    导致精确匹配失败。对连续下划线归一化后再匹配，避免工具名被拆错。
+  if (name.includes("_")) {
+    const norm = (s) => s.replace(/_+/g, "_");
+    const normName = norm(name);
+    for (const key of Object.keys(namespaceMap)) {
+      if (norm(key) === normName) return namespaceMap[key];
+    }
+  }
+  // 3. 没有 namespaceMap 信息时，按 `__` 拆分（最后一段为函数名）
+  if (name.includes("__")) {
+    const parts = name.split("__");
+    return { namespace: parts.slice(0, -1).join("__"), name: parts[parts.length - 1] };
+  }
+  return { namespace: null, name };
+}
+
 export function responsesToChat(body, upstreamModel) {
   const messages = [];
   let pendingThinking = [];
@@ -113,9 +151,35 @@ export function responsesToChat(body, upstreamModel) {
   if (body.temperature !== undefined) chat.temperature = body.temperature;
   if (body.max_output_tokens !== undefined) chat.max_tokens = body.max_output_tokens;
   if (Array.isArray(body.tools)) {
-    chat.tools = body.tools
-      .filter((t) => t && t.type === "function")
-      .map((t) => ({ type: "function", function: t.function ? t.function : { name: t.name, description: t.description, parameters: t.parameters } }));
+    const flatTools = [];
+    for (const tool of body.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      if (tool.type === "function" && (tool.name || tool.function?.name)) {
+        flatTools.push({
+          type: "function",
+          function: tool.function
+            ? tool.function
+            : { name: tool.name, description: tool.description, parameters: tool.parameters }
+        });
+      } else if (tool.type === "namespace") {
+        // 把 namespace 工具拍平成单独的函数，避免被丢弃（@Chrome 等插件工具就走这里）
+        const namespace = tool.name || "";
+        const functions = tool.functions || tool.tools || [];
+        for (const fn of functions) {
+          if (!fn || typeof fn !== "object" || !fn.name) continue;
+          flatTools.push({
+            type: "function",
+            function: {
+              name: `${namespace}__${fn.name}`,
+              description: fn.description || "",
+              parameters: fn.parameters || fn.input_schema || { type: "object", properties: {} }
+            }
+          });
+        }
+      }
+      // tool_search 及其他 hosted 工具（web_search 等）无法转发给第三方 Chat 模型，直接跳过。
+    }
+    chat.tools = flatTools;
   }
   if (body.tool_choice !== undefined) chat.tool_choice = body.tool_choice;
   if (body.reasoning !== undefined) chat.reasoning = body.reasoning;
@@ -123,7 +187,8 @@ export function responsesToChat(body, upstreamModel) {
   return chat;
 }
 
-export function chatToResponse(payload, requestedModel) {
+export function chatToResponse(payload, requestedModel, options = {}) {
+  const namespaceMap = options.namespaceMap || {};
   const choice = payload.choices?.[0] || {};
   const message = choice.message || {};
   const output = [];
@@ -151,14 +216,19 @@ export function chatToResponse(payload, requestedModel) {
   }
   if (Array.isArray(message.tool_calls)) {
     for (const call of message.tool_calls) {
-      output.push({
+      const rawName = call.function?.name || call.name || "unknown";
+      const resolved = unflattenToolName(rawName, namespaceMap);
+      const item = {
         type: "function_call",
         id: `fc_${crypto.randomUUID()}`,
         call_id: call.id || `call_${crypto.randomUUID()}`,
         status: "completed",
-        name: call.function?.name,
+        name: resolved.name || rawName,
         arguments: call.function?.arguments || "{}"
-      });
+      };
+      // 还原 namespace，让 Codex App 能把调用路由回插件工具（如 @Chrome）
+      if (resolved.namespace) item.namespace = resolved.namespace;
+      output.push(item);
     }
   }
   return {
@@ -257,7 +327,8 @@ class ThinkTagStreamSplitter {
   }
 }
 
-export async function streamChatAsResponses(upstream, res, requestedModel) {
+export async function streamChatAsResponses(upstream, res, requestedModel, options = {}) {
+  const namespaceMap = options.namespaceMap || {};
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -363,10 +434,22 @@ export async function streamChatAsResponses(upstream, res, requestedModel) {
       argumentsDone: false
     };
     toolCalls.set(index, entry);
+    const resolved = unflattenToolName(entry.name, namespaceMap);
+    entry.resolvedName = resolved.name || entry.name;
+    entry.namespace = resolved.namespace || null;
+    const addedItem = {
+      id: tcItemId,
+      type: "function_call",
+      status: "in_progress",
+      call_id: entry.id,
+      name: entry.resolvedName,
+      arguments: ""
+    };
+    if (entry.namespace) addedItem.namespace = entry.namespace;
     writeEvent(res, "response.output_item.added", {
       type: "response.output_item.added",
       output_index: tcOutputIndex,
-      item: { id: tcItemId, type: "function_call", status: "in_progress", call_id: entry.id, name: entry.name, arguments: "" }
+      item: addedItem
     });
     return entry;
   };
@@ -523,9 +606,10 @@ export async function streamChatAsResponses(upstream, res, requestedModel) {
         type: "function_call",
         status: "completed",
         call_id: entry.id,
-        name: entry.name,
+        name: entry.resolvedName || entry.name,
         arguments: entry.arguments
       };
+      if (entry.namespace) completedCall.namespace = entry.namespace;
       writeEvent(res, "response.output_item.done", {
         type: "response.output_item.done",
         output_index: entry.outputIndex,
