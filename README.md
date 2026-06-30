@@ -192,7 +192,6 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 | macOS (Apple Silicon) | `Switchyard-1.3.1-arm64.dmg` |
 | macOS (Intel / x64) | `Switchyard-1.3.1-x64.dmg` |
 | Windows (x64) | `Switchyard Setup 1.3.1.exe` 或 `Switchyard-1.3.1-win.zip` |
-| Linux (x64) | `Switchyard-1.3.1.AppImage` 或 `switchyard_1.3.1_amd64.deb` |
 
 ### 配置环境变量
 
