@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { responsesToChat, chatToResponse, extractNamespaceMap } from "../src/openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic } from "../src/anthropic-adapter.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
-import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesStreamToChatResponse } from "../src/openai-adapter-out.mjs";
+import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../src/openai-adapter-out.mjs";
 import { SWITCHYARD_THINKING_KEY } from "../src/reasoning.mjs";
 
 test("responsesToChat preserves system + user input", () => {
@@ -219,6 +219,57 @@ test("responsesStreamToChatResponse reads text from content_part.done events", a
   });
   const out = await responsesStreamToChatResponse({ body: stream }, "gpt");
   assert.equal(out.choices[0].message.content, "最终文本");
+});
+
+test("responsesToChatResponse falls back to chat-completions shape text and tool calls", () => {
+  const out = responsesToChatResponse({
+    id: "chatcmpl_fallback",
+    object: "chat.completion",
+    created: 123,
+    model: "gpt-fallback",
+    choices: [{
+      index: 0,
+      finish_reason: "tool_calls",
+      message: {
+        role: "assistant",
+        content: "读取我的飞书智能会议纪要需要先调用工具。",
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "Skill", arguments: JSON.stringify({ skill: "lark-minutes" }) }
+        }]
+      }
+    }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+  }, "gpt-fallback");
+  assert.equal(out.choices[0].message.content, "读取我的飞书智能会议纪要需要先调用工具。");
+  assert.equal(out.choices[0].message.tool_calls[0].function.name, "Skill");
+  assert.equal(out.choices[0].message.tool_calls[0].function.arguments, JSON.stringify({ skill: "lark-minutes" }));
+  assert.equal(out.choices[0].finish_reason, "tool_calls");
+});
+
+test("responsesStreamToChatResponse recovers completed output_text after streamed tool call", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      controller.enqueue(enc.encode([
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"call_1\",\"name\":\"Skill\"},\"output_index\":0}",
+        "",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"skill\\\":\\\"superpowers:using-superpowers\\\"}\",\"item_id\":\"fc_1\",\"output_index\":0}",
+        "",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"skill\\\":\\\"superpowers:using-superpowers\\\"}\",\"item_id\":\"fc_1\",\"output_index\":0}",
+        "",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"created_at\":0,\"model\":\"gpt\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"最终文本\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  const out = await responsesStreamToChatResponse({ body: stream }, "gpt");
+  assert.equal(out.choices[0].message.content, "最终文本");
+  assert.equal(out.choices[0].message.tool_calls[0].function.name, "Skill");
 });
 
 test("anthropicToChat lifts tool_use and tool_result into chat tool flow", () => {

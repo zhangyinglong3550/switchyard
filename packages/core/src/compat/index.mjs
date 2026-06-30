@@ -108,6 +108,7 @@ import { toolHistoryAdjacentPatch } from "./patches/tool-history-adjacent.mjs";
 import { roleNormalizePatch } from "./patches/role-normalize.mjs";
 import { reasoningStatePatch } from "./patches/reasoning-state.mjs";
 import { strictToolSchemaPatch } from "./patches/strict-tool-schema.mjs";
+import { aigoChatPatch } from "./patches/aigo-chat.mjs";
 
 export const BUILTIN_COMPAT_PACKS = [
   {
@@ -175,6 +176,12 @@ export const BUILTIN_COMPAT_PACKS = [
     label: "官方 GPT / Codex",
     description: "清理非 OpenAI 参数，并补齐 GPT 请求需要的默认字段。",
     patchIds: ["official-gpt-fallback"]
+  },
+  {
+    id: "aigo-chat",
+    label: "AIGoCode Chat",
+    description: "针对 AIGoCode 中转的 Claude Code openai_chat 请求，做更保守的消息压平与工具参数规范化。",
+    patchIds: ["role-normalize", "tool-name-normalize", "strict-tool-schema", "tool-history-adjacent", "aigo-chat"]
   }
 ];
 

@@ -140,9 +140,70 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel) {
     Connection: "keep-alive"
   });
   const id = `msg_${crypto.randomUUID()}`;
-  writeEvent(res, "message_start", { type: "message_start", message: { id, type: "message", role: "assistant", model: requestedModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
-  writeEvent(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+  writeEvent(res, "message_start", {
+    type: "message_start",
+    message: {
+      id,
+      type: "message",
+      role: "assistant",
+      model: requestedModel,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 }
+    }
+  });
+
   let streamError = null;
+  let finishReason = null; // first non-null wins
+  let textStarted = false;
+  let textBlockStopped = false;
+  let nextBlockIndex = 0;
+  const toolBlocks = new Map(); // delta.index -> { blockIndex, id, name, input }
+
+  const ensureTextBlock = () => {
+    if (!textStarted) {
+      textStarted = true;
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" }
+      });
+      nextBlockIndex = Math.max(nextBlockIndex, 1);
+    }
+    return 0;
+  };
+
+  const ensureToolBlock = (deltaTool) => {
+    const key = Number.isInteger(deltaTool?.index) ? deltaTool.index : 0;
+    const existing = toolBlocks.get(key);
+    if (existing) return existing;
+    const entry = {
+      blockIndex: nextBlockIndex++,
+      id: deltaTool?.id || `call_${crypto.randomUUID()}`,
+      name: deltaTool?.function?.name || "unknown_tool",
+      input: ""
+    };
+    toolBlocks.set(key, entry);
+    writeEvent(res, "content_block_start", {
+      type: "content_block_start",
+      index: entry.blockIndex,
+      content_block: {
+        type: "tool_use",
+        id: entry.id,
+        name: entry.name,
+        input: {}
+      }
+    });
+    return entry;
+  };
+
+  const finalizeToolBlocks = () => {
+    for (const [, entry] of toolBlocks) {
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: entry.blockIndex });
+    }
+  };
+
   try {
     for await (const chunk of upstream.body) {
       const raw = Buffer.from(chunk).toString("utf8");
@@ -154,22 +215,63 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel) {
         if (!event) continue;
         const choice = event.choices?.[0] || {};
         const delta = choice.delta || {};
+
+        if (finishReason == null && choice.finish_reason != null) {
+          finishReason = choice.finish_reason;
+        }
+
+        // text / reasoning fallback
         const deltaContent = delta.content;
         const deltaReasoning = delta.reasoning_content;
         let deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
         if (!deltaText && typeof deltaReasoning === "string" && deltaReasoning.length > 0) {
           deltaText = deltaReasoning;
         }
-        if (!deltaText) continue;
-        writeEvent(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: deltaText } });
+        if (deltaText) {
+          const idx = ensureTextBlock();
+          writeEvent(res, "content_block_delta", {
+            type: "content_block_delta",
+            index: idx,
+            delta: { type: "text_delta", text: deltaText }
+          });
+        }
+
+        // tool call streaming aggregation
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const entry = ensureToolBlock(tc);
+            if (tc?.id) entry.id = tc.id;
+            if (tc?.function?.name) entry.name = tc.function.name;
+            const argDelta = tc?.function?.arguments || "";
+            if (argDelta) {
+              entry.input += argDelta;
+              writeEvent(res, "content_block_delta", {
+                type: "content_block_delta",
+                index: entry.blockIndex,
+                delta: { type: "input_json_delta", partial_json: argDelta }
+              });
+            }
+          }
+        }
       }
     }
   } catch (err) {
     streamError = err;
   }
-  writeEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+
+  if (textStarted && !textBlockStopped) {
+    writeEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+    textBlockStopped = true;
+  }
+  finalizeToolBlocks();
+
   if (streamError) writeAnthropicErrorEvent(res, streamError);
-  writeEvent(res, "message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } });
+  const stopReason = finishReason === "tool_calls" ? "tool_use" : (finishReason || "end_turn");
+  writeEvent(res, "message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: stopReason, stop_sequence: null },
+    usage: { output_tokens: 0 }
+  });
   writeEvent(res, "message_stop", { type: "message_stop" });
   res.end();
 }

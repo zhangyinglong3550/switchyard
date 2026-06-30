@@ -19,6 +19,27 @@ function spawnUpstream(handler) {
 
 function close(server) { return new Promise((r) => server.close(r)); }
 
+test("dispatchChat → openai_chat upstream tolerates output_text-style assistant message payload", async (t) => {
+  resetPatches();
+  const up = await spawnUpstream((req, res, body) => {
+    assert.equal(req.url, "/v1/chat/completions");
+    const data = JSON.parse(body);
+    assert.equal(data.model, "u-model");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x", object: "chat.completion", model: "u-model",
+      choices: [{ index: 0, message: { role: "assistant", content: { output_text: "请先调用飞书相关工具。" }, tool_calls: [{ id: "call_1", type: "function", function: { name: "Skill", arguments: JSON.stringify({ skill: "lark-minutes" }) } }] }, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 }
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  const result = await dispatchChat(provider, "u-model", { messages: [{ role: "user", content: "go" }] });
+  assert.equal(result.kind, "json");
+  assert.equal(result.payload.choices[0].message.content, "请先调用飞书相关工具。");
+  assert.equal(result.payload.choices[0].message.tool_calls[0].function.name, "Skill");
+});
+
 test("dispatchChat → openai_chat upstream returns chat-shape", async (t) => {
   resetPatches();
   const up = await spawnUpstream((req, res, body) => {

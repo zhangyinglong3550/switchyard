@@ -213,5 +213,17 @@ export function providerReady(provider) {
 
 export async function readJsonResponse(res) {
   const text = await res.text();
+  if (process.env.SWITCHYARD_DEBUG_RAW_UPSTREAM === "1") {
+    try {
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        status: res.status,
+        url: res.url || "",
+        bodyPreview: String(text || "").slice(0, 12000)
+      });
+      fs.appendFileSync(path.join(os.homedir(), "file", "codex", "switchyard-raw-upstream.log"), `${line}
+`);
+    } catch {}
+  }
   return safeJsonParse(text, { error: text });
 }

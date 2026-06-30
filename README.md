@@ -23,6 +23,11 @@
 
 ![Switchyard 总览](docs/assets/screenshots/01-overview.png)
 
+## 演示视频
+
+- [下载/观看产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
+
+> 如果 GitHub 页面内无法直接预览视频，请点击链接下载后本地观看。
 
 ---
 
@@ -184,8 +189,10 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-1.0.0-arm64.dmg` |
-| Windows (x64) | `Switchyard Setup 1.0.0.exe` 或 `Switchyard-1.0.0-win.zip` |
+| macOS (Apple Silicon) | `Switchyard-1.3.0-arm64.dmg` |
+| macOS (Intel / x64) | `Switchyard-1.3.0-x64.dmg` |
+| Windows (x64) | `Switchyard Setup 1.3.0.exe` 或 `Switchyard-1.3.0-win.zip` |
+| Linux (x64) | `Switchyard-1.3.0.AppImage` 或 `switchyard_1.3.0_amd64.deb` |
 
 ### 配置环境变量
 

@@ -131,32 +131,52 @@ export function normalizeChatgptCodexResponsesBody(body) {
   return next;
 }
 
+function toolCallToChatToolCall(call) {
+  if (!call || typeof call !== "object") return null;
+  const name = call.name || call.function?.name || "";
+  if (!name) return null;
+  const argumentsValue = call.arguments ?? call.function?.arguments ?? call.input ?? {};
+  return {
+    id: call.call_id || call.id || `call_${crypto.randomUUID()}`,
+    type: "function",
+    function: {
+      name,
+      arguments: typeof argumentsValue === "string" ? argumentsValue : JSON.stringify(argumentsValue || {})
+    }
+  };
+}
+
 export function responsesToChatResponse(payload, upstreamModel) {
   // Flatten an OpenAI Responses non-stream payload into a chat-completions
   // payload. The client adapter will finish formatting for the target client.
+  const choice = payload?.choices?.[0] || {};
+  const fallbackMessage = choice.message || {};
   const message = { role: "assistant", content: "" };
   const tool_calls = [];
   const payloadText = outputTextFromResponsesPayload(payload);
   for (const item of payload.output || []) {
-    if (item.type === "function_call") {
-      tool_calls.push({
-        id: item.call_id || item.id || `call_${crypto.randomUUID()}`,
-        type: "function",
-        function: { name: item.name, arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {}) }
-      });
+    if (item?.type === "function_call") {
+      const mapped = toolCallToChatToolCall(item);
+      if (mapped) tool_calls.push(mapped);
     }
   }
-  message.content = payloadText;
+  if (!tool_calls.length && Array.isArray(fallbackMessage.tool_calls)) {
+    for (const call of fallbackMessage.tool_calls) {
+      const mapped = toolCallToChatToolCall(call);
+      if (mapped) tool_calls.push(mapped);
+    }
+  }
+  message.content = payloadText || contentToText(fallbackMessage.content || payload?.content || payload?.text || "");
   if (tool_calls.length) message.tool_calls = tool_calls;
   return {
-    id: payload.id || `chatcmpl_${crypto.randomUUID()}`,
-    object: "chat.completion",
-    created: payload.created_at || Math.floor(Date.now() / 1000),
+    id: payload.id || choice.id || `chatcmpl_${crypto.randomUUID()}`,
+    object: payload.object === "chat.completion" ? payload.object : "chat.completion",
+    created: payload.created_at || payload.created || Math.floor(Date.now() / 1000),
     model: payload.model || upstreamModel,
     choices: [{
       index: 0,
       message,
-      finish_reason: tool_calls.length ? "tool_calls" : "stop"
+      finish_reason: choice.finish_reason || (tool_calls.length ? "tool_calls" : "stop")
     }],
     usage: payload.usage || null
   };

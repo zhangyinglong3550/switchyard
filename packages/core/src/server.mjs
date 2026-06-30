@@ -454,6 +454,49 @@ function recordRequestSummary(record, chatBody, route, protocol) {
   record.requestSummary = summarizeRequest(chatBody, route, protocol);
 }
 
+
+function shouldCaptureClaudeDebug(record) {
+  return process.env.SWITCHYARD_CAPTURE_CLAUDE_GPT54 === "1" &&
+    record?.clientId === "claude-code" &&
+    record?.requestedModel === "claude-switchyard-gpt-gpt-5.4-02ad2dbb";
+}
+
+function debugCapturePath(kind) {
+  return path.join(os.homedir(), "file", "codex", `switchyard-${kind}.jsonl`);
+}
+
+function appendDebugCapture(kind, payload) {
+  try {
+    fs.mkdirSync(path.join(os.homedir(), "file", "codex"), { recursive: true });
+    fs.appendFileSync(debugCapturePath(kind), `${JSON.stringify(payload)}
+`);
+  } catch {}
+}
+
+function maybeCaptureClaudeDebugRequest(record, body, route, protocol) {
+  if (!shouldCaptureClaudeDebug(record)) return;
+  appendDebugCapture("claude-gpt54-request", {
+    ts: new Date().toISOString(),
+    clientId: record?.clientId || "",
+    requestedModel: record?.requestedModel || "",
+    providerId: route?.provider?.id || "",
+    upstreamModel: route?.upstreamModel || "",
+    protocol,
+    body
+  });
+}
+
+function maybeCaptureClaudeDebugResponse(record, payload, meta = {}) {
+  if (!shouldCaptureClaudeDebug(record)) return;
+  appendDebugCapture("claude-gpt54-response", {
+    ts: new Date().toISOString(),
+    clientId: record?.clientId || "",
+    requestedModel: record?.requestedModel || "",
+    meta,
+    payload
+  });
+}
+
 function recordResponseSummary(record, payload, opts = {}) {
   if (!record) return;
   record.responseSummary = summarizeResponse(payload, opts);
@@ -1109,6 +1152,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
   recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages");
+  maybeCaptureClaudeDebugRequest(requestRecord, body, route, "anthropic_messages");
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
     if ((route.provider.apiFormat || "openai_chat") !== "openai_chat") {
@@ -1130,6 +1174,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
       recordUsage(requestRecord, responsePayload);
       recordResponsePreview(requestRecord, responsePayload);
       recordResponseSummary(requestRecord, responsePayload, { stream: true, status: result.status });
+      maybeCaptureClaudeDebugResponse(requestRecord, responsePayload, { status: result.status, stream: true, stage: "handleAnthropicMessages:synthetic-stream" });
       return streamMessageAsAnthropic(chatToAnthropic(result.payload, body.model), res);
     }
     const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
@@ -1148,6 +1193,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
   recordUsage(requestRecord, responsePayload);
   recordResponsePreview(requestRecord, responsePayload);
   recordResponseSummary(requestRecord, responsePayload, { status: result.status });
+  maybeCaptureClaudeDebugResponse(requestRecord, responsePayload, { status: result.status, stream: false, stage: "handleAnthropicMessages:json" });
   json(res, 200, chatToAnthropic(result.payload, body.model));
   emit({ level: "info", msg: "messages", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat });
 }

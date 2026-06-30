@@ -16,9 +16,29 @@
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
+import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
 import { applyOutbound, applyInbound } from "../compat/index.mjs";
 import { rectifyUpstreamRequest } from "../compat/runtime-rectifier.mjs";
+
+
+function normalizeChatPayload(payload) {
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.choices)) return payload;
+  const choices = payload.choices.map((choice) => {
+    if (!choice || typeof choice !== "object") return choice;
+    const message = choice.message;
+    if (!message || typeof message !== "object") return choice;
+    const content = message.content;
+    const normalizedContent = typeof content === "string"
+      ? content
+      : (content && typeof content === "object" && typeof content.output_text === "string")
+        ? content.output_text
+        : contentToText(content);
+    if (normalizedContent === content) return choice;
+    return { ...choice, message: { ...message, content: normalizedContent } };
+  });
+  return { ...payload, choices };
+}
 
 export async function dispatchChat(provider, upstreamModel, chatBody, opts = {}) {
   const ctxModel = { ...(opts.model || {}), id: chatBody._modelId || opts.model?.id || upstreamModel, providerId: opts.model?.providerId || provider.id };
@@ -42,7 +62,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
       send: (body) => callOpenAIChat(provider, body, upstreamOptsWithOverrides)
     });
     if (!maybeRetry.ok) return { kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
-    const payload = maybeRetry.payload;
+    const payload = normalizeChatPayload(maybeRetry.payload);
     return { kind: "json", status: maybeRetry.status, payload: applyInbound(payload, ctx), rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
   }
 

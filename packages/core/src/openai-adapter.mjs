@@ -14,6 +14,11 @@ import {
 
 function flattenContent(content) {
   if (typeof content === "string") return content;
+  if (content && typeof content === "object") {
+    if (typeof content.output_text === "string") return content.output_text;
+    if (Array.isArray(content.parts)) return contentToText(content.parts);
+    if (Array.isArray(content.content)) return contentToText(content.content);
+  }
   return contentToText(content);
 }
 
