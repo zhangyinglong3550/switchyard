@@ -1,6 +1,6 @@
 {
   "name": "switchyard",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Local multi-client LLM gateway and desktop control panel for Codex, Claude Code, Hermes and other OpenAI-compatible / Anthropic-compatible tools.",
   "license": "MIT",
   "repository": {
@@ -89,7 +89,9 @@
         {
           "from": "resources/win/sqlite3.exe",
           "to": "win/sqlite3.exe",
-          "filter": ["**/*"]
+          "filter": [
+            "**/*"
+          ]
         }
       ]
     },
@@ -107,7 +109,8 @@
   },
   "main": "apps/desktop/src/main.mjs",
   "author": {
-    "name": "Switchyard Team"
+    "name": "Switchyard Team",
+    "email": "zhangyinglong3550@gmail.com"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",
