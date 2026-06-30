@@ -51,6 +51,7 @@
     "asarUnpack": [
       "node_modules/better-sqlite3/**/*"
     ],
+    "afterPack": "./scripts/after-pack-sign.mjs",
     "directories": {
       "output": "dist"
     },

@@ -1201,6 +1201,7 @@ async function testProviderConnectivity(provider) {
   }
   const apiFormat = probe.apiFormat || "openai_chat";
   const headers = buildProviderHeaders(probe);
+  // 1. 模型列表探测
   const candidates = apiFormatModelUrls(baseUrl, apiFormat);
   let last = null;
   for (const url of candidates) {
@@ -1217,7 +1218,32 @@ async function testProviderConnectivity(provider) {
       last = { ok: false, url, error: err?.message || String(err) };
     }
   }
-  return last || { ok: false, error: "测试失败" };
+  // 2. /models 404 等 → 轻量 chat 探测兜底：发极小请求验证推理端点可用
+  const chatUrl = `${baseUrl}/chat/completions`;
+  try {
+    const chatBody = JSON.stringify({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 1,
+      stream: false
+    });
+    const { resp, text } = await fetchTextOnce(chatUrl, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: chatBody
+    }, probe);
+    const chatOk = resp.ok || (resp.status >= 400 && resp.status < 500);
+    return {
+      ok: chatOk,
+      status: resp.status,
+      url: chatUrl,
+      bodyPreview: chatOk
+        ? `推理端点可达 (${resp.status}${resp.ok ? "" : " · 模型或凭证需确认"})`
+        : text.slice(0, 800)
+    };
+  } catch (err) {
+    return last || { ok: false, url: chatUrl, error: `${last?.error || "测试失败"}；chat 探测：${err?.message || String(err)}` };
+  }
 }
 
 function providerFetchInit(provider, init = {}) {

@@ -38,6 +38,41 @@ const state = {
   liveLogAgent: ""
 };
 
+/* ── 通用表格列宽拖拽 ── */
+let colResizeState = null;
+document.addEventListener("pointerdown", (e) => {
+  const target = e.target.closest("th.col-resizable");
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  if (e.clientX < rect.right - 6) return;
+  colResizeState = { th: target, startX: e.clientX, startWidth: rect.width, table: target.closest("table") };
+  target.classList.add("resizing");
+  e.preventDefault();
+  e.stopPropagation();
+});
+document.addEventListener("pointermove", (e) => {
+  if (!colResizeState) return;
+  const delta = e.clientX - colResizeState.startX;
+  const newWidth = Math.max(48, colResizeState.startWidth + delta);
+  colResizeState.th.style.width = `${newWidth}px`;
+  colResizeState.th.style.minWidth = `${newWidth}px`;
+});
+document.addEventListener("pointerup", () => {
+  if (!colResizeState) return;
+  colResizeState.th.classList.remove("resizing");
+  colResizeState = null;
+});
+
+function applyTableColumnWidths(tableSelector) {
+  const table = document.querySelector(tableSelector);
+  if (!table) return;
+  const headers = table.querySelectorAll("thead th[data-col-width]");
+  for (const th of headers) {
+    th.classList.add("col-resizable");
+    if (!th.style.width) th.style.width = `${Number(th.dataset.colWidth)}px`;
+  }
+}
+
 const toast = (msg) => {
   const el = document.getElementById("toast");
   el.textContent = msg;
@@ -532,6 +567,7 @@ function renderProviders() {
   tbody.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProviderDialog(b.dataset.edit)));
   tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => removeProvider(b.dataset.del)));
   tbody.querySelectorAll("[data-provider-balance-query]").forEach((b) => b.addEventListener("click", () => queryProviderBalance(b.dataset.providerBalanceQuery)));
+  applyTableColumnWidths("#providers-table");
 }
 
 async function queryProviderBalance(providerId) {
@@ -594,6 +630,7 @@ function renderModels() {
   }
   tbody.querySelectorAll("[data-edit-model]").forEach((b) => b.addEventListener("click", () => openModelDialog(b.dataset.editModel)));
   tbody.querySelectorAll("[data-del-model]").forEach((b) => b.addEventListener("click", () => removeModel(b.dataset.delModel)));
+  applyTableColumnWidths("#models-table");
 }
 
 const CODEX_PROFILE_MODES = {
@@ -962,6 +999,7 @@ function renderDiagnostics() {
     modelsTbody.querySelectorAll("[data-diagnostic-probe]").forEach((button) => {
       button.addEventListener("click", () => probeConfiguredModel(data.models[Number(button.dataset.diagnosticProbe)]?.id));
     });
+    applyTableColumnWidths("#diagnostics-models-table");
   }
   const modelSummary = document.getElementById("diagnostics-model-summary");
   if (modelSummary) modelSummary.textContent = `${data.models?.length || 0} 个模型`;

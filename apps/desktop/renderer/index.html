@@ -106,7 +106,7 @@
         <div class="card">
           <div class="table-scroll tall">
             <table class="data" id="providers-table">
-              <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>代理 / 兼容</th><th>余额/用量</th><th>模型数</th><th></th></tr></thead>
+              <thead><tr><th data-col-width="120">标识</th><th data-col-width="120">名称</th><th data-col-width="180">协议</th><th data-col-width="280">Base URL</th><th data-col-width="120">API Key</th><th data-col-width="200">代理 / 兼容</th><th data-col-width="160">余额/用量</th><th data-col-width="72">模型数</th><th data-col-width="100"></th></tr></thead>
               <tbody id="providers-tbody"></tbody>
             </table>
           </div>
@@ -129,7 +129,7 @@
         <div class="card">
           <div class="table-scroll tall">
             <table class="data" id="models-table">
-              <thead><tr><th>模型 ID</th><th>供应商</th><th>上游</th><th>别名</th><th>能力</th><th></th></tr></thead>
+              <thead><tr><th data-col-width="220">模型 ID</th><th data-col-width="120">供应商</th><th data-col-width="200">上游</th><th data-col-width="160">别名</th><th data-col-width="200">能力</th><th data-col-width="100"></th></tr></thead>
               <tbody id="models-tbody"></tbody>
             </table>
           </div>
@@ -175,8 +175,8 @@
         <div class="card">
           <div class="hd"><h3>模型能力校准</h3><span class="sub" id="diagnostics-model-summary">-</span></div>
           <div class="table-scroll tall">
-            <table class="data compact">
-              <thead><tr><th>模型</th><th>供应商</th><th>能力</th><th>兼容规则</th><th>客户端可见</th><th></th></tr></thead>
+            <table class="data compact" id="diagnostics-models-table">
+              <thead><tr><th data-col-width="200">模型</th><th data-col-width="120">供应商</th><th data-col-width="180">能力</th><th data-col-width="220">兼容规则</th><th data-col-width="120">客户端可见</th><th data-col-width="100"></th></tr></thead>
               <tbody id="diagnostics-models-tbody"></tbody>
             </table>
           </div>

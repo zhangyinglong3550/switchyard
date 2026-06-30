@@ -598,8 +598,42 @@ table.data th {
 
 .table-scroll table.data td .mono,
 .table-scroll table.data td.mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 360px;
+}
+.table-scroll table.data td .mono.wrap,
+.table-scroll table.data td.mono.wrap {
   overflow-wrap: anywhere;
   word-break: break-word;
+  white-space: normal;
+  max-width: none;
+}
+
+/* 列宽配置（通过 th 的 data-col-width 属性驱动） */
+table.data th[data-col-width] { width: attr(data-col-width px, auto); }
+/* attr() 在 width 上浏览器支持有限，用内联 style 代替 */
+
+/* ── 列宽拖拽手柄 ── */
+table.data th.col-resizable {
+  position: relative;
+  user-select: none;
+}
+table.data th.col-resizable::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+table.data th.col-resizable:hover::after,
+table.data th.col-resizable.resizing::after {
+  background: var(--accent);
 }
 
 table.data tr:last-child td { border-bottom: none; }
@@ -681,7 +715,7 @@ table.data.compact td {
 .diagnostic-row strong,
 .diagnostic-row .mono {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
 }
 
 .segmented {
