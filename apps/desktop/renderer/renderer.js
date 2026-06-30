@@ -344,6 +344,66 @@ function applyProviderPreset(preset) {
   form.querySelector('[name="apiKeyEnv"]').value = preset.apiKeyEnv || "";
   renderAuthModeOptions(preset, preset.defaultAuthMode || "api_key");
   renderCompatPackOptions("provider-compat-packs", preset.compatPacks || []);
+  syncUsageCheckForm(preset.usage_check || {});
+}
+
+function usageProviderValue(config = {}) {
+  return config.balanceProvider || config.codingPlanProvider || "";
+}
+
+function syncUsageCheckForm(config = {}) {
+  const form = document.getElementById("provider-form");
+  if (!form) return;
+  form.querySelector('[name="usageTemplateType"]').value = config.templateType || "";
+  form.querySelector('[name="usageProvider"]').value = usageProviderValue(config);
+  form.querySelector('[name="usageApiKey"]').value = config.apiKey || "";
+  form.querySelector('[name="usageBaseUrl"]').value = config.baseUrl || "";
+  form.querySelector('[name="usagePath"]').value = config.path || "";
+  form.querySelector('[name="usageMethod"]').value = config.method || "GET";
+  form.querySelector('[name="usageExtractPath"]').value = config.extract?.path || "";
+  form.querySelector('[name="usageUnit"]').value = config.unit || config.extract?.unit || "";
+  form.querySelector('[name="usagePlanName"]').value = config.planName || "";
+  form.querySelector('[name="usageCode"]').value = config.code || "";
+  form.querySelector('[name="usageAutoQueryInterval"]').value = config.autoQueryInterval ?? "";
+}
+
+function usageCheckFromForm(raw) {
+  const templateType = String(raw.usageTemplateType || "").trim();
+  const usageProvider = String(raw.usageProvider || "").trim();
+  const hasCustom = templateType || usageProvider || raw.usageApiKey || raw.usageBaseUrl || raw.usagePath || raw.usageExtractPath || raw.usageUnit || raw.usagePlanName || raw.usageCode || raw.usageAutoQueryInterval;
+  if (!hasCustom) return undefined;
+  const out = {
+    templateType: templateType || "balance"
+  };
+  if (usageProvider) {
+    if (out.templateType === "coding_plan") out.codingPlanProvider = usageProvider;
+    else out.balanceProvider = usageProvider;
+  }
+  if (raw.usageApiKey) out.apiKey = String(raw.usageApiKey).trim();
+  if (raw.usageBaseUrl) out.baseUrl = String(raw.usageBaseUrl).trim();
+  if (raw.usagePath) out.path = String(raw.usagePath).trim();
+  if (raw.usageMethod) out.method = String(raw.usageMethod || "GET").trim().toUpperCase();
+  if (raw.usageCode) out.code = String(raw.usageCode).trim();
+  if (raw.usageExtractPath) out.extract = { path: String(raw.usageExtractPath).trim(), ...(raw.usageUnit ? { unit: String(raw.usageUnit).trim() } : {}) };
+  if (raw.usageUnit && !out.extract) out.unit = String(raw.usageUnit).trim();
+  if (raw.usagePlanName) out.planName = String(raw.usagePlanName).trim();
+  const interval = Number(raw.usageAutoQueryInterval);
+  if (Number.isFinite(interval) && interval >= 0) out.autoQueryInterval = interval;
+  return out;
+}
+
+function effectiveProviderUsageCheck(provider) {
+  if (provider?.usage_check) return provider.usage_check;
+  const preset = providerPresetById(provider?.presetId) || state.providerPresets.find((item) => item.providerId === provider?.id || item.id === provider?.id);
+  return preset?.usage_check || null;
+}
+
+function providerBalanceCell(provider) {
+  const health = state.providerHealth?.[provider.id];
+  const chip = balanceChip(health?.balance) || '<span class="chip">未查询</span>';
+  const config = effectiveProviderUsageCheck(provider);
+  const configChip = config ? '<span class="chip good">已配置</span>' : '<span class="chip">不可查</span>';
+  return `<div class="chip-row compact">${chip}${configChip}<button class="btn tiny" data-provider-balance-query="${escapeHtml(provider.id)}">查询</button></div>`;
 }
 
 function providerAuthCell(provider) {
@@ -424,7 +484,12 @@ function requestOverrideItems(summary) {
 
 function providerRouteExtrasCell(provider) {
   const chips = [];
-  if (state.providerHealth?.[provider.id]) chips.push(healthChip(state.providerHealth[provider.id]));
+  if (state.providerHealth?.[provider.id]) {
+    const health = state.providerHealth[provider.id];
+    chips.push(healthChip(health));
+    const balance = balanceChip(health.balance);
+    if (balance) chips.push(balance);
+  }
   if (!normalizeClientScope(provider.allowedClients).includes("*")) chips.push(`<span class="chip">可见：${escapeHtml(clientScopeLabel(provider.allowedClients))}</span>`);
   if (provider.proxyUrl) chips.push(`<span class="chip good">Provider 代理</span>`);
   if (provider.routingMode && provider.routingMode !== "auto") {
@@ -458,6 +523,7 @@ function renderProviders() {
       <td class="mono">${escapeHtml(p.baseUrl)}</td>
       <td>${providerAuthCell(p)}</td>
       <td>${providerRouteExtrasCell(p)}</td>
+      <td>${providerBalanceCell(p)}</td>
       <td>${counts[p.id] || 0}</td>
       <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit="${escapeHtml(p.id)}">编辑</button><button class="btn danger" data-del="${escapeHtml(p.id)}">删除</button></div></td>
     `;
@@ -465,6 +531,34 @@ function renderProviders() {
   }
   tbody.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProviderDialog(b.dataset.edit)));
   tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => removeProvider(b.dataset.del)));
+  tbody.querySelectorAll("[data-provider-balance-query]").forEach((b) => b.addEventListener("click", () => queryProviderBalance(b.dataset.providerBalanceQuery)));
+}
+
+async function queryProviderBalance(providerId) {
+  const provider = state.config.providers.find((item) => item.id === providerId);
+  if (!provider) return;
+  const previous = state.providerHealth?.[providerId] || { providerId };
+  state.providerHealth = {
+    ...state.providerHealth,
+    [providerId]: { ...previous, balance: { success: false, data: [], error: "checking", status: "checking" } }
+  };
+  renderProviders();
+  try {
+    const balance = await invoke("provider:balance", provider);
+    state.providerHealth = {
+      ...state.providerHealth,
+      [providerId]: { ...previous, balance }
+    };
+    renderProviders();
+    toast(balance.success ? `已查询 ${providerId} 余额/用量` : `查询失败：${balance.error || providerId}`);
+  } catch (err) {
+    state.providerHealth = {
+      ...state.providerHealth,
+      [providerId]: { ...previous, balance: { success: false, data: [], error: err.message, status: "error" } }
+    };
+    renderProviders();
+    toast(`余额查询失败：${err.message}`);
+  }
 }
 
 function renderModels() {
@@ -686,6 +780,30 @@ function healthChip(health) {
   return `<span class="chip warn">异常 · ${escapeHtml(health.statusCode || "n/a")}</span>`;
 }
 
+function balanceChip(balance) {
+  if (!balance) return "";
+  if (balance.status === "checking") return '<span class="chip">余额查询中</span>';
+  if (balance.error === "no-usage-check-config") return '<span class="chip">余额不可查</span>';
+  if (balance.error === "api-key-empty") return '<span class="chip warn">余额：缺少 Key</span>';
+  if (!balance.success) return `<span class="chip warn">余额查询失败</span>`;
+  const first = Array.isArray(balance.data) ? balance.data[0] : null;
+  if (!first) return '<span class="chip">余额未知</span>';
+  const remaining = first.remaining;
+  const unit = first.unit || "";
+  if (remaining == null || Number.isNaN(Number(remaining))) return '<span class="chip">余额未知</span>';
+  const cls = Number(remaining) <= 0 ? "warn" : "good";
+  return `<span class="chip ${cls}">余额 · ${escapeHtml(formatBalanceAmount(remaining, unit))}</span>`;
+}
+
+function formatBalanceAmount(value, unit = "") {
+  const n = Number(value);
+  const amount = Number.isFinite(n) ? (Math.abs(n) >= 100 ? n.toFixed(0) : n.toFixed(2)) : String(value ?? "-");
+  if (unit === "USD") return `$${amount}`;
+  if (unit === "CNY") return `¥${amount}`;
+  if (unit === "%") return `${amount}%`;
+  return `${amount}${unit ? ` ${unit}` : ""}`;
+}
+
 async function refreshDiagnostics() {
   const output = document.getElementById("diagnostics-output");
   const canWriteOutput = output && output.dataset.mode !== "probe";
@@ -748,6 +866,7 @@ function renderDiagnostics() {
           <span class="chip ${provider.keyOk ? "good" : "warn"}">${escapeHtml(provider.keySource || "-")}</span>
           <span class="chip ${provider.ready ? "good" : "warn"}">${provider.ready ? "可用" : "未就绪"}</span>
           ${healthChip(provider.health)}
+          ${balanceChip(provider.health?.balance)}
         </div>
         ${provider.health?.error ? `<div class="tiny muted">${escapeHtml(provider.health.error).slice(0, 180)}</div>` : ""}
       </div>
@@ -866,8 +985,9 @@ document.getElementById("btn-provider-health-refresh")?.addEventListener("click"
   try {
     const result = await invoke("provider-health:refresh");
     state.providerHealth = result.snapshot || {};
+    renderProviders();
     await refreshDiagnostics();
-    toast("Provider 健康状态已刷新");
+    toast("Provider 健康/余额状态已刷新");
   } catch (err) {
     toast(`刷新健康失败：${err.message}`);
   }
@@ -1473,7 +1593,8 @@ function collectProviderForm() {
     allowedClients: collectClientScopeOptions("provider-visible-clients"),
     compatPacks: collectCompatPackOptions("provider-compat-packs"),
     apiKeyEnv: raw.apiKeyEnv?.trim(),
-    apiKey: raw.apiKey?.trim()
+    apiKey: raw.apiKey?.trim(),
+    usage_check: usageCheckFromForm(raw)
   };
   if (authMode === "keychain") {
     data.keychainAccount = data.id;
@@ -1520,6 +1641,7 @@ function openProviderDialog(editId) {
     syncProviderRiskNote(existing);
     renderClientScopeOptions("provider-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("provider-compat-packs", existing.compatPacks || []);
+    syncUsageCheckForm(effectiveProviderUsageCheck(existing) || {});
     state.providerDiscovery = state.config.models
       .filter((m) => m.providerId === existing.id)
       .map((m) => ({
@@ -1547,6 +1669,7 @@ function openProviderDialog(editId) {
     syncProviderRiskNote(null);
     renderClientScopeOptions("provider-visible-clients", ["*"]);
     renderCompatPackOptions("provider-compat-packs", []);
+    syncUsageCheckForm({});
   }
   document.getElementById("provider-api-key-input").type = "password";
   document.getElementById("btn-provider-key-toggle").textContent = "显示";
@@ -1559,7 +1682,10 @@ document.getElementById("btn-provider-add").addEventListener("click", () => open
 document.getElementById("provider-preset-select").addEventListener("change", (e) => {
   const preset = providerPresetById(e.target.value);
   if (preset) applyProviderPreset(preset);
-  else renderAuthModeOptions(null, "api_key");
+  else {
+    renderAuthModeOptions(null, "api_key");
+    syncUsageCheckForm({});
+  }
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
   refreshProviderCompatRecommendations().catch(() => {});
 });
@@ -1627,6 +1753,22 @@ document.getElementById("provider-dialog-wrap").querySelector("[data-close]").ad
   document.getElementById("provider-dialog-wrap").classList.remove("open");
 });
 
+document.getElementById("btn-provider-balance-test").addEventListener("click", async () => {
+  const output = document.getElementById("provider-test-output");
+  const payload = collectProviderForm();
+  output.textContent = "正在查询余额/用量…";
+  try {
+    const result = await invoke("provider:balance", payload);
+    const rows = (result.data || []).map((item) => `${item.planName || "默认"}: ${formatBalanceAmount(item.remaining, item.unit || "")}`).join("\n");
+    output.textContent = [
+      result.success ? "✓ 余额/用量查询成功" : "✗ 余额/用量查询失败",
+      rows,
+      result.error || ""
+    ].filter(Boolean).join("\n");
+  } catch (err) {
+    output.textContent = `余额/用量查询失败：${err.message}`;
+  }
+});
 document.getElementById("btn-provider-test").addEventListener("click", async () => {
   const output = document.getElementById("provider-test-output");
   const payload = collectProviderForm();

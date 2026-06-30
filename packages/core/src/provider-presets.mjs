@@ -126,6 +126,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "DEEPSEEK_API_KEY",
     dashboardUrl: "https://platform.deepseek.com/api_keys",
+    usage_check: {
+      templateType: "balance",
+      balanceProvider: "deepseek"
+    },
     models: [
       { id: "deepseek-chat", displayName: "DeepSeek Chat", contextWindow: 128000, maxOutputTokens: 8192, capabilities: { tools: true, stream: true } },
       { id: "deepseek-reasoner", displayName: "DeepSeek Reasoner", contextWindow: 128000, maxOutputTokens: 8192, capabilities: { reasoning: true, tools: true, stream: true } }
@@ -143,7 +147,11 @@ export const PROVIDER_PRESETS = [
     authModes: ["api_key"],
     defaultAuthMode: "api_key",
     apiKeyEnv: "OPENROUTER_API_KEY",
-    dashboardUrl: "https://openrouter.ai/keys"
+    dashboardUrl: "https://openrouter.ai/keys",
+    usage_check: {
+      templateType: "balance",
+      balanceProvider: "openrouter"
+    }
   },
   {
     id: "xai",
@@ -284,6 +292,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "ZAI_API_KEY",
     dashboardUrl: "https://z.ai",
+    usage_check: {
+      templateType: "coding_plan",
+      codingPlanProvider: "zhipu"
+    },
     models: [
       { id: "glm-4.6", displayName: "GLM 4.6", contextWindow: 128000, maxOutputTokens: 32768, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "glm-5.2", displayName: "GLM 5.2", contextWindow: 128000, maxOutputTokens: 32768, capabilities: { reasoning: true, tools: true, stream: true } }
@@ -334,6 +346,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "VOLCENGINE_ARK_API_KEY",
     dashboardUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    usage_check: {
+      templateType: "coding_plan",
+      codingPlanProvider: "volcengine"
+    },
     models: [
       { id: "ark-code-latest", displayName: "Ark Code Latest", contextWindow: 256000, capabilities: { tools: true, stream: true } }
     ]
@@ -381,6 +397,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "ZHIPU_API_KEY",
     dashboardUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+    usage_check: {
+      templateType: "coding_plan",
+      codingPlanProvider: "zhipu"
+    },
     models: [
       { id: "glm-5.1", displayName: "GLM 5.1", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "glm-5.2", displayName: "GLM 5.2", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } }
@@ -432,6 +452,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "KIMI_API_KEY",
     dashboardUrl: "https://www.kimi.com/code/",
+    usage_check: {
+      templateType: "coding_plan",
+      codingPlanProvider: "kimi"
+    },
     models: [
       { id: "kimi-for-coding", displayName: "Kimi For Coding", contextWindow: 262144, capabilities: { reasoning: true, tools: true, stream: true } }
     ]
@@ -447,6 +471,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "STEPFUN_API_KEY",
     dashboardUrl: "https://platform.stepfun.com/interface-key",
+    usage_check: {
+      templateType: "balance",
+      balanceProvider: "stepfun"
+    },
     models: [
       { id: "step-3.5-flash-2603", displayName: "Step 3.5 Flash 2603", contextWindow: 262144, capabilities: { tools: true, stream: true } },
       { id: "step-3.5-flash", displayName: "Step 3.5 Flash", contextWindow: 262144, capabilities: { tools: true, stream: true } }
@@ -496,6 +524,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "MINIMAX_API_KEY",
     dashboardUrl: "https://platform.minimaxi.com",
+    usage_check: {
+      templateType: "coding_plan",
+      codingPlanProvider: "minimax"
+    },
     models: [
       { id: "MiniMax-M2.7", displayName: "MiniMax M2.7", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } }
     ]
@@ -528,6 +560,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "SILICONFLOW_API_KEY",
     dashboardUrl: "https://cloud.siliconflow.cn/account/ak",
+    usage_check: {
+      templateType: "balance",
+      balanceProvider: "siliconflow"
+    },
     models: [
       { id: "Pro/MiniMaxAI/MiniMax-M2.7", displayName: "Pro / MiniMax M2.7", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "Qwen/Qwen3-Coder-480B-A35B-Instruct", displayName: "Qwen3 Coder 480B", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } }
@@ -545,6 +581,10 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "NOVITA_API_KEY",
     dashboardUrl: "https://novita.ai",
+    usage_check: {
+      templateType: "balance",
+      balanceProvider: "novita"
+    },
     models: [
       { id: "zai-org/glm-5.1", displayName: "GLM 5.1", contextWindow: 202800, capabilities: { reasoning: true, tools: true, stream: true } }
     ]

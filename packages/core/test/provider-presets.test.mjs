@@ -39,6 +39,21 @@ test("provider presets · can resolve Codex OAuth metadata for existing configs"
   assert.ok(hints.has("gpt-5.5"));
 });
 
+test("provider presets · expose balance and coding-plan usage checks", () => {
+  const presets = listProviderPresets();
+  const byId = new Map(presets.map((preset) => [preset.id, preset]));
+  assert.deepEqual(byId.get("deepseek").usage_check, { templateType: "balance", balanceProvider: "deepseek" });
+  assert.deepEqual(byId.get("openrouter").usage_check, { templateType: "balance", balanceProvider: "openrouter" });
+  assert.deepEqual(byId.get("siliconflow").usage_check, { templateType: "balance", balanceProvider: "siliconflow" });
+  assert.deepEqual(byId.get("novita").usage_check, { templateType: "balance", balanceProvider: "novita" });
+  assert.deepEqual(byId.get("stepfun").usage_check, { templateType: "balance", balanceProvider: "stepfun" });
+  assert.deepEqual(byId.get("kimi-coding").usage_check, { templateType: "coding_plan", codingPlanProvider: "kimi" });
+  assert.deepEqual(byId.get("zhipu-glm").usage_check, { templateType: "coding_plan", codingPlanProvider: "zhipu" });
+  assert.deepEqual(byId.get("zai").usage_check, { templateType: "coding_plan", codingPlanProvider: "zhipu" });
+  assert.deepEqual(byId.get("minimax").usage_check, { templateType: "coding_plan", codingPlanProvider: "minimax" });
+  assert.deepEqual(byId.get("volcengine-ark-agentplan").usage_check, { templateType: "coding_plan", codingPlanProvider: "volcengine" });
+});
+
 test("provider presets · cover mainstream CN and US OpenAI-compatible providers with compat defaults", () => {
   const presets = listProviderPresets();
   const ids = new Set(presets.map((preset) => preset.id));
@@ -68,3 +83,4 @@ test("provider presets · cover mainstream CN and US OpenAI-compatible providers
   assert.equal(presets.find((preset) => preset.id === "siliconflow").codexChatReasoning.thinkingParam, "enable_thinking");
   assert.ok(presetModelHints("minimax").has("MiniMax-M2.7"));
 });
+

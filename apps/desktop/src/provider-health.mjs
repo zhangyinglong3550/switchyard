@@ -1,6 +1,12 @@
+// 供应商健康监控器。
+//
+// 定期对每个供应商发起探测请求，记录 healthy/unhealthy/checking/unknown 状态，
+// 跟踪延迟、成功/失败计数与错误信息。可选注入 checkBalance，在每次刷新时
+// 并行查询供应商余额/用量，结果存入 row.balance（独立于连通性，失败不影响健康状态）。
 export function createProviderHealthMonitor({
   listProviders,
   probeProvider,
+  checkBalance,
   intervalMs = 5 * 60 * 1000,
   now = () => Date.now()
 } = {}) {
@@ -30,20 +36,19 @@ export function createProviderHealthMonitor({
         status: "checking"
       });
       const started = now();
+      let row;
       try {
         const result = await probeProvider(provider);
         const finished = now();
-        const row = rowFromProbe(provider.id, result, {
+        row = rowFromProbe(provider.id, result, {
           previous: state.get(provider.id),
           latencyMs: Math.max(0, finished - started),
           checkedAt: new Date(finished).toISOString()
         });
-        state.set(provider.id, row);
-        rows.push(row);
       } catch (err) {
         const finished = now();
         const previous = state.get(provider.id);
-        const row = {
+        row = {
           ...defaultRow(provider.id, previous),
           status: "unhealthy",
           ok: false,
@@ -52,12 +57,29 @@ export function createProviderHealthMonitor({
           error: err?.message || String(err),
           failures: Number(previous?.failures || 0) + 1
         };
-        state.set(provider.id, row);
-        rows.push(row);
       }
+      // 余额查询独立于连通性：余额 API 与 /models 探测端点不同，
+      // 即使连通性探测失败也尝试查询余额。失败不影响健康状态。
+      row.balance = await safeCheckBalance(provider);
+      state.set(provider.id, row);
+      rows.push(row);
     }
     if (providerId && !targetIds.size) state.delete(providerId);
     return rows;
+  }
+
+  async function safeCheckBalance(provider) {
+    if (typeof checkBalance !== "function") return null;
+    try {
+      return await checkBalance(provider);
+    } catch (err) {
+      return {
+        success: false,
+        error: err?.message || String(err),
+        data: [],
+        status: "error"
+      };
+    }
   }
 
   function snapshot() {
@@ -94,7 +116,8 @@ function defaultRow(providerId, previous = {}) {
     lastChecked: previous.lastChecked || "",
     error: previous.error || "",
     successes: Number(previous.successes || 0),
-    failures: Number(previous.failures || 0)
+    failures: Number(previous.failures || 0),
+    balance: previous.balance ?? null
   };
 }
 

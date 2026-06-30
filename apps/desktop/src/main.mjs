@@ -60,6 +60,7 @@ import {
   isCodexOAuthProvider
 } from "../../../packages/core/src/upstream/clients.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
+import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
 import { resolveRoute } from "../../../packages/core/src/router.mjs";
 import {
@@ -390,6 +391,16 @@ ipcMain.handle("provider-health:list", () => getProviderHealthMonitor().snapshot
 ipcMain.handle("provider-health:refresh", async (_e, payload = {}) => {
   const rows = await getProviderHealthMonitor().refresh(payload.providerId || "");
   return { ok: true, rows, snapshot: getProviderHealthMonitor().snapshot() };
+});
+// 单个供应商余额查询。
+ipcMain.handle("provider:balance", async (_e, provider) => checkBalance(provider));
+// 全量余额查询：对所有已配置供应商并发查询余额，返回 providerId -> UsageResult 映射。
+ipcMain.handle("provider:balance-check-all", async () => {
+  const providers = readConfig().providers || [];
+  const entries = await Promise.all(
+    providers.filter((p) => p?.id).map(async (provider) => [provider.id, await checkBalance(provider)])
+  );
+  return Object.fromEntries(entries);
 });
 ipcMain.handle("compat:packs", () => listCompatPacks());
 ipcMain.handle("compat:active", () => activeCompatSnapshot(readConfig()));
@@ -1159,6 +1170,7 @@ function getProviderHealthMonitor() {
     providerHealthMonitor = createProviderHealthMonitor({
       listProviders: () => readConfig().providers,
       probeProvider: (provider) => testProviderConnectivity(provider),
+      checkBalance: (provider) => checkBalance(provider),
       intervalMs: 5 * 60 * 1000
     });
   }

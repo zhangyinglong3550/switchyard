@@ -106,7 +106,7 @@
         <div class="card">
           <div class="table-scroll tall">
             <table class="data" id="providers-table">
-              <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>代理 / 兼容</th><th>模型数</th><th></th></tr></thead>
+              <thead><tr><th>标识</th><th>名称</th><th>协议</th><th>Base URL</th><th>API Key</th><th>代理 / 兼容</th><th>余额/用量</th><th>模型数</th><th></th></tr></thead>
               <tbody id="providers-tbody"></tbody>
             </table>
           </div>
@@ -157,7 +157,7 @@
           <div class="tiny muted">提供启发式定位：模型不可用、客户端配置漂移、能力声明不准和失败请求草稿</div>
         </div>
         <div style="flex:1;"></div>
-        <button class="btn" id="btn-provider-health-refresh">刷新健康</button>
+        <button class="btn" id="btn-provider-health-refresh">刷新健康/余额</button>
         <button class="btn primary" id="btn-diagnostics-run">运行诊断</button>
       </div>
       <div class="page-scroll page-stack">
@@ -710,6 +710,73 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout">
+        <div class="callout-title">用量查询配置</div>
+        <div class="callout-body">可跟随预设，也可为自定义供应商配置余额/套餐查询接口。API Key 与请求地址留空时自动使用供应商配置。</div>
+        <div class="row">
+          <label>查询模板
+            <select class="field" name="usageTemplateType">
+              <option value="">跟随预设 / 不启用</option>
+              <option value="custom">自定义脚本</option>
+              <option value="balance">余额 API</option>
+              <option value="user_info">用户信息接口</option>
+              <option value="coding_plan">Token Plan / Coding Plan</option>
+              <option value="subscription">官方订阅</option>
+            </select>
+          </label>
+          <label>供应商解析器
+            <select class="field" name="usageProvider">
+              <option value="">通用 JSON Path</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="siliconflow">SiliconFlow</option>
+              <option value="stepfun">StepFun</option>
+              <option value="novita">Novita AI</option>
+              <option value="kimi">Kimi Token Plan</option>
+              <option value="zhipu">智谱 / Z.AI Token Plan</option>
+              <option value="minimax">MiniMax Token Plan</option>
+              <option value="volcengine">火山方舟 Plan</option>
+              <option value="zenmux">ZenMux Token Plan</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label>API Key（可选） <input class="field" name="usageApiKey" type="password" autocomplete="new-password" placeholder="留空则使用供应商 Key"></label>
+          <label>请求地址（可选） <input class="field" name="usageBaseUrl" placeholder="留空则使用 Base URL"></label>
+        </div>
+        <div class="row">
+          <label>请求路径 <input class="field" name="usagePath" placeholder="例：/v1/usage"></label>
+          <label>请求方法
+            <select class="field" name="usageMethod">
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label>余额字段 JSON Path <input class="field" name="usageExtractPath" placeholder="例：data.balance"></label>
+          <label>单位 <input class="field" name="usageUnit" placeholder="USD / CNY / tokens / %"></label>
+        </div>
+        <div class="row">
+          <label>套餐名称 <input class="field" name="usagePlanName" placeholder="例：默认余额"></label>
+          <label>自动查询间隔（分钟） <input class="field" name="usageAutoQueryInterval" type="number" min="0" placeholder="0 表示不自动查询"></label>
+        </div>
+        <label>提取器代码（可选，ccswitch 风格）
+          <textarea class="field" name="usageCode" rows="8" placeholder='({
+  request: {
+    url: "{{baseUrl}}/v1/usage",
+    method: "GET",
+    headers: { Authorization: "Bearer {{apiKey}}" }
+  },
+  extractor(response) {
+    return { remaining: response.balance, unit: "USD", isValid: response.is_active ?? true };
+  }
+})'></textarea>
+        </label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+          <button class="btn" type="button" id="btn-provider-balance-test">测试余额/用量</button>
+        </div>
+      </div>
       <div class="callout">
         <div class="callout-title">连接验证</div>
         <div class="callout-body">先点“测试连接”确认地址和密钥有效，再点“查询模型”把上游模型拉下来，勾选后直接生成本地模型。</div>
