@@ -51,6 +51,11 @@ test("agent resources · lists sessions and manages skills inside agent roots", 
   assert.equal(sessions.length, 2);
   assert.ok(sessions.some((item) => item.agentId === "codex"));
   assert.ok(sessions.some((item) => item.agentId === "claude-code"));
+
+  const allSources = mod.listAgentSessions({ agentId: "codex", includeAllSources: true });
+  assert.equal(allSources.length, 1);
+  const userOnly = mod.listAgentSessions({ agentId: "codex", source: "user" });
+  assert.equal(userOnly.length, 0);
   const sessionText = mod.readAgentSession(sessions.find((item) => item.agentId === "codex").id);
   assert.match(sessionText.text, /response_item/);
   assert.equal(sessionText.conversation.count, 2);

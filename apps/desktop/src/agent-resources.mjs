@@ -219,8 +219,9 @@ function summarizeSession(agent, root, file) {
   };
 }
 
-export function listAgentSessions({ agentId = "" } = {}) {
+export function listAgentSessions({ agentId = "", source = "", includeAllSources = false } = {}) {
   const agents = agentDefinitions().filter((agent) => !agentId || agent.id === agentId);
+  const sourceFilter = String(source || "").trim().toLowerCase();
   const rows = [];
   for (const agent of agents) {
     for (const root of agent.sessionRoots) {
@@ -230,7 +231,12 @@ export function listAgentSessions({ agentId = "" } = {}) {
       });
       for (const file of files) {
         const row = summarizeSession(agent, root, file);
-        if (row) rows.push(row);
+        if (!row) continue;
+        if (!includeAllSources && sourceFilter) {
+          const rowSource = String(row.source || "").trim().toLowerCase();
+          if (rowSource !== sourceFilter) continue;
+        }
+        rows.push(row);
       }
     }
     if (agent.id === "hermes") rows.push(...listHermesDbSessions());

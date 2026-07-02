@@ -2792,7 +2792,8 @@ document.getElementById("trace-agent-filter")?.addEventListener("change", () => 
 
 async function refreshAgentSessions() {
   const agentId = document.getElementById("session-agent-filter")?.value || "";
-  const rows = await invoke("agent:sessions:list", agentId ? { agentId } : {});
+  const projectCwd = document.getElementById("session-project-filter")?.value || "";
+  const rows = await invoke("agent:sessions:list", agentId ? { agentId, projectCwd, includeAllSources: true } : { projectCwd, includeAllSources: true });
   const tbody = document.getElementById("sessions-tbody");
   if (!tbody) return;
   tbody.innerHTML = "";
