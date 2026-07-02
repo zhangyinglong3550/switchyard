@@ -189,9 +189,20 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-1.3.1-arm64.dmg` |
-| macOS (Intel / x64) | `Switchyard-1.3.1-x64.dmg` |
-| Windows (x64) | `Switchyard Setup 1.3.1.exe` 或 `Switchyard-1.3.1-win.zip` |
+| macOS (Apple Silicon) | `Switchyard-1.3.4-arm64.dmg` |
+| macOS (Intel / x64) | `Switchyard-1.3.4.dmg` |
+| Windows (x64) | `Switchyard Setup 1.3.4.exe` 或 `Switchyard-1.3.4-win.zip` |
+
+> ### ⚠️ macOS 用户必读：安装后首次打开前请执行以下命令
+>
+> 由于 macOS 应用没有官方签名，安装后直接打开会提示"无法打开"或"已损坏"。
+> 请打开终端，执行以下命令后即可正常打开：
+>
+> ```bash
+> xattr -cr /Applications/Switchyard.app
+> ```
+>
+> 这条命令会移除 macOS 的隔离标记，执行后到应用程序里双击 Switchyard 即可打开。
 
 ### 配置环境变量
 
