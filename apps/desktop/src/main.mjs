@@ -1136,17 +1136,26 @@ app.on("activate", () => {
 // 真正退出前统一做收尾清理（停网关 / 监控）。无论从托盘“退出”、
 // Cmd+Q 还是系统关机触发，都先异步清理再放行退出。
 let cleanedUp = false;
+let cleanupStarted = false;
 app.on("before-quit", (event) => {
   isQuitting = true;
   if (cleanedUp) return; // 清理已完成，放行本次退出
+  if (cleanupStarted) return; // 清理已在进行中，等待完成即可
+  cleanupStarted = true;
   event.preventDefault();
   (async () => {
+    const timeout = setTimeout(() => {
+      appendLog({ level: "warn", msg: "quit cleanup timed out, forcing exit" });
+      cleanedUp = true;
+      app.exit(0);
+    }, 3000);
     try {
       stopCodexArtifactMonitor();
       await stopGateway();
     } catch (err) {
       appendLog({ level: "error", msg: "gateway stop on quit failed", error: err?.message || String(err) });
     } finally {
+      clearTimeout(timeout);
       cleanedUp = true;
       app.quit();
     }
