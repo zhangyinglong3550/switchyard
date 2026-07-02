@@ -141,6 +141,7 @@ function syncCodexArtifacts(reason = "manual") {
     const cfg = readConfig();
     const codexModels = listModelsForClient(cfg, "codex");
     const claudeCodeModels = listModelsForClient(cfg, "claude-code");
+    const status = statusFromServer();
     const result = syncClientModelArtifacts({
       host: cfg.host,
       port: cfg.port,
@@ -150,6 +151,19 @@ function syncCodexArtifacts(reason = "manual") {
     });
     const codexChanged = result.codex?.ok && (result.codex.catalogChanged || result.codex.cacheChanged);
     const claudeChanged = result.claudeCode?.ok && result.claudeCode.cacheChanged;
+
+    // Auto-sync settings.json for Claude Code so env vars stay current
+    // (Claude Code reads these on next startup)
+    try {
+      applyProfile("claude-code", {
+        host: status.running ? status.host : cfg.host,
+        port: status.running ? status.port : cfg.port,
+        defaultModel: clientDefaultModel(cfg, "claude-code", claudeCodeModels),
+        models: modelsForProfile(cfg, claudeCodeModels),
+        modelMapping: cfg.clients?.["claude-code"]?.modelMapping
+      });
+    } catch (_e) { /* non-fatal */ }
+
     if (codexChanged || claudeChanged) {
       appendLog({
         level: "info",

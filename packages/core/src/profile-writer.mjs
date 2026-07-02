@@ -730,7 +730,6 @@ export function renderClaudeCodeProfile({ host, port, models, defaultModel, mode
     env: {
       ANTHROPIC_BASE_URL: `http://${host || "127.0.0.1"}:${port || 17888}/claude-code`,
       ANTHROPIC_AUTH_TOKEN: `\${${SWITCHYARD_ENV_KEY}}`,
-      ANTHROPIC_API_KEY: `\${${SWITCHYARD_ENV_KEY}}`,
       CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
       ...claudeCodeModelEnv({ models, defaultModel, modelMapping })
     }

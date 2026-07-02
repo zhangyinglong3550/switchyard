@@ -1456,39 +1456,85 @@ function renderProviderDiscovery() {
     wrap.innerHTML = '<div class="empty-state">没有匹配的模型</div>';
     return;
   }
-  wrap.innerHTML = filtered.map(({ model, index }) => {
-    const caps = Object.entries(model.capabilities).map(([key, enabled]) => `
-      <label><input type="checkbox" data-discovery-cap="${index}:${escapeHtml(key)}" ${enabled ? "checked" : ""}> ${escapeHtml(CAPABILITY_LABEL[key] || key)}</label>
-    `).join("");
+
+  const tableRows = filtered.map(({ model, index }) => {
+    const capChips = Object.entries(model.capabilities)
+      .filter(([, v]) => v)
+      .map(([k]) => `<span class="chip">${escapeHtml(CAPABILITY_LABEL[k] || k)}</span>`)
+      .join("");
     return `
-      <div class="discovery-item">
-        <div class="discovery-head">
-          <div class="discovery-title">
-            <label style="display:flex; flex-direction:row; align-items:center; gap:10px;">
-              <input type="checkbox" data-discovery-enabled="${index}" ${model.enabled ? "checked" : ""}>
-              <span>${escapeHtml(model.upstreamModel)}</span>
-            </label>
+      <tr class="discovery-table-row" data-discovery-idx="${index}">
+        <td style="width:32px; text-align:center;">
+          <input type="checkbox" data-discovery-enabled="${index}" ${model.enabled ? "checked" : ""}>
+        </td>
+        <td class="mono" style="min-width:160px;">${escapeHtml(model.upstreamModel)}</td>
+        <td class="chip-row compact">${capChips || '<span class="tiny muted">-</span>'}</td>
+        <td style="width:160px;">
+          <div class="row-actions">
+            <button class="btn" type="button" data-discovery-edit="${index}">编辑</button>
+            <button class="btn" type="button" data-discovery-delete="${index}">删除</button>
           </div>
-          <span class="chip">${escapeHtml(model.id)}</span>
-        </div>
-        <div class="row">
-          <label>显示名 <input class="field" data-discovery-display="${index}" value="${escapeHtml(model.displayName || "")}"></label>
-          <label>别名（逗号分隔） <input class="field" data-discovery-aliases="${index}" value="${escapeHtml((model.aliases || []).join(", "))}"></label>
-        </div>
-        <div class="row">
-          <label>上下文窗口 <input class="field" type="number" min="0" data-discovery-context="${index}" value="${escapeHtml(model.contextWindow || "")}"></label>
-          <label>最大输出 Token <input class="field" type="number" min="0" data-discovery-maxout="${index}" value="${escapeHtml(model.maxOutputTokens || "")}"></label>
-        </div>
-        <div class="capabilities">${caps}</div>
-      </div>
+        </td>
+      </tr>
+      <tr class="discovery-expand-row" id="discovery-expand-${index}" style="display:none;">
+        <td colspan="4">
+          <div class="discovery-expand-body">
+            <div class="row">
+              <label>显示名 <input class="field" data-discovery-display="${index}" value="${escapeHtml(model.displayName || "")}"></label>
+              <label>别名（逗号分隔） <input class="field" data-discovery-aliases="${index}" value="${escapeHtml((model.aliases || []).join(", "))}"></label>
+            </div>
+            <div class="row">
+              <label>上下文窗口 <input class="field" type="number" min="0" data-discovery-context="${index}" value="${escapeHtml(String(model.contextWindow || ""))}"></label>
+              <label>最大输出 Token <input class="field" type="number" min="0" data-discovery-maxout="${index}" value="${escapeHtml(String(model.maxOutputTokens || ""))}"></label>
+            </div>
+            <div class="capabilities">
+              ${Object.entries(model.capabilities).map(([key, enabled]) =>
+                `<label><input type="checkbox" data-discovery-cap="${index}:${escapeHtml(key)}" ${enabled ? "checked" : ""}> ${escapeHtml(CAPABILITY_LABEL[key] || key)}</label>`
+              ).join("")}
+            </div>
+          </div>
+        </td>
+      </tr>
     `;
   }).join("");
+
+  wrap.innerHTML = `
+    <table class="data compact discovery-table">
+      <thead><tr>
+        <th style="width:32px;"></th>
+        <th>模型</th>
+        <th>能力</th>
+        <th style="width:160px;"></th>
+      </tr></thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+  `;
 
   wrap.querySelectorAll("[data-discovery-enabled]").forEach((el) => {
     el.addEventListener("change", () => {
       state.providerDiscovery[Number(el.dataset.discoveryEnabled)].enabled = el.checked;
     });
   });
+
+  wrap.querySelectorAll("[data-discovery-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.discoveryEdit);
+      const expandRow = document.getElementById(`discovery-expand-${idx}`);
+      if (!expandRow) return;
+      const isOpen = expandRow.style.display !== "none";
+      expandRow.style.display = isOpen ? "none" : "";
+      btn.textContent = isOpen ? "编辑" : "收起";
+    });
+  });
+
+  wrap.querySelectorAll("[data-discovery-delete]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.discoveryDelete);
+      state.providerDiscovery.splice(idx, 1);
+      renderProviderDiscovery();
+    });
+  });
+
   wrap.querySelectorAll("[data-discovery-display]").forEach((el) => {
     el.addEventListener("input", () => {
       state.providerDiscovery[Number(el.dataset.discoveryDisplay)].displayName = el.value.trim();
@@ -1513,6 +1559,8 @@ function renderProviderDiscovery() {
     el.addEventListener("change", () => {
       const [index, key] = el.dataset.discoveryCap.split(":");
       state.providerDiscovery[Number(index)].capabilities[key] = el.checked;
+      // refresh capability chips in table row
+      renderProviderDiscovery();
     });
   });
 }
@@ -1917,6 +1965,30 @@ document.getElementById("btn-provider-discover").addEventListener("click", async
   } catch (err) {
     output.textContent = `查询失败：${err.message}`;
   }
+});
+
+document.getElementById("btn-discovery-add-manual")?.addEventListener("click", () => {
+  const providerId = document.getElementById("provider-form")?.querySelector('[name="id"]')?.value?.trim() || "unknown";
+  const newModel = {
+    enabled: true,
+    id: `${providerId}/new-model-${Date.now()}`,
+    providerId,
+    upstreamModel: "",
+    displayName: "",
+    aliases: [],
+    contextWindow: undefined,
+    maxOutputTokens: undefined,
+    allowedClients: ["*"],
+    capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false }
+  };
+  state.providerDiscovery.push(newModel);
+  renderProviderDiscovery();
+  // auto-open edit panel for the new row
+  const idx = state.providerDiscovery.length - 1;
+  const expandRow = document.getElementById(`discovery-expand-${idx}`);
+  if (expandRow) expandRow.style.display = "";
+  const editBtn = document.querySelector(`[data-discovery-edit="${idx}"]`);
+  if (editBtn) editBtn.textContent = "收起";
 });
 
 async function removeProvider(id) {

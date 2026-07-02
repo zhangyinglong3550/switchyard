@@ -687,18 +687,18 @@
         <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，该供应商下的模型只会出现在这些 Agent 的模型列表里。</div>
         <div class="capabilities client-scope-grid" id="provider-visible-clients"></div>
       </div>
-      <div class="callout compact">
-        <div class="callout-title">Provider 兼容包</div>
+      <details class="callout-details compact">
+        <summary class="callout-title">Provider 兼容包</summary>
         <div class="callout-body">兼容包会强制启用一组 provider/model 定向补丁；可在模型里继续单独补充。</div>
         <div class="compat-pack-grid" id="provider-compat-packs"></div>
-      </div>
-      <div class="callout compact">
-        <div class="callout-title">推荐兼容规则</div>
+      </details>
+      <details class="callout-details compact">
+        <summary class="callout-title">推荐兼容规则</summary>
         <div class="callout-body">根据 provider id、Base URL、协议和已知厂商适配经验给出建议；点击应用后才会写入上面的兼容包选择。</div>
         <div class="compat-recommendation-list" id="provider-compat-recommendations">
           <div class="tiny muted">输入供应商信息后显示推荐</div>
         </div>
-      </div>
+      </details>
       <div class="row" id="provider-key-fields">
         <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
         <label>Inline Key（本机保存）
@@ -710,8 +710,8 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
-      <div class="callout">
-        <div class="callout-title">用量查询配置</div>
+      <details class="callout-details">
+        <summary class="callout-title">用量查询配置</summary>
         <div class="callout-body">可跟随预设，也可为自定义供应商配置余额/套餐查询接口。API Key 与请求地址留空时自动使用供应商配置。</div>
         <div class="row">
           <label>查询模板
@@ -776,7 +776,7 @@
         <div class="actions" style="justify-content:flex-start; margin-top:10px;">
           <button class="btn" type="button" id="btn-provider-balance-test">测试余额/用量</button>
         </div>
-      </div>
+      </details>
       <div class="callout">
         <div class="callout-title">连接验证</div>
         <div class="callout-body">先点“测试连接”确认地址和密钥有效，再点“查询模型”把上游模型拉下来，勾选后直接生成本地模型。</div>
@@ -792,6 +792,7 @@
         <div class="discovery-toolbar">
           <label class="discovery-search">搜索模型 <input class="field" id="provider-discovery-search" placeholder="输入模型名、别名、能力"></label>
           <span class="tiny muted" id="provider-discovery-count">0 个模型</span>
+          <button class="btn" type="button" id="btn-discovery-add-manual">手动添加</button>
         </div>
         <div id="provider-discovered-models" class="discovery-list">
           <div class="empty-state">还没有查询模型</div>
@@ -835,18 +836,18 @@
         <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，会在供应商可见范围基础上进一步收窄。</div>
         <div class="capabilities client-scope-grid" id="model-visible-clients"></div>
       </div>
-      <div class="callout compact">
-        <div class="callout-title">模型兼容包</div>
+      <details class="callout-details compact">
+        <summary class="callout-title">模型兼容包</summary>
         <div class="callout-body">用于同一 Provider 下只有部分模型需要特殊补丁的场景。</div>
         <div class="compat-pack-grid" id="model-compat-packs"></div>
-      </div>
-      <div class="callout compact">
-        <div class="callout-title">推荐兼容规则</div>
+      </details>
+      <details class="callout-details compact">
+        <summary class="callout-title">推荐兼容规则</summary>
         <div class="callout-body">根据供应商、上游模型名和协议给出模型级建议；点击应用后才会写入上面的兼容包选择。</div>
         <div class="compat-recommendation-list" id="model-compat-recommendations">
           <div class="tiny muted">选择供应商并填写模型后显示推荐</div>
         </div>
-      </div>
+      </details>
       <div class="capabilities">
         <label><input type="checkbox" name="cap-text" checked> 文本</label>
         <label><input type="checkbox" name="cap-tools" checked> 工具调用</label>
