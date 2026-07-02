@@ -40,7 +40,7 @@ import {
   readAgentCoreFile,
   saveAgentCoreFile
 } from "./agent-resources.mjs";
-import { listAgentPlugins, addPluginSource, removePluginSource } from "./agent-plugins.mjs";
+import { listAgentPlugins, addPluginSource, removePluginSource, installPlugin, uninstallPlugin } from "./agent-plugins.mjs";
 import { importProviders } from "../../../packages/core/src/importers/ccswitch.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import {
@@ -339,6 +339,8 @@ ipcMain.handle("agent:core-files:save", (_e, { id, text }) => saveAgentCoreFile(
 ipcMain.handle("agent:plugins:list", (_e, filters = {}) => listAgentPlugins(filters));
 ipcMain.handle("agent:plugins:add-source", (_e, payload = {}) => addPluginSource(payload));
 ipcMain.handle("agent:plugins:remove-source", (_e, payload = {}) => removePluginSource(payload));
+ipcMain.handle("agent:plugins:install", (_e, payload = {}) => installPlugin(payload));
+ipcMain.handle("agent:plugins:uninstall", (_e, payload = {}) => uninstallPlugin(payload));
 ipcMain.handle("skillhub:search", (_e, { keyword = "", limit = 20 } = {}) => searchSkillHub({ keyword, limit }));
 ipcMain.handle("skillhub:open", async (_e, { slug, kind = "detail" } = {}) => {
   if (!slug) throw new Error("缺少 Skill slug");

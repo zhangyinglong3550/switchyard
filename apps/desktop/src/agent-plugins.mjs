@@ -292,3 +292,32 @@ export function removePluginSource({ id } = {}) {
   saveSwitchyardSources(next);
   return { ok: true, removed: sources.length - next.length };
 }
+
+function safePluginName(value) {
+  const name = String(value || "").trim();
+  if (!name || name === "." || name === ".." || name.includes("/") || name.includes(String.fromCharCode(92)))
+    throw new Error("插件名称无效");
+  return name;
+}
+
+export function installPlugin({ agentId = "claude-code", sourcePath, pluginName } = {}) {
+  if (agentId !== "claude-code") throw new Error("当前仅支持 Claude Code 插件安装");
+  const source = expandHome(String(sourcePath || ""));
+  if (!source || !safeStat(path.join(source, ".claude-plugin", "plugin.json")))
+    throw new Error("插件源路径无效或缺少 .claude-plugin/plugin.json");
+  const name = safePluginName(pluginName || path.basename(source));
+  const dest = path.join(marketplaceRoot(), name);
+  if (safeStat(dest)) throw new Error("目标已存在：" + name + "，请先卸载");
+  ensureDir(marketplaceRoot());
+  fs.cpSync(source, dest, { recursive: true, dereference: true });
+  return { ok: true, name, path: dest };
+}
+
+export function uninstallPlugin({ agentId = "claude-code", pluginName } = {}) {
+  if (agentId !== "claude-code") throw new Error("当前仅支持 Claude Code 插件卸载");
+  const name = safePluginName(pluginName);
+  const dest = path.join(marketplaceRoot(), name);
+  if (!safeStat(dest)) throw new Error("插件不存在：" + name);
+  fs.rmSync(dest, { recursive: true, force: true });
+  return { ok: true, removed: name };
+}

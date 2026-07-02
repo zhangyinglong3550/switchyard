@@ -48,3 +48,29 @@ test("agent plugins · reads Claude Code marketplaces, installed plugins and swi
   const removed = mod.removePluginSource({ id: added.source.id });
   assert.equal(removed.removed, 1);
 });
+
+test("agent plugins · install and uninstall plugin roundtrip", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-agent-plugins-2-"));
+  process.env.SWITCHYARD_AGENT_HOME = tmp;
+  process.env.SWITCHYARD_PLUGIN_SOURCES_FILE = path.join(tmp, ".switchyard", "plugin-sources.json");
+  t.after(() => {
+    delete process.env.SWITCHYARD_AGENT_HOME;
+    delete process.env.SWITCHYARD_PLUGIN_SOURCES_FILE;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const source = path.join(tmp, "my-plugin-source");
+  fs.mkdirSync(path.join(source, ".claude-plugin"), { recursive: true });
+  fs.writeFileSync(path.join(source, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "my-plugin", version: "1.0.0", description: "Test plugin" }), "utf8");
+  fs.mkdirSync(path.join(source, "commands"), { recursive: true });
+
+  const mod = await import("../../../apps/desktop/src/agent-plugins.mjs?v=" + Date.now());
+  const result = mod.installPlugin({ agentId: "claude-code", sourcePath: source, pluginName: "my-plugin" });
+  assert.equal(result.ok, true);
+  const list = await mod.listAgentPlugins({ agentId: "claude-code" });
+  assert.ok(list.installed.some((p) => p.name === "my-plugin"));
+  const removed = mod.uninstallPlugin({ agentId: "claude-code", pluginName: "my-plugin" });
+  assert.equal(removed.ok, true);
+  const list2 = await mod.listAgentPlugins({ agentId: "claude-code" });
+  assert.ok(!list2.installed.some((p) => p.name === "my-plugin"));
+});

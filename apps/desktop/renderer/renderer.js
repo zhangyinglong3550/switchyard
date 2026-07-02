@@ -2941,11 +2941,11 @@ function renderAgentPlugins() {
       tr.innerHTML = `
         <td><div>${escapeHtml(plugin.name)}</div><div class="tiny muted">${escapeHtml(plugin.description || plugin.version || "")}</div></td>
         <td class="chip-row">${(plugin.features || []).map((feature) => `<span class="chip">${escapeHtml(feature)}</span>`).join("") || '<span class="muted">-</span>'}</td>
-        <td class="mono">${escapeHtml(plugin.path || "-")}</td>
+        <td class="mono">${escapeHtml(plugin.path || "-")}</td><td class="actions-cell"><button class="btn danger" data-plugin-uninstall="${escapeHtml(plugin.name)}">卸载</button></td>
       `;
       installedTbody.appendChild(tr);
     }
-    if (!state.plugins.installed?.length) installedTbody.innerHTML = '<tr><td colspan="3" class="muted">没有找到已安装插件</td></tr>';
+    if (!state.plugins.installed?.length) installedTbody.innerHTML = '<tr><td colspan="4" class="muted">没有找到已安装插件</td></tr>';
     document.getElementById("installed-plugins-summary").textContent = `${state.plugins.installed?.length || 0} 个`;
   }
   if (availableTbody) {
@@ -2956,11 +2956,11 @@ function renderAgentPlugins() {
         <td><div>${escapeHtml(plugin.name)}</div><div class="tiny muted">${escapeHtml(plugin.version || plugin.author || "")}</div></td>
         <td>${escapeHtml(plugin.description || "-").slice(0, 260)}</td>
         <td>${plugin.category ? `<span class="chip">${escapeHtml(plugin.category)}</span>` : '<span class="muted">-</span>'}</td>
-        <td>${escapeHtml(plugin.marketplace || "-")}</td>
+        <td>${escapeHtml(plugin.marketplace || "-")}</td><td class="actions-cell"><button class="btn primary" data-plugin-install-name="${escapeHtml(plugin.name)}" data-plugin-install-source="${escapeHtml(plugin.source || "")}">安装</button></td>
       `;
       availableTbody.appendChild(tr);
     }
-    if (!state.plugins.available?.length) availableTbody.innerHTML = '<tr><td colspan="4" class="muted">没有可用插件数据</td></tr>';
+    if (!state.plugins.available?.length) availableTbody.innerHTML = '<tr><td colspan="5" class="muted">没有可用插件数据</td></tr>';
     document.getElementById("available-plugins-summary").textContent = `${state.plugins.available?.length || 0} 个`;
   }
 }
@@ -3217,6 +3217,28 @@ document.getElementById("btn-plugin-source-add")?.addEventListener("click", asyn
     await refreshAgentPlugins();
   } catch (err) {
     toast(`添加插件源失败：${err.message}`);
+  }
+});
+document.getElementById("installed-plugins-tbody")?.addEventListener("click", async (event) => {
+  const uninstallBtn = event.target.closest("[data-plugin-uninstall]");
+  if (uninstallBtn) {
+    try {
+      await invoke("agent:plugins:uninstall", { pluginName: uninstallBtn.dataset.pluginUninstall });
+      toast("插件已卸载");
+      await refreshAgentPlugins();
+    } catch (err) { toast("卸载失败：" + err.message); }
+    return;
+  }
+});
+document.getElementById("available-plugins-tbody")?.addEventListener("click", async (event) => {
+  const installBtn = event.target.closest("[data-plugin-install-name]");
+  if (installBtn) {
+    try {
+      await invoke("agent:plugins:install", { sourcePath: installBtn.dataset.pluginInstallSource, pluginName: installBtn.dataset.pluginInstallName });
+      toast("插件已安装");
+      await refreshAgentPlugins();
+    } catch (err) { toast("安装失败：" + err.message); }
+    return;
   }
 });
 document.getElementById("plugin-sources-tbody")?.addEventListener("click", async (event) => {
