@@ -517,17 +517,34 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
   };
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamError = null;
+  const keepalive = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`: switchyard keepalive ${Date.now()}\n\n`);
+    }
+  }, 15000);
   try {
     for await (const chunk of upstream.body) {
       buffer += decoder.decode(chunk, { stream: true });
       const records = buffer.split(/\r?\n\r?\n/);
-    buffer = records.pop() || "";
-    for (const record of records) {
-      processSseRecord(record);
+      buffer = records.pop() || "";
+      for (const record of records) {
+        processSseRecord(record);
       }
     }
-  } catch (_err) {
-    // Stream ended prematurely - gracefully complete with whatever content we received
+  } catch (err) {
+    streamError = err;
+  } finally {
+    clearInterval(keepalive);
+  }
+  if (streamError && !messageStarted && !reasoningStarted && !text && toolCalls.size === 0) {
+    writeEvent(res, "response.failed", {
+      type: "response.failed",
+      response: { ...baseResponse, status: "failed", error: String(streamError?.message || streamError || "upstream stream error") }
+    });
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
   }
   buffer += decoder.decode();
   if (buffer.trim()) processSseRecord(buffer);

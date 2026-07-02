@@ -537,6 +537,61 @@ function providerRouteExtrasCell(provider) {
   return chips.length ? `<div class="chip-row compact">${chips.join("")}</div>` : '<span class="tiny muted">-</span>';
 }
 
+function uniqueCopiedName(baseName, exists) {
+  const source = String(baseName || "").trim() || "未命名";
+  let candidate = source.endsWith("复制") ? source : source + "复制";
+  let n = 2;
+  while (exists(candidate)) {
+    candidate = source + "复制" + n;
+    n += 1;
+  }
+  return candidate;
+}
+
+function duplicateProviderRow(providerId) {
+  const provider = state.config.providers.find((item) => item.id === providerId);
+  if (!provider) return;
+  const nextProviders = [...state.config.providers];
+  const id = uniqueCopiedName(provider.id, (name) => nextProviders.some((item) => item.id === name));
+  const cloned = {
+    ...provider,
+    id,
+    name: provider.name ? uniqueCopiedName(provider.name, (name) => nextProviders.some((item) => (item.name || item.id) === name)) : id,
+    capabilities: { ...(provider.capabilities || {}) }
+  };
+  nextProviders.push(cloned);
+  invoke("config:save", { ...state.config, providers: nextProviders })
+    .then(refreshAll)
+    .then(() => {
+      toast("已复制供应商：" + provider.id);
+      openProviderDialog(id);
+    })
+    .catch((err) => toast("复制供应商失败：" + err.message));
+}
+
+function duplicateModelRow(modelId) {
+  const model = state.config.models.find((item) => item.id === modelId);
+  if (!model) return;
+  const nextModels = [...state.config.models];
+  const id = uniqueCopiedName(model.id, (name) => nextModels.some((item) => item.id === name));
+  const cloned = {
+    ...model,
+    id,
+    upstreamModel: uniqueCopiedName(model.upstreamModel || model.id, (name) => nextModels.some((item) => item.upstreamModel === name && item.providerId === model.providerId)),
+    displayName: uniqueCopiedName(model.displayName || model.upstreamModel || model.id, (name) => nextModels.some((item) => (item.displayName || item.upstreamModel || item.id) === name && item.providerId === model.providerId)),
+    aliases: [...(model.aliases || [])],
+    capabilities: { ...(model.capabilities || {}) }
+  };
+  nextModels.push(cloned);
+  invoke("config:save", { ...state.config, models: nextModels })
+    .then(refreshAll)
+    .then(() => {
+      toast("已复制模型：" + model.id);
+      openModelDialog(id);
+    })
+    .catch((err) => toast("复制模型失败：" + err.message));
+}
+
 function renderProviders() {
   const { config } = state;
   const counts = {};
@@ -560,11 +615,12 @@ function renderProviders() {
       <td>${providerRouteExtrasCell(p)}</td>
       <td>${providerBalanceCell(p)}</td>
       <td>${counts[p.id] || 0}</td>
-      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit="${escapeHtml(p.id)}">编辑</button><button class="btn danger" data-del="${escapeHtml(p.id)}">删除</button></div></td>
+      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit="${escapeHtml(p.id)}">编辑</button><button class="btn" data-copy-provider="${escapeHtml(p.id)}">复制</button><button class="btn danger" data-del="${escapeHtml(p.id)}">删除</button></div></td>
     `;
     tbody.appendChild(tr);
   }
   tbody.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProviderDialog(b.dataset.edit)));
+  tbody.querySelectorAll("[data-copy-provider]").forEach((b) => b.addEventListener("click", () => duplicateProviderRow(b.dataset.copyProvider)));
   tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => removeProvider(b.dataset.del)));
   tbody.querySelectorAll("[data-provider-balance-query]").forEach((b) => b.addEventListener("click", () => queryProviderBalance(b.dataset.providerBalanceQuery)));
   applyTableColumnWidths("#providers-table");
@@ -624,11 +680,12 @@ function renderModels() {
       <td class="mono">${escapeHtml(m.upstreamModel)}</td>
       <td>${aliases}</td>
       <td class="chip-row">${caps}</td>
-      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit-model="${escapeHtml(m.id)}">编辑</button><button class="btn danger" data-del-model="${escapeHtml(m.id)}">删除</button></div></td>
+      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit-model="${escapeHtml(m.id)}">编辑</button><button class="btn" data-copy-model="${escapeHtml(m.id)}">复制</button><button class="btn danger" data-del-model="${escapeHtml(m.id)}">删除</button></div></td>
     `;
     tbody.appendChild(tr);
   }
   tbody.querySelectorAll("[data-edit-model]").forEach((b) => b.addEventListener("click", () => openModelDialog(b.dataset.editModel)));
+  tbody.querySelectorAll("[data-copy-model]").forEach((b) => b.addEventListener("click", () => duplicateModelRow(b.dataset.copyModel)));
   tbody.querySelectorAll("[data-del-model]").forEach((b) => b.addEventListener("click", () => removeModel(b.dataset.delModel)));
   applyTableColumnWidths("#models-table");
 }
