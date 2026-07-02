@@ -602,23 +602,29 @@ function renderProviders() {
   for (const p of config.providers) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="mono">${escapeHtml(p.id)}</td>
-      <td>${escapeHtml(p.name || p.id)}</td>
+      <td class="mono" style="${p.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(p.id)}</td>
+      <td style="${p.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(p.name || p.id)}</td>
       <td>
         <div style="display:flex; flex-direction:column; gap:2px;">
           <span class="chip">${escapeHtml(PROTOCOL_LABEL[p.apiFormat] || p.apiFormat)}</span>
           <span class="tiny muted">${escapeHtml(PROTOCOL_HELP[p.apiFormat] || "")}</span>
         </div>
       </td>
-      <td class="mono">${escapeHtml(p.baseUrl)}</td>
+      <td class="mono" style="${p.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(p.baseUrl)}</td>
       <td>${providerAuthCell(p)}</td>
       <td>${providerRouteExtrasCell(p)}</td>
       <td>${providerBalanceCell(p)}</td>
       <td>${counts[p.id] || 0}</td>
-      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit="${escapeHtml(p.id)}">编辑</button><button class="btn" data-copy-provider="${escapeHtml(p.id)}">复制</button><button class="btn danger" data-del="${escapeHtml(p.id)}">删除</button></div></td>
+      <td><div class="row-actions" style="display:flex; gap:4px;">
+        <button class="btn ${p.enabled === false ? 'primary' : ''}" data-toggle-provider="${escapeHtml(p.id)}">${p.enabled === false ? '启用' : '禁用'}</button>
+        <button class="btn" data-edit="${escapeHtml(p.id)}">编辑</button>
+        <button class="btn" data-copy-provider="${escapeHtml(p.id)}">复制</button>
+        <button class="btn danger" data-del="${escapeHtml(p.id)}">删除</button>
+      </div></td>
     `;
     tbody.appendChild(tr);
   }
+  tbody.querySelectorAll("[data-toggle-provider]").forEach((b) => b.addEventListener("click", () => toggleProviderEnabled(b.dataset.toggleProvider)));
   tbody.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => openProviderDialog(b.dataset.edit)));
   tbody.querySelectorAll("[data-copy-provider]").forEach((b) => b.addEventListener("click", () => duplicateProviderRow(b.dataset.copyProvider)));
   tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => removeProvider(b.dataset.del)));
@@ -675,15 +681,21 @@ function renderModels() {
     ].filter(Boolean).join(" ");
     const aliases = (m.aliases || []).map((a) => `<span class="chip">${escapeHtml(a)}</span>`).join(" ") || '<span class="tiny muted">—</span>';
     tr.innerHTML = `
-      <td class="mono">${escapeHtml(m.id)}</td>
-      <td class="mono">${escapeHtml(m.providerId)}</td>
-      <td class="mono">${escapeHtml(m.upstreamModel)}</td>
+      <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.id)}</td>
+      <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.providerId)}</td>
+      <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.upstreamModel)}</td>
       <td>${aliases}</td>
       <td class="chip-row">${caps}</td>
-      <td><div class="row-actions" style="display:flex; gap:4px;"><button class="btn" data-edit-model="${escapeHtml(m.id)}">编辑</button><button class="btn" data-copy-model="${escapeHtml(m.id)}">复制</button><button class="btn danger" data-del-model="${escapeHtml(m.id)}">删除</button></div></td>
+      <td><div class="row-actions" style="display:flex; gap:4px;">
+        <button class="btn ${m.enabled === false ? 'primary' : ''}" data-toggle-model="${escapeHtml(m.id)}">${m.enabled === false ? '启用' : '禁用'}</button>
+        <button class="btn" data-edit-model="${escapeHtml(m.id)}">编辑</button>
+        <button class="btn" data-copy-model="${escapeHtml(m.id)}">复制</button>
+        <button class="btn danger" data-del-model="${escapeHtml(m.id)}">删除</button>
+      </div></td>
     `;
     tbody.appendChild(tr);
   }
+  tbody.querySelectorAll("[data-toggle-model]").forEach((b) => b.addEventListener("click", () => toggleModelEnabled(b.dataset.toggleModel)));
   tbody.querySelectorAll("[data-edit-model]").forEach((b) => b.addEventListener("click", () => openModelDialog(b.dataset.editModel)));
   tbody.querySelectorAll("[data-copy-model]").forEach((b) => b.addEventListener("click", () => duplicateModelRow(b.dataset.copyModel)));
   tbody.querySelectorAll("[data-del-model]").forEach((b) => b.addEventListener("click", () => removeModel(b.dataset.delModel)));
@@ -1771,7 +1783,9 @@ function openProviderDialog(editId) {
   renderProviderPresetOptions(existing?.presetId || "");
   if (existing) {
     form.querySelector('[name="id"]').value = existing.id;
-    form.querySelector('[name="id"]').readOnly = true;
+    form.querySelector('[name="id"]').readOnly = false;
+    const idNote = document.getElementById("provider-id-rename-note");
+    if (idNote) idNote.style.display = "";
     form.querySelector('[name="name"]').value = existing.name || "";
     form.querySelector('[name="presetId"]').value = existing.presetId || "";
     form.querySelector('[name="apiFormat"]').value = existing.apiFormat;
@@ -1808,6 +1822,8 @@ function openProviderDialog(editId) {
       }));
   } else {
     form.querySelector('[name="id"]').readOnly = false;
+    const idNoteNew = document.getElementById("provider-id-rename-note");
+    if (idNoteNew) idNoteNew.style.display = "none";
     renderAuthModeOptions(null, "api_key");
     syncProviderRiskNote(null);
     renderClientScopeOptions("provider-visible-clients", ["*"]);
@@ -1872,19 +1888,31 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
       allowedClients: item.allowedClients || ["*"],
       capabilities: { ...item.capabilities }
     }));
+  const newId = data.id;
   if (editId) {
-    providers = providers.map((p) => p.id === editId ? { ...data, id: data.id, capabilities: {} } : p);
+    providers = providers.map((p) => p.id === editId ? { ...data, id: newId, capabilities: {} } : p);
   } else {
-    providers.push({ ...data, id: data.id, capabilities: {} });
+    providers.push({ ...data, id: newId, capabilities: {} });
   }
   let models = [...state.config.models];
+  // If provider ID changed, rename providerId in all existing models
+  if (editId && editId !== newId) {
+    models = models.map((m) => {
+      if (m.providerId !== editId) return m;
+      // Also rewrite model ID prefix if it starts with old providerId
+      const oldPrefix = editId + "/";
+      const newModelId = m.id.startsWith(oldPrefix) ? newId + "/" + m.id.slice(oldPrefix.length) : m.id;
+      return { ...m, id: newModelId, providerId: newId };
+    });
+  }
   if (editId) {
+    const resolvedEditId = editId !== newId ? newId : editId;
     const existingById = new Map(models.map((m) => [m.id, m]));
-    for (const item of discoveredModels) existingById.set(item.id, item);
+    for (const item of discoveredModels) existingById.set(item.id, { ...item, providerId: newId });
     models = Array.from(existingById.values());
   } else {
     const existingIds = new Set(models.map((m) => m.id));
-    for (const item of discoveredModels) if (!existingIds.has(item.id)) models.push(item);
+    for (const item of discoveredModels) if (!existingIds.has(item.id)) models.push({ ...item, providerId: newId });
   }
   const next = { ...state.config, providers, models };
   await invoke("config:save", next);
@@ -1990,6 +2018,44 @@ document.getElementById("btn-discovery-add-manual")?.addEventListener("click", (
   const editBtn = document.querySelector(`[data-discovery-edit="${idx}"]`);
   if (editBtn) editBtn.textContent = "收起";
 });
+
+document.getElementById("btn-discovery-select-all")?.addEventListener("click", () => {
+  state.providerDiscovery.forEach((item) => { item.enabled = true; });
+  renderProviderDiscovery();
+});
+document.getElementById("btn-discovery-deselect-all")?.addEventListener("click", () => {
+  state.providerDiscovery.forEach((item) => { item.enabled = false; });
+  renderProviderDiscovery();
+});
+
+async function toggleProviderEnabled(id) {
+  const provider = state.config.providers.find((p) => p.id === id);
+  if (!provider) return;
+  const nowEnabled = provider.enabled !== false;
+  // Disable: also cascade-disable all models under this provider
+  // Enable: only enable the provider itself (models keep their own state)
+  const providers = state.config.providers.map((p) =>
+    p.id === id ? { ...p, enabled: !nowEnabled } : p
+  );
+  let models = state.config.models;
+  if (nowEnabled) {
+    // disabling provider -> disable all its models
+    models = models.map((m) => m.providerId === id ? { ...m, enabled: false } : m);
+  }
+  await invoke("config:save", { ...state.config, providers, models });
+  await refreshAll();
+  toast(nowEnabled ? `已禁用供应商 ${id}（其模型已同步禁用）` : `已启用供应商 ${id}`);
+}
+
+async function toggleModelEnabled(id) {
+  const models = state.config.models.map((m) =>
+    m.id === id ? { ...m, enabled: m.enabled === false ? undefined : false } : m
+  );
+  await invoke("config:save", { ...state.config, models });
+  await refreshAll();
+  const nowEnabled = state.config.models.find((m) => m.id === id)?.enabled !== false;
+  toast(nowEnabled ? `已启用模型 ${id}` : `已禁用模型 ${id}`);
+}
 
 async function removeProvider(id) {
   const next = { ...state.config, providers: state.config.providers.filter((p) => p.id !== id), models: state.config.models.filter((m) => m.providerId !== id) };

@@ -663,7 +663,10 @@
         </label>
       </div>
       <div class="row">
-        <label>标识 <input class="field" name="id" required placeholder="例：kimi"></label>
+        <label>标识
+          <input class="field" name="id" required placeholder="例：kimi">
+          <span class="tiny muted" id="provider-id-rename-note" style="display:none;">修改标识会同步更新该供应商下所有模型的引用</span>
+        </label>
         <label>名称 <input class="field" name="name" placeholder="显示名"></label>
       </div>
       <label>协议
@@ -792,6 +795,8 @@
         <div class="discovery-toolbar">
           <label class="discovery-search">搜索模型 <input class="field" id="provider-discovery-search" placeholder="输入模型名、别名、能力"></label>
           <span class="tiny muted" id="provider-discovery-count">0 个模型</span>
+          <button class="btn" type="button" id="btn-discovery-select-all">全选</button>
+          <button class="btn" type="button" id="btn-discovery-deselect-all">取消全选</button>
           <button class="btn" type="button" id="btn-discovery-add-manual">手动添加</button>
         </div>
         <div id="provider-discovered-models" class="discovery-list">

@@ -703,7 +703,7 @@ table.data.compact td {
 
 .diagnostic-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(160px, 1fr) auto;
   gap: 12px;
   align-items: start;
   padding: 12px;
@@ -712,11 +712,18 @@ table.data.compact td {
   background: white;
 }
 
-.diagnostic-row strong,
-.diagnostic-row .mono {
+.diagnostic-row strong {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.diagnostic-row .mono {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostic-row .chip-row {
