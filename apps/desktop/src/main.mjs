@@ -83,6 +83,56 @@ let tray = null;
 let isQuitting = false;
 registerBuiltinPatches();
 
+// ── 自动更新检查 ─────────────────────────────────────────────
+let updateCheckTimer = null;
+const GITHUB_RELEASES_API = 'https://api.github.com/repos/zhangyinglong3550/switchyard/releases/latest';
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4小时
+
+function semverGt(a, b) {
+  // 比较两个版本号 a > b，格式 x.y.z
+  const pa = a.replace(/^v/, '').split('.').map(Number);
+  const pb = b.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] || 0, nb = pb[i] || 0;
+    if (na !== nb) return na > nb;
+  }
+  return false;
+}
+
+async function checkForUpdate() {
+  try {
+    const { fetch } = await import('undici');
+    const res = await fetch(GITHUB_RELEASES_API, {
+      headers: { 'User-Agent': 'Switchyard-Desktop' },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const latestTag = (data.tag_name || '').replace(/^v/, '');
+    const currentVersion = app.getVersion();
+    if (latestTag && semverGt(latestTag, currentVersion)) {
+      const info = {
+        current: currentVersion,
+        latest: latestTag,
+        url: data.html_url || 'https://github.com/zhangyinglong3550/switchyard/releases/latest'
+      };
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('app:update-available', info);
+      }
+    }
+  } catch (err) {
+    // 网络失败静默处理
+  }
+}
+
+function startUpdateChecker() {
+  checkForUpdate(); // 启动时立即检查一次
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
+  updateCheckTimer = setInterval(() => checkForUpdate(), UPDATE_CHECK_INTERVAL_MS);
+  updateCheckTimer.unref?.();
+}
+
+
 function modelsForProfile(cfg, models) {
   const providerNames = new Map((cfg.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
   return (models || []).map((model) => ({
@@ -284,6 +334,15 @@ ipcMain.handle("gateway:restart", async () => {
   syncCodexArtifacts("gateway-restart");
   startCodexArtifactMonitor();
   return result;
+});
+ipcMain.handle('app:version', () => app.getVersion());
+ipcMain.handle('shell:open-url', async (_e, { url } = {}) => {
+  if (url) await shell.openExternal(url);
+  return { ok: true };
+});
+ipcMain.handle('app:check-update', async () => {
+  await checkForUpdate();
+  return { ok: true };
 });
 ipcMain.handle("gateway:reload", () => {
   const result = reloadConfig();
@@ -1126,6 +1185,7 @@ app.whenReady().then(async () => {
     syncCodexArtifacts("app-start");
     startCodexArtifactMonitor();
     getProviderHealthMonitor().start({ immediate: true });
+    startUpdateChecker();
   } catch (err) {
     appendLog({ level: "error", msg: "gateway autostart failed", error: err?.message || String(err) });
   }

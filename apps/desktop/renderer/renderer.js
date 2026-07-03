@@ -9,7 +9,34 @@ import { modelIdConflict } from "./model-form-utils.mjs";
 import { normalizeDiscoveredModelForProvider, selectedImportResult as buildSelectedImportResult } from "./import-selection-utils.mjs";
 import { buildTestRequest, parseTestMessages } from "../src/test-console.mjs";
 
-const { invoke, onLog } = window.lls;
+const { invoke, onLog, onUpdateAvailable } = window.lls;
+
+// ── 自动更新提示 ──────────────────────────────────────────────
+let pendingUpdateInfo = null;
+function initUpdateChecker() {
+  const versionEl = document.getElementById('app-version');
+  const btnUpdate = document.getElementById('btn-update');
+  // 显示当前版本（从 HTML title 或 package.json 无法直接读，通过 IPC 获取）
+  invoke('app:version').then(v => { if (versionEl) versionEl.textContent = 'v' + v; }).catch(() => {});
+  if (onUpdateAvailable) {
+    onUpdateAvailable((info) => {
+      pendingUpdateInfo = info;
+      if (versionEl) versionEl.textContent = 'v' + info.current;
+      if (btnUpdate) {
+        btnUpdate.style.display = '';
+        btnUpdate.textContent = '⬆ v' + info.latest;
+        btnUpdate.title = '点击下载新版本 v' + info.latest;
+      }
+    });
+  }
+  if (btnUpdate) {
+    btnUpdate.addEventListener('click', () => {
+      if (pendingUpdateInfo && pendingUpdateInfo.url) {
+        invoke('shell:open-url', { url: pendingUpdateInfo.url });
+      }
+    });
+  }
+}
 
 const state = {
   config: null,
@@ -4021,6 +4048,7 @@ document.getElementById("btn-test-batch")?.addEventListener("click", async () =>
 
 /* Init */
 refreshAll();
+initUpdateChecker();
 
 /* ---- Model-level test ---- */
 document.getElementById("btn-model-test")?.addEventListener("click", async () => {
