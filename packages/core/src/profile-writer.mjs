@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { backupDir, ensureDir, nowIso, DEFAULT_HOME } from "./utils.mjs";
 import { claudeCodeDiscoveryModelId } from "./config.mjs";
+import crypto from "node:crypto";
 
 export function codexConfigPath() {
   return path.join(os.homedir(), ".codex", "config.toml");
@@ -631,8 +632,17 @@ export function buildClaudeCodeGatewayModelsCache({ host, port, models = [], fet
   const out = [];
   const seen = new Set();
   for (const model of distinctModels(models)) {
-    const item = claudeCodeGatewayModelFrom(model);
-    if (!item || seen.has(item.id)) continue;
+    let item = claudeCodeGatewayModelFrom(model);
+    if (!item) continue;
+    if (seen.has(item.id)) {
+      // Collision: fall back to hashed slug form
+      const raw = String(model.id || model.upstreamModel || "").trim();
+      const slug = raw.normalize("NFKD").toLowerCase().replace(/[^a-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+      const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
+      const fallbackId = `claude-switchyard-${slug || "model"}-${hash}`;
+      if (seen.has(fallbackId)) continue;
+      item = { id: fallbackId, display_name: item.display_name };
+    }
     seen.add(item.id);
     out.push(item);
   }

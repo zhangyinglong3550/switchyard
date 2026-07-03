@@ -1571,8 +1571,17 @@ function renderProviderDiscovery() {
     el.addEventListener("change", () => {
       const [index, key] = el.dataset.discoveryCap.split(":");
       state.providerDiscovery[Number(index)].capabilities[key] = el.checked;
-      // refresh capability chips in table row
-      renderProviderDiscovery();
+      // update only the chip display in the table row, don't re-render (would collapse expand panel)
+      const row = wrap.querySelector(`tr.discovery-table-row[data-discovery-idx="${index}"]`);
+      if (row) {
+        const chipCell = row.children[2];
+        const model = state.providerDiscovery[Number(index)];
+        const chips = Object.entries(model.capabilities)
+          .filter(([, v]) => v)
+          .map(([k]) => `<span class="chip">${escapeHtml(CAPABILITY_LABEL[k] || k)}</span>`)
+          .join("");
+        chipCell.innerHTML = chips || '<span class="tiny muted">-</span>';
+      }
     });
   });
 }

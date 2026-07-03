@@ -307,7 +307,13 @@ export function modelVisibleToClient(config, model, clientId) {
 export function claudeCodeDiscoveryModelId(model) {
   const raw = String(model?.id || model?.upstreamModel || "").trim();
   if (!raw) return "";
-  if (/^(claude|anthropic)/i.test(raw)) return raw;
+  // For claude/anthropic prefixed IDs, use the raw ID only if there's no providerId prefix.
+  // If the model comes from a Switchyard provider (has providerId in id like "provider/claude-xxx"),
+  // still add a hash suffix to avoid collision when two providers both have "claude-sonnet-4-6".
+  const slashIndex = raw.indexOf("/");
+  const hasProviderPrefix = slashIndex > 0 && slashIndex < raw.length - 1;
+  if (/^(claude|anthropic)/i.test(raw) && !hasProviderPrefix) return raw;
+  // Use a claude/anthropic alias directly (alias has no provider prefix)
   const displayAlias = (model?.aliases || []).find((alias) => /^(claude|anthropic)/i.test(String(alias || "")));
   if (displayAlias) return displayAlias;
   const slug = raw
@@ -376,10 +382,24 @@ export function publicModelsForClient(config, clientId) {
   const models = clientId ? listModelsForClient(config, clientId) : config.models;
   if (clientId === "claude-code" || clientId === "claude-app") {
     const providerNames = new Map((config.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
-    return models.map((model, index) => anthropicModelInfo(model, providerNames.get(model.providerId) || model.providerId, {
-      idOverride: clientId === "claude-app" ? claudeAppDiscoveryModelId(model) : claudeCodeDiscoveryModelId(model),
-      ...(clientId === "claude-app" ? { anthropicFamilyTier: "sonnet", isFamilyDefault: index === 0 } : {})
-    }));
+    // Deduplicate discovery IDs: if two models produce the same ID (e.g. both have alias "claude-sonnet-4-6"),
+    // keep the first as-is and add a hash suffix to subsequent ones.
+    const seenIds = new Set();
+    return models.map((model, index) => {
+      let idOverride = clientId === "claude-app" ? claudeAppDiscoveryModelId(model) : claudeCodeDiscoveryModelId(model);
+      if (seenIds.has(idOverride)) {
+        // Fall back to the hashed slug form to avoid collision
+        const raw = String(model.id || model.upstreamModel || "").trim();
+        const slug = raw.normalize("NFKD").toLowerCase().replace(/[^a-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+        const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
+        idOverride = `claude-switchyard-${slug || "model"}-${hash}`;
+      }
+      seenIds.add(idOverride);
+      return anthropicModelInfo(model, providerNames.get(model.providerId) || model.providerId, {
+        idOverride,
+        ...(clientId === "claude-app" ? { anthropicFamilyTier: "sonnet", isFamilyDefault: index === 0 } : {})
+      });
+    });
   }
   return models.map(publicModel);
 }
