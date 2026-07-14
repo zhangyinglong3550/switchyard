@@ -9,33 +9,35 @@
 <body>
 <div class="screen app-shell">
   <aside class="sidebar">
-    <div class="toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
+    <div class="sidebar-header toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
       <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
     </div>
-    <div>
-      <div class="group-title">工作区</div>
-      <nav class="nav" id="primary-nav">
-        <a data-tab="overview" class="active"><span class="icon-square">⌂</span>总览</a>
-        <a data-tab="providers"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
-        <a data-tab="models"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
-        <a data-tab="clients"><span class="icon-square">◉</span>客户端</a>
-        <a data-tab="diagnostics"><span class="icon-square">◎</span>诊断中心</a>
-      </nav>
+    <div class="sidebar-scroll">
+      <div>
+        <div class="group-title">工作区</div>
+        <nav class="nav" id="primary-nav">
+          <a data-tab="overview" class="active"><span class="icon-square">⌂</span>总览</a>
+          <a data-tab="providers"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
+          <a data-tab="models"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
+          <a data-tab="clients"><span class="icon-square">◉</span>客户端</a>
+          <a data-tab="diagnostics"><span class="icon-square">◎</span>诊断中心</a>
+        </nav>
+      </div>
+      <div>
+        <div class="group-title">工具</div>
+        <nav class="nav" id="tools-nav">
+          <a data-tab="usage"><span class="icon-square">▥</span>用量</a>
+          <a data-tab="logs"><span class="icon-square">≣</span>日志</a>
+          <a data-tab="test"><span class="icon-square">▶</span>测试台</a>
+          <a data-tab="sessions"><span class="icon-square">◫</span>会话</a>
+          <a data-tab="traces"><span class="icon-square">⌁</span>调用可视化</a>
+          <a data-tab="skills"><span class="icon-square">✎</span>Skills</a>
+          <a data-tab="plugins"><span class="icon-square">◇</span>插件</a>
+          <a data-tab="settings"><span class="icon-square">⚙</span>偏好设置</a>
+        </nav>
+      </div>
     </div>
-    <div>
-      <div class="group-title">工具</div>
-      <nav class="nav" id="tools-nav">
-        <a data-tab="usage"><span class="icon-square">▥</span>用量</a>
-        <a data-tab="logs"><span class="icon-square">≣</span>日志</a>
-        <a data-tab="test"><span class="icon-square">▶</span>测试台</a>
-        <a data-tab="sessions"><span class="icon-square">◫</span>会话</a>
-        <a data-tab="traces"><span class="icon-square">⌁</span>调用可视化</a>
-        <a data-tab="skills"><span class="icon-square">✎</span>Skills</a>
-        <a data-tab="plugins"><span class="icon-square">◇</span>插件</a>
-        <a data-tab="settings"><span class="icon-square">⚙</span>偏好设置</a>
-      </nav>
-    </div>
-    <div style="margin-top:auto;">
+    <div class="sidebar-footer">
       <div class="group-title">服务</div>
       <div class="sidebar-service-card">
         <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -49,9 +51,10 @@
           <button class="btn" id="btn-restart" style="flex:1; justify-content:center;">重启</button>
         </div>
       </div>
-    <div id="version-bar" class="sidebar-version-bar">
-      <span class="tiny muted" id="app-version">v-</span>
-      <button id="btn-update" class="btn primary" style="display:none; font-size:11px; padding:2px 8px;">⬆ 更新</button>
+      <div id="version-bar" class="sidebar-version-bar">
+        <span class="tiny muted" id="app-version">v-</span>
+        <button id="btn-update" class="btn primary" style="display:none; font-size:11px; padding:2px 8px;">⬆ 更新</button>
+      </div>
     </div>
   </aside>
 

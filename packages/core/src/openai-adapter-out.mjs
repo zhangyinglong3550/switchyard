@@ -166,7 +166,15 @@ export function responsesToChatResponse(payload, upstreamModel) {
       if (mapped) tool_calls.push(mapped);
     }
   }
-  message.content = payloadText || contentToText(fallbackMessage.content || payload?.content || payload?.text || "");
+  // OpenAI Responses `text` is output config ({ format, verbosity }), not assistant
+  // content. Never fall back to payload.text — tool-only turns would stringify it
+  // into garbage like {"format":{"type":"text"},"verbosity":"medium"}.
+  const fallbackContent = fallbackMessage.content ?? (
+    typeof payload?.content === "string" || Array.isArray(payload?.content)
+      ? payload.content
+      : ""
+  );
+  message.content = payloadText || contentToText(fallbackContent || "");
   if (tool_calls.length) message.tool_calls = tool_calls;
   return {
     id: payload.id || choice.id || `chatcmpl_${crypto.randomUUID()}`,

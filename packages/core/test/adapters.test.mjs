@@ -248,6 +248,77 @@ test("responsesToChatResponse falls back to chat-completions shape text and tool
   assert.equal(out.choices[0].finish_reason, "tool_calls");
 });
 
+test("responsesToChatResponse ignores Responses text config on tool-only turns", () => {
+  const out = responsesToChatResponse({
+    id: "resp_tool_only",
+    object: "response",
+    created_at: 123,
+    model: "gpt-5.6-luna",
+    // Responses API echoes request text config here — not assistant prose.
+    text: { format: { type: "text" }, verbosity: "medium" },
+    output: [{
+      type: "function_call",
+      id: "fc_1",
+      call_id: "call_1",
+      name: "Skill",
+      arguments: JSON.stringify({ skill: "using-superpowers", args: "" })
+    }],
+    usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 }
+  }, "gpt-5.6-luna");
+  assert.equal(out.choices[0].message.content, "");
+  assert.equal(out.choices[0].message.tool_calls[0].function.name, "Skill");
+  assert.equal(out.choices[0].finish_reason, "tool_calls");
+  assert.notEqual(out.choices[0].message.content, JSON.stringify({ format: { type: "text" }, verbosity: "medium" }));
+});
+
+test("responsesToChatResponse keeps real output_text even when text config is present", () => {
+  const out = responsesToChatResponse({
+    id: "resp_with_text",
+    object: "response",
+    created_at: 123,
+    model: "gpt-5.6-luna",
+    text: { format: { type: "text" }, verbosity: "medium" },
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "你好，我可以帮你查用量。" }]
+      },
+      {
+        type: "function_call",
+        call_id: "call_2",
+        name: "Bash",
+        arguments: JSON.stringify({ command: "echo ok" })
+      }
+    ]
+  }, "gpt-5.6-luna");
+  assert.equal(out.choices[0].message.content, "你好，我可以帮你查用量。");
+  assert.equal(out.choices[0].message.tool_calls[0].function.name, "Bash");
+});
+
+test("responsesStreamToChatResponse ignores completed response.text config", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      controller.enqueue(enc.encode([
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"in_progress\",\"arguments\":\"\",\"call_id\":\"call_1\",\"name\":\"Skill\"},\"output_index\":0}",
+        "",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{\\\"skill\\\":\\\"using-superpowers\\\"}\",\"item_id\":\"fc_1\",\"output_index\":0,\"name\":\"Skill\"}",
+        "",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"created_at\":0,\"model\":\"gpt\",\"text\":{\"format\":{\"type\":\"text\"},\"verbosity\":\"medium\"},\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"Skill\",\"arguments\":\"{\\\"skill\\\":\\\"using-superpowers\\\"}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  const out = await responsesStreamToChatResponse({ body: stream }, "gpt");
+  assert.equal(out.choices[0].message.content, "");
+  assert.equal(out.choices[0].message.tool_calls[0].function.name, "Skill");
+  assert.ok(!String(out.choices[0].message.content || "").includes("verbosity"));
+});
+
 test("responsesStreamToChatResponse recovers completed output_text after streamed tool call", async () => {
   const stream = new ReadableStream({
     start(controller) {

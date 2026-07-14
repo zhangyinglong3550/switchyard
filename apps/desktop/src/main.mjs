@@ -538,7 +538,8 @@ function stopCodexArtifactMonitor() {
 
 function createMainWindow() {
   const win = new BrowserWindow({
-    width: 1180, height: 760, minWidth: 960, minHeight: 600,
+    // 笔记本内建屏高度有限：默认高度略降，最小高度保证侧栏底栏（服务+版本）可见
+    width: 1180, height: 720, minWidth: 900, minHeight: 560,
     title: "Switchyard",
     icon: path.resolve(__dirname, "..", "assets", "icon.png"),
     webPreferences: {

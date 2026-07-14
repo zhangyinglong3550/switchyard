@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.2 — 2026-07-14
+
+### Fix
+
+- **侧栏矮屏适配**：Mac 笔记本内建屏上左下角版本号被裁切。导航区可滚动，服务卡片 + 版本条固定底部；矮窗口收紧间距。
+- **Responses → Chat 适配**：`responsesToChatResponse` 不再把 OpenAI Responses 的 `text` 配置对象（format/verbosity）误当成 assistant 正文，避免 tool-only 轮次出现垃圾 JSON 文本。
+- **Anthropic 官方认证对齐 CC Switch**（含 2.1.1）：复用 Claude Code 登录态（Keychain / `.credentials.json`）；浏览器 OAuth 为高级选项。
+
+### 含 2.1.0 能力
+
+- 应用内自动更新（下载安装并重开）
+- Anthropic 官方 OAuth 供应商
+
 ## 2.1.1 — 2026-07-14
 
 ### Fix
