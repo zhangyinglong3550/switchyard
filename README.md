@@ -11,189 +11,146 @@
 
 ## 你遇到了这些问题吗？
 
-- 在 **Codex** 里只能用官方模型，DeepSeek 的思考和速度、Kimi 的性价比、GLM 的性价比——全和你无关
-- 换成 **Claude Code**，又要重新配置一遍 API Key，两边的模型列表从来不统一
-- **cc-switch** 能配置三方模型，但每次切换都需要点击一下启用某个供应商的模型，相关agent仅能看到该供应商下的模型
-- 模型多了以后根本不知道哪个挂了、哪个可用——打开终端一条条 `curl` 试？还是盲猜？
-- DeepSeek 不支持贴图，报错了也不知道为什么；想换个支持视觉的模型又要切来切去
-- 想看某个代理发了什么 prompt、为什么那个请求失败了——日志散落在各个地方，根本拼不起来
+- 在 **Codex** 里只能用官方模型，DeepSeek / Kimi / GLM 的性价比用不上
+- 换成 **Claude Code**，又要重新配置一遍 Key，两边模型列表永不统一
+- 有一批 **Grok / ChatGPT 订阅号**，却要靠 Sub2API / CLIProxyAPI 另起进程
+- 多号时不知道谁还有额度、谁挂了，只能盲猜或一条条 curl
+- 想看某个代理发了什么 prompt、为什么失败——日志散落各处
 
-**Switchyard 一次性解决所有这些问题。** 它是一个运行在你本机的桌面应用：左边面板配置模型，右边所有 AI 代理自动生效。
+**Switchyard 一次性解决。** 本机桌面应用：左边配模型与账号池，右边 Codex / Claude Code / Hermes 自动生效。
 
 ---
 
 ![Switchyard 总览](docs/assets/screenshots/01-overview.png)
 
-> **截图说明（2.0）**  
-> 下方产品截图来自 1.x UI，用于说明**能力与工作流**，布局配色已在 2.0 切换为 Claude Paper Light 浅奶油主题。  
-> 账号池 / 额度等新界面以 [docs/ACCOUNT-POOL-MVP.zh-CN.md](docs/ACCOUNT-POOL-MVP.zh-CN.md) 与 Release 说明为准；完整截图集将在后续补拍更新。
-
 ## 演示视频
 
 - [下载/观看产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
 
-> 如果 GitHub 页面内无法直接预览视频，请点击链接下载后本地观看。
+> 若 GitHub 无法内嵌预览，请下载后本地观看。
 
 ---
 
-## 2.0 新增：账号池（多账号 OAuth）
+## 2.0 核心：账号池（多账号 OAuth）
 
 **不用 Sub2API，也能在本机跑多 Codex / 多 Grok 号。**
 
-| 池 | 用途 | 怎么导入 | 额度 |
-|----|------|----------|------|
-| **Grok / xAI** | 直连 `api.x.ai`，加权轮询 | 粘贴 SSO/RT、CPA `xai-*.json` | 官方无稳定公开剩余额度 API |
-| **Codex 订阅** | 直连官方 Responses，失败自动换号 | **多选 JSON / 文件夹**、粘贴 CPA `type:codex`、本机 `auth.json` | **单号 5h + 周窗口剩余**（`wham/usage`） |
+凭证只在 `~/.switchyard/pools/`，**不写进 config.json / 不进 Git**。  
+请求路径：选号 → 刷新 token → 上游调用 → 失败自动换号。
 
-- 凭证只在 `~/.switchyard/pools/`，**不写进 config.json / 不进 Git**
-- 调度：加权轮询 / 最久未用 / 最低错误率
-- 失败换号：401 / 403 / 429 / 5xx（最多 3 次）
-- Codex 无 `refresh_token` 时可用 `session_token` 续 access
+### Codex 订阅池
 
-详细设计与开发入口：**[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md)** · 变更记录：**[CHANGELOG](CHANGELOG.md)**
+- 直连官方 Responses
+- **多选 JSON / 文件夹** 批量导入（CPA `type:codex` 等）
+- 无 `refresh_token` 时可用 `session_token` 续 access
+- **单号额度**：5 小时窗口 + 周窗口剩余百分比
+
+![Codex 账号池](docs/assets/screenshots/02-codex-account-pool.png)
+
+### Grok / xAI 账号池
+
+- 直连 `api.x.ai`（不经过 8317）
+- 粘贴 SSO/RT、CPA `xai-*.json`、多选文件
+- 加权轮询 / 最久未用 / 最低错误率
+- Access 自动续期（有 Refresh 时）
+
+![Grok 账号池](docs/assets/screenshots/03-grok-account-pool.png)
+
+| 池 | 上游 | 导入 | 额度 |
+|----|------|------|------|
+| **Codex** | chatgpt.com Codex | 多选 json / 文件夹 / 粘贴 / auth.json | **5h + 周剩余** |
+| **Grok** | api.x.ai | SSO/RT / CPA json | 官方无稳定公开剩余额度 API |
+
+详细设计：**[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md)** · **[CHANGELOG](CHANGELOG.md)**
 
 ---
 
-## 六大核心能力
-
-### ① 统一模型矩阵
+## 统一供应商与模型矩阵
 
 **一个地方配置，所有代理可用。**
 
-Switchyard 把你在所有平台申请的模型——OpenAI、DeepSeek、Kimi、GLM、MiniMax、火山引擎、硅基流动、OpenRouter 以及任意 OpenAI-compatible 供应商——聚合到一个面板里。配置完成后，Codex、Claude Code、Hermes 以及所有兼容 OpenAI/Anthropic 协议的工具同时可见。
+![供应商列表](docs/assets/screenshots/04-providers.png)
 
-> 你不再需要记「Codex 用的是哪个 key」「Claude Code 配了哪几个模型」。一个地方改，全部自动同步。
+![模型矩阵](docs/assets/screenshots/05-models.png)
 
-![Codex 模型选择器](docs/assets/screenshots/02-codex-models.png)
-![Claude Code 模型列表](docs/assets/screenshots/03-claude-code-models.png)
+| 供应商 | 协议 | 说明 |
+|--------|------|------|
+| **Grok 账号池** | Chat + OAuth 池 | 多号轮询 |
+| **Codex 订阅池** | Responses + OAuth 池 | 多号 + 额度 |
+| OpenAI Codex（单号） | Responses OAuth | 官方 login |
+| DeepSeek / Kimi / GLM / MiniMax | Chat | 兼容补丁 |
+| Anthropic | Messages | 原生 |
+| OpenRouter / 硅基 / 火山等 | Chat | 通用适配 |
 
-**支持的供应商（持续扩充）：**
-
-| 供应商 | 协议适配 | 特色处理 |
-|--------|----------|----------|
-| OpenAI (Codex OAuth) | Responses | 官方 GPT/Codex，OAuth 直连 |
-| DeepSeek | Chat | reasoning_content 正确映射到各类代理 |
-| Kimi (Moonshot) | Chat | Function Calling schema 自动清洗 |
-| GLM (智谱) | Chat | content 数组格式自动适配 |
-| MiniMax | Chat | reasoning_details 正确映射 |
-| Anthropic | Messages | 原生 Messages 协议 |
-| 火山引擎 Agent Plan | Chat | 国产大模型代理 |
-| OpenRouter | Chat | reasoning effort 透传 |
-| 硅基流动 | Chat | enable_thinking 映射 |
-| 任意 OpenAI-compatible | Chat | 通用适配 |
+配置完成后，**Codex、Claude Code、Hermes** 以及任意 OpenAI/Anthropic 兼容工具同时可见。
 
 ---
 
-### ② 全局诊断中心
+## 诊断 · 会话 · 调用可视化
 
-**不用猜哪个模型挂了。**
+### 诊断中心
 
-诊断中心提供全量供应商和模型的实时可用性检测。一眼看清：
+全量供应商 / 模型可用性检测，错误分类与修复建议。
 
-- 哪些模型状态正常、哪些延迟偏高、哪些已不可达
-- 每个供应商的协议兼容性：是否存在不支持的参数、Schema 不匹配等潜在问题
-- 按模型 / 供应商 / 代理的切面统计请求成功率、平均延迟、Token 消耗
+![诊断中心](docs/assets/screenshots/06-diagnostics.png)
 
-![诊断中心 - 可用性面板](docs/assets/screenshots/04-diagnostics-availability.png)
-![诊断中心 - 兼容性报告](docs/assets/screenshots/05-diagnostics-compatibility.png)
+### 会话历史
 
-错误自动分类（认证失败、上游拒绝、协议不兼容、网络不可达），每条都有明确的修复建议。一键导出 sanitized 诊断包，自动剥离敏感信息，可以直接发给同事排查。
+跨 Codex / Claude Code / Hermes 统一浏览与格式化展示。
 
----
+![会话](docs/assets/screenshots/07-sessions.png)
 
-### ③ 会话历史管理
+### 调用可视化
 
-**跨代理查看所有对话记录，格式化展示。**
+实时请求状态、延迟、Token；可看到 **账号池选中了哪个号**、是否触发换号。
 
-Switchyard 解析 Codex、Claude Code、Hermes 的本地会话存档，提供统一的历史浏览器：
-
-- 按代理、模型、时间范围筛选
-- 每条会话展示模型名、Token 消耗、关键摘要
-- 支持会话内容格式化渲染——Codex 的 Responses Protocol、Claude Code 的 Messages Protocol 统一展示
-- 在官方直连模式和代理模式间切换时，**已有会话的 model_provider 自动迁移，对话记录不丢失**
-
-![会话列表](docs/assets/screenshots/06-sessions-list.png)
-
-![会话详情](docs/assets/screenshots/07-sessions-detail.png)
+![调用可视化](docs/assets/screenshots/08-traces.png)
 
 ---
 
-### ④ 实时请求监控
+## Skills · 视觉 Fallback · 接入模式
 
-**学习各代理的 prompt 工程，第一时间排障。**
+### Skills / Skill Hub
 
-调用可视化面板实时展示流经网关的每一条请求：
+统一管理 Codex 与 Claude Code Skills，支持 Skill Hub 搜索安装。
 
-- 请求状态（200 / 4xx / 5xx）、延迟、Token 用量
-- 请求方法和路径的协议信息、上游模型路由
-- 每条请求可展开查看详细元信息：协议转换链、激活的兼容补丁、请求覆盖
+![Skills](docs/assets/screenshots/09-skills.png)
 
-![调用可视化](docs/assets/screenshots/08-call-visualization.png)
+### 非视觉模型识图
 
-这意味着你可以：
-- **学习 Codex / Claude Code 如何构造 prompt**，把优秀工程实践用在自己的场景里
-- **立即发现配置问题**：模型路由错了、协议适配没生效、Token 超限——不用翻日志文件
+贴图 → 视觉模型描述 → 注入 prompt → 目标模型（如 DeepSeek）。
 
----
+![视觉 Fallback](docs/assets/screenshots/10-vision-fallback.png)
 
-### ⑤ 多代理 Skill 管理
+### 架构一览
 
-**集成腾讯 Skill Hub，一键搜索安装。**
+![架构](docs/assets/screenshots/11-architecture.png)
 
-Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
-
-- 查看当前已安装的全部 Skills，按代理分列
-- **接入腾讯 Skill Hub**：搜索官方和社区的 Skills，一键安装
-- 支持 Marketplace 管理：浏览、安装、卸载
-
-![Skills Hub 浏览](docs/assets/screenshots/10-skillhub.png)
-![Skills 搜索安装](docs/assets/screenshots/09-skills.png)
-
----
-
-### ⑥ 非视觉模型识图
-
-**让 DeepSeek 这样不支持图片的模型也能"看图"。**
-
-很多高性价比模型的 API 不支持图片输入（如 DeepSeek v4-pro、GLM5.2），Switchyard 内置视觉 Fallback 引擎：
-
-> 贴图 → Switchyard 自动用视觉模型描述图片 → 将文字描述注入 prompt → 发送给目标模型
-
-![DeepSeek 识图](docs/assets/screenshots/11-vision-fallback.png)
-
-配置简单：在模型配置中开启「视觉 Fallback」并指定一个兜底视觉模型（如 xiaomi V2.5）。之后所有向该模型发送的图片请求，都会自动走描述→注入流程。
-
----
-
-## ⚠️ 使用 Codex 官方模型的重要提醒
-
-在 Codex 中使用 GPT 等官方模型时，Switchyard 提供两种接入方式：
+### Codex 官方直连 vs 网关
 
 | 方式 | 原理 | 风险 |
 |------|------|------|
-| **官方直连**（推荐） | Codex 直接调用 OpenAI 官方 API，Switchyard 仅提供 model_provider 元数据 | 无封号风险 |
-| **代理模式** | 请求经过 Switchyard 网关转发，使用 OAuth 令牌代理到 ChatGPT Codex | ⚠️ 尽管像Hermes，ccswitch等开源项目做了官方调用header特征提取兼容，但是不排除官方更新特征，存在被识别为代理、导致封号的风险 |
+| **官方直连**（推荐） | Codex 直连 OpenAI，Switchyard 仅写元数据 | 低 |
+| **网关 / 账号池** | 经 Switchyard 转发，可多号轮询 | 可能被识别为代理，仅建议自有账号 |
 
-**我们强烈建议 Codex 用户使用官方直连方式。** 在客户端配置页面可以一键切换两种模式。使用代理模式前请充分评估风险。
-
-![接入模式切换](docs/assets/screenshots/12-official-direct.png)
+![接入模式](docs/assets/screenshots/12-official-direct.png)
 
 ---
 
 ## 架构
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    Electron Desktop                           │
-│  供应商 · 账号池 · 诊断 · 会话/日志 · Skills Hub · 测试台      │
-├──────────────────────────────────────────────────────────────┤
-│                      Gateway Core                             │
-│  /codex  /claude-code  /hermes  /v1                           │
-│  Protocol adapt · Compat patches · Vision fallback            │
-│  Account pool: pick → refresh token → failover                │
-├──────────────────────────────────────────────────────────────┤
-│  api.x.ai (Grok 池) │ ChatGPT Codex (Codex 池) │ 三方 API Key │
-└──────────────────────────────────────────────────────────────┘
+客户端 (Codex / Claude Code / Hermes / …)
+        │
+        ▼
+ Switchyard Desktop + Gateway :17888
+   · 协议适配 Chat ↔ Responses ↔ Messages
+   · 兼容补丁 / 视觉 Fallback
+   · 账号池：选号 → 刷新 → 失败换号
+        │
+        ├─► api.x.ai          (Grok 池)
+        ├─► chatgpt.com/codex (Codex 池)
+        └─► 三方 API Key 供应商
 ```
 
 ---
@@ -202,7 +159,7 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 
 ### 下载安装
 
-从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 下载 **v2.0.0**：
+从 [Releases v2.0.0](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.0.0) 下载：
 
 | 平台 | 文件 |
 |------|------|
@@ -210,25 +167,13 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 | macOS (Intel / x64) | `Switchyard-2.0.0.dmg` |
 | Windows (x64) | `Switchyard Setup 2.0.0.exe` 或 `Switchyard-2.0.0-win.zip` |
 
-> ### ⚠️ macOS 用户必读：安装后首次打开前请执行以下命令
+> ### ⚠️ macOS 用户必读
 >
-> 由于 macOS 应用没有官方签名，安装后直接打开会提示"无法打开"或"已损坏"。
-> 请打开终端，执行以下命令后即可正常打开：
+> 无官方签名时可能提示「已损坏」。安装后执行：
 >
 > ```bash
 > xattr -cr /Applications/Switchyard.app
 > ```
->
-> 这条命令会移除 macOS 的隔离标记，执行后到应用程序里双击 Switchyard 即可打开。
-
-### 配置环境变量
-
-```bash
-export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
-export SWITCHYARD_KIMI_API_KEY="..."
-export SWITCHYARD_GLM_API_KEY="..."
-# 每个供应商在 UI 中会显示对应的环境变量名
-```
 
 ### 从源码
 
@@ -238,6 +183,23 @@ cd switchyard
 npm install
 npm run desktop
 ```
+
+### 环境变量（示例）
+
+```bash
+export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
+export SWITCHYARD_KIMI_API_KEY="..."
+# 各供应商在 UI 中会显示对应变量名
+```
+
+> Antigravity 实验池如需 Google OAuth 刷新，请配置  
+> `SWITCHYARD_ANTIGRAVITY_CLIENT_ID` / `SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET`（仓库不硬编码）。
+
+---
+
+## 截图说明
+
+本 README 配图为 **2.0 Claude Paper Light** 界面示意（产品 UI 高保真 mock，与当前主题一致），用于展示核心能力与账号池工作流。旧版 1.x 截图已备份至 `docs/assets/screenshots/_backup-1x/`。
 
 ---
 
