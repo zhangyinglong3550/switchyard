@@ -11,6 +11,11 @@ const api = {
     const sub = (_event, info) => handler(info);
     ipcRenderer.on("app:update-available", sub);
     return () => ipcRenderer.removeListener("app:update-available", sub);
+  },
+  onUpdateProgress: (handler) => {
+    const sub = (_event, info) => handler(info);
+    ipcRenderer.on("app:update-progress", sub);
+    return () => ipcRenderer.removeListener("app:update-progress", sub);
   }
 };
 

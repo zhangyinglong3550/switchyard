@@ -9,30 +9,92 @@ import { modelIdConflict } from "./model-form-utils.mjs";
 import { normalizeDiscoveredModelForProvider, selectedImportResult as buildSelectedImportResult } from "./import-selection-utils.mjs";
 import { buildTestRequest, parseTestMessages } from "../src/test-console.mjs";
 
-const { invoke, onLog, onUpdateAvailable } = window.lls;
+const { invoke, onLog, onUpdateAvailable, onUpdateProgress } = window.lls;
 
-// ── 自动更新提示 ──────────────────────────────────────────────
+// ── 自动更新提示 + 下载安装 ──────────────────────────────────
 let pendingUpdateInfo = null;
+let updateInstalling = false;
 function initUpdateChecker() {
-  const versionEl = document.getElementById('app-version');
-  const btnUpdate = document.getElementById('btn-update');
-  // 显示当前版本（从 HTML title 或 package.json 无法直接读，通过 IPC 获取）
-  invoke('app:version').then(v => { if (versionEl) versionEl.textContent = 'v' + v; }).catch(() => {});
+  const versionEl = document.getElementById("app-version");
+  const btnUpdate = document.getElementById("btn-update");
+  invoke("app:version").then((v) => { if (versionEl) versionEl.textContent = "v" + v; }).catch(() => {});
   if (onUpdateAvailable) {
     onUpdateAvailable((info) => {
       pendingUpdateInfo = info;
-      if (versionEl) versionEl.textContent = 'v' + info.current;
-      if (btnUpdate) {
-        btnUpdate.style.display = '';
-        btnUpdate.textContent = '⬆ v' + info.latest;
-        btnUpdate.title = '点击下载新版本 v' + info.latest;
+      if (versionEl) versionEl.textContent = "v" + info.current;
+      if (btnUpdate && !updateInstalling) {
+        btnUpdate.style.display = "";
+        btnUpdate.disabled = false;
+        btnUpdate.textContent = "⬆ 更新到 v" + info.latest;
+        btnUpdate.title = info.asset
+          ? `点击下载并安装 v${info.latest}（${info.asset.name}）`
+          : `点击打开发布页下载 v${info.latest}`;
+      }
+    });
+  }
+  if (onUpdateProgress) {
+    onUpdateProgress((p) => {
+      if (!btnUpdate) return;
+      const phase = p?.phase || "";
+      if (phase === "downloading") {
+        btnUpdate.textContent = `⬇ ${p.percent || 0}%`;
+        btnUpdate.title = p.total
+          ? `下载中 ${Math.round((p.received || 0) / 1048576)}/${Math.round(p.total / 1048576)} MB`
+          : "下载中…";
+      } else if (phase === "downloaded" || phase === "installing") {
+        btnUpdate.textContent = "⚙ 安装中…";
+        btnUpdate.title = p.message || "正在安装…";
+      } else if (phase === "relaunching" || phase === "installed") {
+        btnUpdate.textContent = "↻ 重启中…";
+        btnUpdate.title = p.message || "即将重新打开";
+      } else if (phase === "error") {
+        updateInstalling = false;
+        btnUpdate.disabled = false;
+        btnUpdate.textContent = pendingUpdateInfo ? `⬆ 更新到 v${pendingUpdateInfo.latest}` : "⬆ 更新";
+        toast(p.message || "更新失败", "error");
       }
     });
   }
   if (btnUpdate) {
-    btnUpdate.addEventListener('click', () => {
-      if (pendingUpdateInfo && pendingUpdateInfo.url) {
-        invoke('shell:open-url', { url: pendingUpdateInfo.url });
+    btnUpdate.addEventListener("click", async () => {
+      if (updateInstalling) return;
+      if (!pendingUpdateInfo) {
+        try {
+          const r = await invoke("app:check-update");
+          if (!r?.updateAvailable) return toast("已是最新版本");
+        } catch {
+          return toast("检查更新失败", "error");
+        }
+      }
+      updateInstalling = true;
+      btnUpdate.disabled = true;
+      btnUpdate.textContent = "⬇ 准备下载…";
+      try {
+        const result = await invoke("app:install-update", pendingUpdateInfo || {});
+        if (result?.openedUrl) {
+          updateInstalling = false;
+          btnUpdate.disabled = false;
+          btnUpdate.textContent = pendingUpdateInfo ? `⬆ 更新到 v${pendingUpdateInfo.latest}` : "⬆ 更新";
+          return toast("已打开发布页，请手动下载安装");
+        }
+        if (!result?.ok) {
+          updateInstalling = false;
+          btnUpdate.disabled = false;
+          btnUpdate.textContent = pendingUpdateInfo ? `⬆ 更新到 v${pendingUpdateInfo.latest}` : "⬆ 更新";
+          return toast(result?.error || "更新失败", "error");
+        }
+        if (result.relaunching) {
+          toast("安装完成，正在重新打开…");
+        } else if (result.manual) {
+          updateInstalling = false;
+          btnUpdate.disabled = false;
+          toast(result.extractDir ? `已解压到 ${result.extractDir}` : "请按提示完成安装");
+        }
+      } catch (err) {
+        updateInstalling = false;
+        btnUpdate.disabled = false;
+        btnUpdate.textContent = pendingUpdateInfo ? `⬆ 更新到 v${pendingUpdateInfo.latest}` : "⬆ 更新";
+        toast(err?.message || String(err), "error");
       }
     });
   }
@@ -151,6 +213,7 @@ const AUTH_MODE_LABEL = {
   api_key: "API Key",
   keychain: "系统安全存储",
   codex_oauth: "Codex OAuth",
+  anthropic_oauth: "Anthropic 官方 OAuth",
   account_pool: "账号池（多账号）",
   none: "无需认证"
 };
@@ -439,11 +502,16 @@ function presetBaseUrlForAuth(preset, authMode) {
   if (!preset) return "";
   if (authMode === "api_key" && preset.apiKeyBaseUrl) return preset.apiKeyBaseUrl;
   if (authMode === "codex_oauth" && preset.baseUrl) return preset.baseUrl;
+  if (authMode === "anthropic_oauth" && preset.baseUrl) return preset.baseUrl;
   return preset.baseUrl || "";
 }
 
 function providerHasCodexOauthRisk(provider, preset, authMode) {
   return authMode === "codex_oauth" || preset?.id === "codex-oauth" || provider?.authMode === "codex_oauth";
+}
+
+function providerHasAnthropicOauthRisk(provider, preset, authMode) {
+  return authMode === "anthropic_oauth" || preset?.id === "anthropic-oauth" || provider?.authMode === "anthropic_oauth";
 }
 
 function syncProviderRiskNote(provider = null) {
@@ -452,13 +520,34 @@ function syncProviderRiskNote(provider = null) {
   const selectedPreset = providerPresetById(document.getElementById("provider-preset-select")?.value);
   const preset = selectedPreset || providerPresetById(provider?.presetId);
   const authMode = document.getElementById("provider-auth-mode")?.value || provider?.authMode || "api_key";
-  const risky = providerHasCodexOauthRisk(provider, preset, authMode);
+  const risky = providerHasCodexOauthRisk(provider, preset, authMode) || providerHasAnthropicOauthRisk(provider, preset, authMode);
   note.classList.toggle("hidden", !risky);
   if (!risky) {
     note.textContent = "";
     return;
   }
+  if (providerHasAnthropicOauthRisk(provider, preset, authMode)) {
+    note.textContent = preset?.riskNote || "通过本地网关复用 Claude 官方 OAuth 登录态。凭证仅保存在本机 ~/.switchyard/oauth/，请遵守 Anthropic 服务条款。";
+    return;
+  }
   note.textContent = preset?.riskNote || "高风险：该官方 Codex OAuth 代理方式会通过本地网关复用官方登录态，官方文档提示可能带来账号限制风险。推荐优先使用官方直连。";
+}
+
+async function refreshAnthropicOauthStatus() {
+  const statusEl = document.getElementById("provider-anthropic-oauth-status");
+  if (!statusEl) return;
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  try {
+    const st = await invoke("anthropic-oauth:status", { providerId });
+    if (st?.loggedIn) {
+      statusEl.innerHTML = `<span class="chip good">已登录</span> ${escapeHtml(st.email || "Claude 账号")}${st.expiresAt ? ` <span class="tiny muted">token 至 ${escapeHtml(String(st.expiresAt).slice(0, 19).replace("T", " "))}</span>` : ""}`;
+    } else {
+      statusEl.innerHTML = `<span class="chip warn">未登录</span> <span class="tiny muted">点击下方按钮用浏览器完成 Claude 官方授权</span>`;
+    }
+  } catch (err) {
+    statusEl.innerHTML = `<span class="chip bad">状态读取失败</span> <span class="tiny muted">${escapeHtml(err?.message || String(err))}</span>`;
+  }
 }
 
 function syncProviderAuthControls() {
@@ -469,6 +558,7 @@ function syncProviderAuthControls() {
   const keyFields = document.getElementById("provider-key-fields");
   const note = document.getElementById("provider-auth-note");
   const poolPanel = document.getElementById("provider-account-pool-panel");
+  const anthropicPanel = document.getElementById("provider-anthropic-oauth-panel");
   if (!keyFields || !note) return;
   const needsKey = mode === "api_key" || mode === "keychain";
   keyFields.style.display = needsKey ? "" : "none";
@@ -477,9 +567,15 @@ function syncProviderAuthControls() {
     ? "已选择系统安全存储：macOS 使用 Keychain，Windows 使用当前用户 DPAPI 加密存储；配置文件只保存引用，不保存明文。"
     : mode === "codex_oauth"
     ? "已选择 Codex OAuth：Switchyard 会复用本机 codex login 的登录态，不需要在这里填写 API Key。"
+    : mode === "anthropic_oauth"
+    ? "已选择 Anthropic 官方 OAuth：用浏览器登录 Claude（Pro/Max）后即可调用官方 Messages API，无需 API Key。凭证保存在 ~/.switchyard/oauth/。"
     : mode === "account_pool"
     ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
+  if (anthropicPanel) {
+    anthropicPanel.style.display = mode === "anthropic_oauth" ? "" : "none";
+    if (mode === "anthropic_oauth") refreshAnthropicOauthStatus().catch(() => {});
+  }
   if (poolPanel) {
     poolPanel.style.display = mode === "account_pool" ? "" : "none";
     if (mode === "account_pool") {
@@ -499,6 +595,7 @@ function syncProviderAuthControls() {
       refreshProviderPoolList().catch(() => {});
     }
   }
+  syncProviderRiskNote();
 }
 
 function applyProviderPreset(preset) {
@@ -584,6 +681,7 @@ function providerBalanceCell(provider) {
 }
 
 function providerAuthCell(provider) {
+  if (provider.authMode === "anthropic_oauth") return '<span class="chip good">Claude OAuth</span>';
   if (provider.authMode === "account_pool") {
     const kind = provider.poolKind || "xai_oauth";
     return `<span class="chip good">${escapeHtml(poolKindUi(kind).chip)}</span>`;
@@ -1955,6 +2053,12 @@ function collectProviderForm() {
       delete data.apiKeyEnv;
       delete data.apiKey;
     }
+  } else if (authMode === "anthropic_oauth") {
+    data.providerType = "anthropic_oauth";
+    data.apiFormat = "anthropic_messages";
+    if (!data.baseUrl) data.baseUrl = "https://api.anthropic.com";
+    delete data.apiKeyEnv;
+    delete data.apiKey;
   } else if (authMode === "keychain") {
     data.keychainAccount = data.id;
     data._keychainSecret = data.apiKey;
@@ -2212,6 +2316,52 @@ document.getElementById("provider-preset-select").addEventListener("change", (e)
 document.getElementById("provider-auth-mode").addEventListener("change", () => {
   syncProviderAuthControls();
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
+});
+document.getElementById("btn-anthropic-oauth-login")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  const proxyUrl = form?.querySelector?.('[name="proxyUrl"]')?.value?.trim() || "";
+  try {
+    toast("正在打开浏览器登录 Claude…请在页面完成授权");
+    const result = await invoke("anthropic-oauth:login", { providerId, proxyUrl });
+    if (!result?.ok) return toast(result?.error || "登录失败", "error");
+    toast(result.email ? `登录成功：${result.email}` : "Claude OAuth 登录成功");
+    await refreshAnthropicOauthStatus();
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
+});
+document.getElementById("btn-anthropic-oauth-refresh-status")?.addEventListener("click", () => {
+  refreshAnthropicOauthStatus().catch((err) => toast(err?.message || String(err), "error"));
+});
+document.getElementById("btn-anthropic-oauth-logout")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  try {
+    await invoke("anthropic-oauth:logout", { providerId });
+    toast("已清除本机 Claude OAuth 凭证");
+    await refreshAnthropicOauthStatus();
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
+});
+document.getElementById("btn-anthropic-oauth-import")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  const proxyUrl = form?.querySelector?.('[name="proxyUrl"]')?.value?.trim() || "";
+  const refreshToken = document.getElementById("provider-anthropic-refresh-token")?.value?.trim() || "";
+  if (!refreshToken) return toast("请粘贴 refresh_token", "error");
+  try {
+    toast("正在用 refresh_token 换取 access_token…");
+    const result = await invoke("anthropic-oauth:import-refresh", { providerId, proxyUrl, refreshToken });
+    if (!result?.ok) return toast(result?.error || "导入失败", "error");
+    toast(result.email ? `导入成功：${result.email}` : "导入成功");
+    const input = document.getElementById("provider-anthropic-refresh-token");
+    if (input) input.value = "";
+    await refreshAnthropicOauthStatus();
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
 });
 document.getElementById("provider-pool-strategy")?.addEventListener("change", async (e) => {
   e.target.dataset.userTouched = "1";

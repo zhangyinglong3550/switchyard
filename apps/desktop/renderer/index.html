@@ -716,6 +716,28 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-anthropic-oauth-panel" style="display:none;">
+        <div class="callout-title">Claude 官方 OAuth</div>
+        <div class="callout-body">
+          浏览器登录 Claude（Pro / Max 订阅）后，Switchyard 用官方 OAuth 调用 <code>api.anthropic.com</code> Messages API。
+          凭证仅存本机 <code>~/.switchyard/oauth/</code>，不写入 config.json。
+        </div>
+        <div id="provider-anthropic-oauth-status" style="margin-top:10px;" class="tiny">检查登录状态…</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-anthropic-oauth-login">浏览器登录 Claude</button>
+          <button class="btn" type="button" id="btn-anthropic-oauth-refresh-status">刷新状态</button>
+          <button class="btn" type="button" id="btn-anthropic-oauth-logout">退出登录</button>
+        </div>
+        <details style="margin-top:12px;">
+          <summary class="tiny muted">高级：粘贴 refresh_token 导入</summary>
+          <label style="margin-top:8px;">refresh_token
+            <input class="field" id="provider-anthropic-refresh-token" type="password" autocomplete="off" placeholder="sk-ant-ort… 或官方 refresh token">
+          </label>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px;">
+            <button class="btn" type="button" id="btn-anthropic-oauth-import">导入并换取 access_token</button>
+          </div>
+        </details>
+      </div>
       <div class="callout" id="provider-account-pool-panel" style="display:none;">
         <div class="callout-title" id="provider-pool-title">账号池</div>
         <div class="callout-body" id="provider-pool-body">

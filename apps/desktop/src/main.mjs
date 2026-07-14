@@ -3,7 +3,14 @@ import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } f
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import AdmZip from "adm-zip";
+
+const execFileAsync = promisify(execFile);
 import { readConfig, saveValidated, configFile, readRaw } from "./config-store.mjs";
 import { startGateway, stopGateway, restartGateway, reloadConfig, statusFromServer } from "./gateway-host.mjs";
 import { appendLog, snapshotLogs, subscribeLogs, logFilePath, readLogTail } from "./logs.mjs";
@@ -58,8 +65,19 @@ import {
   proxyDispatcher,
   readCodexOAuthAuth,
   isCodexOAuthProvider,
-  isAccountPoolProvider
+  isAnthropicOAuthProvider,
+  isAccountPoolProvider,
+  readAnthropicOAuthAuth
 } from "../../../packages/core/src/upstream/clients.mjs";
+import {
+  anthropicOAuthAuthPath,
+  anthropicOAuthStatus,
+  clearAnthropicOAuthFile,
+  runAnthropicOAuthLogin,
+  writeAnthropicOAuthFile,
+  refreshAnthropicTokens,
+  readAnthropicOAuthFile
+} from "../../../packages/core/src/oauth-anthropic.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
@@ -102,53 +120,305 @@ let tray = null;
 let isQuitting = false;
 registerBuiltinPatches();
 
-// ── 自动更新检查 ─────────────────────────────────────────────
+// ── 自动更新检查 + 下载安装 ──────────────────────────────────
 let updateCheckTimer = null;
-const GITHUB_RELEASES_API = 'https://api.github.com/repos/zhangyinglong3550/switchyard/releases/latest';
-const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4小时
+let pendingUpdateInfo = null;
+let updateInstallInProgress = false;
+const GITHUB_RELEASES_API = "https://api.github.com/repos/zhangyinglong3550/switchyard/releases/latest";
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 小时
 
 function semverGt(a, b) {
-  // 比较两个版本号 a > b，格式 x.y.z
-  const pa = a.replace(/^v/, '').split('.').map(Number);
-  const pb = b.replace(/^v/, '').split('.').map(Number);
+  const pa = String(a || "").replace(/^v/, "").split(".").map(Number);
+  const pb = String(b || "").replace(/^v/, "").split(".").map(Number);
   for (let i = 0; i < 3; i++) {
-    const na = pa[i] || 0, nb = pb[i] || 0;
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
     if (na !== nb) return na > nb;
   }
   return false;
 }
 
+function platformUpdateAssetPreference() {
+  if (process.platform === "darwin") {
+    const arch = process.arch === "arm64" ? "arm64" : "x64";
+    return {
+      platform: "darwin",
+      arch,
+      // 优先匹配顺序：arch-specific dmg → generic dmg
+      matchers: arch === "arm64"
+        ? [/\.dmg$/i, /arm64/i]
+        : [/\.dmg$/i, /(x64|intel|amd64)/i],
+      prefer: (name) => {
+        const n = String(name || "").toLowerCase();
+        if (!n.endsWith(".dmg")) return 0;
+        if (arch === "arm64") return n.includes("arm64") ? 100 : n.includes("x64") ? 10 : 50;
+        return n.includes("arm64") ? 10 : n.includes("x64") || n.includes("intel") ? 100 : 80;
+      }
+    };
+  }
+  if (process.platform === "win32") {
+    return {
+      platform: "win32",
+      arch: "x64",
+      prefer: (name) => {
+        const n = String(name || "").toLowerCase();
+        if (n.endsWith(".exe") && (n.includes("setup") || n.includes("switchyard"))) return 100;
+        if (n.endsWith("-win.zip") || (n.endsWith(".zip") && n.includes("win"))) return 80;
+        if (n.endsWith(".exe")) return 60;
+        return 0;
+      }
+    };
+  }
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    prefer: () => 0
+  };
+}
+
+function pickReleaseAsset(assets = []) {
+  const pref = platformUpdateAssetPreference();
+  let best = null;
+  let bestScore = 0;
+  for (const asset of assets) {
+    const name = asset?.name || "";
+    const url = asset?.browser_download_url || "";
+    if (!name || !url) continue;
+    const score = pref.prefer(name);
+    if (score > bestScore) {
+      bestScore = score;
+      best = { name, url, size: Number(asset.size) || 0, contentType: asset.content_type || "" };
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+function sendUpdateEvent(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
 async function checkForUpdate() {
   try {
-    const { fetch } = await import('undici');
+    const { fetch } = await import("undici");
     const res = await fetch(GITHUB_RELEASES_API, {
-      headers: { 'User-Agent': 'Switchyard-Desktop' },
-      signal: AbortSignal.timeout(10000)
+      headers: {
+        "User-Agent": "Switchyard-Desktop",
+        Accept: "application/vnd.github+json"
+      },
+      signal: AbortSignal.timeout(15000)
     });
-    if (!res.ok) return;
+    if (!res.ok) return null;
     const data = await res.json();
-    const latestTag = (data.tag_name || '').replace(/^v/, '');
+    const latestTag = String(data.tag_name || "").replace(/^v/, "");
     const currentVersion = app.getVersion();
-    if (latestTag && semverGt(latestTag, currentVersion)) {
-      const info = {
-        current: currentVersion,
-        latest: latestTag,
-        url: data.html_url || 'https://github.com/zhangyinglong3550/switchyard/releases/latest'
-      };
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('app:update-available', info);
-      }
+    if (!latestTag || !semverGt(latestTag, currentVersion)) {
+      pendingUpdateInfo = null;
+      return { ok: true, updateAvailable: false, current: currentVersion, latest: latestTag || currentVersion };
     }
-  } catch (err) {
-    // 网络失败静默处理
+    const asset = pickReleaseAsset(data.assets || []);
+    const info = {
+      current: currentVersion,
+      latest: latestTag,
+      url: data.html_url || "https://github.com/zhangyinglong3550/switchyard/releases/latest",
+      notes: String(data.body || "").slice(0, 2000),
+      publishedAt: data.published_at || "",
+      asset
+    };
+    pendingUpdateInfo = info;
+    sendUpdateEvent("app:update-available", info);
+    return { ok: true, updateAvailable: true, ...info };
+  } catch {
+    return null;
   }
 }
 
 function startUpdateChecker() {
-  checkForUpdate(); // 启动时立即检查一次
+  checkForUpdate();
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   updateCheckTimer = setInterval(() => checkForUpdate(), UPDATE_CHECK_INTERVAL_MS);
   updateCheckTimer.unref?.();
+}
+
+async function downloadUpdateAsset(asset, onProgress) {
+  const { fetch } = await import("undici");
+  const res = await fetch(asset.url, {
+    headers: { "User-Agent": "Switchyard-Desktop", Accept: "application/octet-stream" },
+    signal: AbortSignal.timeout(30 * 60 * 1000),
+    redirect: "follow"
+  });
+  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+  const total = Number(res.headers.get("content-length")) || asset.size || 0;
+  const destDir = path.join(app.getPath("temp"), "switchyard-updates");
+  fs.mkdirSync(destDir, { recursive: true });
+  const dest = path.join(destDir, path.basename(asset.name));
+  if (fs.existsSync(dest)) {
+    try { fs.unlinkSync(dest); } catch {}
+  }
+  const fileStream = createWriteStream(dest);
+  let received = 0;
+  const body = res.body;
+  if (!body) throw new Error("下载响应无 body");
+  // undici body 是 Web ReadableStream；转 Node stream 便于 pipeline
+  const nodeStream = Readable.fromWeb(body);
+  nodeStream.on("data", (chunk) => {
+    received += chunk.length;
+    if (typeof onProgress === "function") {
+      onProgress({
+        phase: "downloading",
+        received,
+        total,
+        percent: total > 0 ? Math.min(99, Math.round((received / total) * 100)) : 0
+      });
+    }
+  });
+  await pipeline(nodeStream, fileStream);
+  if (typeof onProgress === "function") {
+    onProgress({ phase: "downloaded", received, total: total || received, percent: 100, path: dest });
+  }
+  return dest;
+}
+
+async function installMacUpdate(dmgPath, onProgress) {
+  onProgress?.({ phase: "installing", message: "正在挂载安装包…", percent: 100 });
+  const mountRoot = path.join(app.getPath("temp"), `switchyard-mount-${Date.now()}`);
+  fs.mkdirSync(mountRoot, { recursive: true });
+  let mountPoint = "";
+  try {
+    const { stdout } = await execFileAsync("hdiutil", ["attach", dmgPath, "-nobrowse", "-readonly", "-mountroot", mountRoot], {
+      timeout: 120000,
+      maxBuffer: 2 * 1024 * 1024
+    });
+    // 输出最后一行通常含 mount point
+    const lines = String(stdout || "").split("\n").map((l) => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      const parts = line.split(/\t+/);
+      const candidate = parts[parts.length - 1];
+      if (candidate && candidate.startsWith(mountRoot) && fs.existsSync(candidate)) {
+        mountPoint = candidate;
+      }
+    }
+    if (!mountPoint) {
+      const entries = fs.readdirSync(mountRoot);
+      if (entries[0]) mountPoint = path.join(mountRoot, entries[0]);
+    }
+    if (!mountPoint || !fs.existsSync(mountPoint)) {
+      throw new Error("无法解析 DMG 挂载点");
+    }
+    const appEntry = fs.readdirSync(mountPoint).find((name) => name.endsWith(".app"));
+    if (!appEntry) throw new Error("安装包中未找到 .app");
+    const srcApp = path.join(mountPoint, appEntry);
+    const destApp = path.join("/Applications", appEntry);
+    onProgress?.({ phase: "installing", message: `正在安装到 ${destApp}…`, percent: 100 });
+    // 先复制到临时再替换，避免覆盖运行中的 app 时部分写入
+    const staging = path.join(app.getPath("temp"), `${appEntry}.staging-${Date.now()}`);
+    await execFileAsync("rm", ["-rf", staging], { timeout: 60000 }).catch(() => {});
+    await execFileAsync("cp", ["-R", srcApp, staging], { timeout: 180000 });
+    if (fs.existsSync(destApp)) {
+      const backup = `${destApp}.bak-${Date.now()}`;
+      try {
+        await execFileAsync("mv", [destApp, backup], { timeout: 60000 });
+      } catch {
+        // 若权限不足，尝试直接覆盖
+      }
+    }
+    await execFileAsync("rm", ["-rf", destApp], { timeout: 60000 }).catch(() => {});
+    await execFileAsync("mv", [staging, destApp], { timeout: 60000 });
+    onProgress?.({ phase: "installed", message: "安装完成，即将重启…", percent: 100, destApp });
+    return { ok: true, destApp };
+  } finally {
+    if (mountPoint) {
+      try {
+        await execFileAsync("hdiutil", ["detach", mountPoint, "-quiet"], { timeout: 60000 });
+      } catch {
+        try {
+          await execFileAsync("hdiutil", ["detach", mountPoint, "-force"], { timeout: 60000 });
+        } catch {}
+      }
+    }
+    try {
+      fs.rmSync(mountRoot, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+async function installWinUpdate(filePath, onProgress) {
+  onProgress?.({ phase: "installing", message: "正在启动安装程序…", percent: 100 });
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".exe")) {
+    // NSIS 安装器：异步拉起后退出当前进程，安装完成由用户/安装器重启
+    spawn(filePath, [], { detached: true, stdio: "ignore" }).unref();
+    return { ok: true, launchedInstaller: true };
+  }
+  if (lower.endsWith(".zip")) {
+    const extractDir = path.join(app.getPath("temp"), `switchyard-win-${Date.now()}`);
+    fs.mkdirSync(extractDir, { recursive: true });
+    const zip = new AdmZip(filePath);
+    zip.extractAllTo(extractDir, true);
+    onProgress?.({
+      phase: "installed",
+      message: `已解压到 ${extractDir}，请手动替换安装目录后重启。`,
+      percent: 100,
+      extractDir
+    });
+    shell.openPath(extractDir).catch(() => {});
+    return { ok: true, extractDir, manual: true };
+  }
+  throw new Error("不支持的 Windows 安装包格式");
+}
+
+async function downloadAndInstallUpdate(info = pendingUpdateInfo) {
+  if (updateInstallInProgress) return { ok: false, error: "更新正在进行中" };
+  if (!info?.asset?.url) {
+    // 无匹配资源时回退打开发布页
+    if (info?.url) await shell.openExternal(info.url);
+    return { ok: false, error: "当前平台没有可自动安装的安装包，已打开发布页", openedUrl: true };
+  }
+  updateInstallInProgress = true;
+  const report = (payload) => sendUpdateEvent("app:update-progress", payload);
+  try {
+    report({ phase: "starting", percent: 0, message: `开始下载 v${info.latest}…` });
+    const filePath = await downloadUpdateAsset(info.asset, report);
+    let result;
+    if (process.platform === "darwin") {
+      result = await installMacUpdate(filePath, report);
+      // 安装到 /Applications 后 relaunch
+      report({ phase: "relaunching", message: "正在重新打开…", percent: 100 });
+      setTimeout(() => {
+        try {
+          const exe = result?.destApp
+            ? path.join(result.destApp, "Contents", "MacOS", "Switchyard")
+            : process.execPath;
+          if (result?.destApp && fs.existsSync(exe)) {
+            app.relaunch({ execPath: exe });
+          } else {
+            app.relaunch();
+          }
+        } catch {
+          app.relaunch();
+        }
+        app.exit(0);
+      }, 600);
+      return { ok: true, relaunching: true, ...result };
+    }
+    if (process.platform === "win32") {
+      result = await installWinUpdate(filePath, report);
+      if (result.launchedInstaller) {
+        setTimeout(() => app.exit(0), 800);
+        return { ok: true, relaunching: true, ...result };
+      }
+      return { ok: true, ...result };
+    }
+    await shell.openExternal(info.url || info.asset.url);
+    return { ok: false, error: "当前系统暂不支持自动安装，已打开下载链接", openedUrl: true };
+  } catch (err) {
+    const message = err?.message || String(err);
+    report({ phase: "error", message, percent: 0 });
+    return { ok: false, error: message };
+  } finally {
+    updateInstallInProgress = false;
+  }
 }
 
 
@@ -354,14 +624,69 @@ ipcMain.handle("gateway:restart", async () => {
   startCodexArtifactMonitor();
   return result;
 });
-ipcMain.handle('app:version', () => app.getVersion());
-ipcMain.handle('shell:open-url', async (_e, { url } = {}) => {
+ipcMain.handle("app:version", () => app.getVersion());
+ipcMain.handle("shell:open-url", async (_e, { url } = {}) => {
   if (url) await shell.openExternal(url);
   return { ok: true };
 });
-ipcMain.handle('app:check-update', async () => {
-  await checkForUpdate();
-  return { ok: true };
+ipcMain.handle("app:check-update", async () => {
+  const result = await checkForUpdate();
+  return result || { ok: false, error: "检查更新失败" };
+});
+ipcMain.handle("app:install-update", async (_e, payload = {}) => {
+  const info = payload?.latest
+    ? { ...pendingUpdateInfo, ...payload, asset: payload.asset || pendingUpdateInfo?.asset }
+    : pendingUpdateInfo;
+  return downloadAndInstallUpdate(info);
+});
+ipcMain.handle("app:open-release-page", async () => {
+  const url = pendingUpdateInfo?.url || "https://github.com/zhangyinglong3550/switchyard/releases/latest";
+  await shell.openExternal(url);
+  return { ok: true, url };
+});
+
+// ── Anthropic 官方 OAuth ─────────────────────────────────────
+ipcMain.handle("anthropic-oauth:status", (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  return anthropicOAuthStatus({ id: providerId });
+});
+ipcMain.handle("anthropic-oauth:login", async (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  const authFile = anthropicOAuthAuthPath(providerId);
+  const proxyUrl = payload.proxyUrl || "";
+  appendLog({ level: "info", msg: "anthropic oauth login started", providerId: providerId || "default" });
+  const result = await runAnthropicOAuthLogin({
+    openUrl: (url) => shell.openExternal(url),
+    proxyUrl,
+    authFile
+  });
+  if (result.ok) {
+    appendLog({ level: "info", msg: "anthropic oauth login ok", email: result.email || "" });
+  } else {
+    appendLog({ level: "warn", msg: "anthropic oauth login failed", error: result.error || "" });
+  }
+  return result;
+});
+ipcMain.handle("anthropic-oauth:logout", (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  const authFile = anthropicOAuthAuthPath(providerId);
+  const result = clearAnthropicOAuthFile(authFile);
+  // 同时清默认文件（若不同）
+  const fallback = anthropicOAuthAuthPath();
+  if (fallback !== authFile) clearAnthropicOAuthFile(fallback);
+  appendLog({ level: "info", msg: "anthropic oauth logout", authFile });
+  return result;
+});
+ipcMain.handle("anthropic-oauth:import-refresh", async (_e, payload = {}) => {
+  const refreshToken = String(payload.refreshToken || payload.refresh_token || "").trim();
+  if (!refreshToken) throw new Error("请提供 refresh_token");
+  const providerId = payload.providerId || payload.id || "";
+  const proxyUrl = payload.proxyUrl || "";
+  const tokens = await refreshAnthropicTokens(refreshToken, { proxyUrl });
+  const authFile = anthropicOAuthAuthPath(providerId);
+  writeAnthropicOAuthFile(tokens, authFile);
+  appendLog({ level: "info", msg: "anthropic oauth import refresh ok", email: tokens.email || "" });
+  return { ok: true, email: tokens.email, expiresAt: tokens.expiresAt, authFile };
 });
 ipcMain.handle("gateway:reload", () => {
   const result = reloadConfig();
@@ -1137,6 +1462,10 @@ function providerDiagnostic(provider) {
     const auth = readCodexOAuthAuth({ provider });
     keySource = "Codex OAuth";
     keyOk = auth.ok;
+  } else if (isAnthropicOAuthProvider(provider)) {
+    const auth = readAnthropicOAuthAuth({ provider });
+    keySource = auth.email ? `Claude OAuth · ${auth.email}` : "Claude OAuth";
+    keyOk = Boolean(auth.ok && (auth.accessToken || auth.refreshToken));
   } else if (provider.authMode === "none") {
     keySource = "无需认证";
     keyOk = true;

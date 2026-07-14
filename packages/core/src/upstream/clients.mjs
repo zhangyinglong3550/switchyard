@@ -8,6 +8,13 @@ import { ProxyAgent } from "undici";
 import { safeJsonParse } from "../utils.mjs";
 import { getProviderKeychainSecret, hasKeychainSecret } from "../keychain-store.mjs";
 import { accountPoolReady, isAccountPoolProvider } from "../account-pool/index.mjs";
+import {
+  ANTHROPIC_API_VERSION,
+  ANTHROPIC_OAUTH_BETA,
+  anthropicOAuthAuthPath,
+  ensureAnthropicAccessToken,
+  readAnthropicOAuthFile
+} from "../oauth-anthropic.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
@@ -30,6 +37,13 @@ export function isCodexOAuthProvider(provider) {
   return provider?.authMode === "codex_oauth" ||
     provider?.authProvider === "codex_oauth" ||
     provider?.providerType === "codex_oauth";
+}
+
+export function isAnthropicOAuthProvider(provider) {
+  return provider?.authMode === "anthropic_oauth" ||
+    provider?.authProvider === "anthropic_oauth" ||
+    provider?.providerType === "anthropic_oauth" ||
+    provider?.presetId === "anthropic-oauth";
 }
 
 export { isAccountPoolProvider };
@@ -106,8 +120,44 @@ export function codexOAuthHeaders(provider) {
   };
 }
 
+export function readAnthropicOAuthAuth({ provider = null, authFile } = {}) {
+  if (provider?._anthropicAccessToken) {
+    return {
+      ok: true,
+      authFile: "(memory)",
+      accessToken: provider._anthropicAccessToken,
+      email: provider._anthropicEmail || "",
+      accountId: provider._anthropicAccountId || ""
+    };
+  }
+  const file = authFile || anthropicOAuthAuthPath(provider?.id || "");
+  let auth = readAnthropicOAuthFile(file);
+  if (!auth.ok && file !== anthropicOAuthAuthPath()) {
+    auth = readAnthropicOAuthFile(anthropicOAuthAuthPath());
+  }
+  return auth;
+}
+
+/**
+ * 同步读取当前磁盘上的 Anthropic OAuth token（可能已过期）。
+ * 异步刷新请用 ensureAnthropicAccessToken。
+ */
+export function anthropicOAuthHeaders(provider) {
+  const auth = readAnthropicOAuthAuth({ provider });
+  if (!auth.ok || !auth.accessToken) return {};
+  return {
+    Authorization: `Bearer ${auth.accessToken}`,
+    "anthropic-version": ANTHROPIC_API_VERSION,
+    "anthropic-beta": ANTHROPIC_OAUTH_BETA,
+    "User-Agent": "claude-cli/2.0.0 (external, switchyard)"
+  };
+}
+
+export { ensureAnthropicAccessToken, anthropicOAuthAuthPath };
+
 export function providerAuthHeaders(provider, scheme) {
   if (isCodexOAuthProvider(provider)) return codexOAuthHeaders(provider);
+  if (isAnthropicOAuthProvider(provider)) return anthropicOAuthHeaders(provider);
   const key = resolveApiKey(provider);
   if (!key) return {};
   if (scheme === "anthropic") return { "x-api-key": key, "anthropic-version": "2023-06-01" };
@@ -246,6 +296,26 @@ export async function callOpenAIResponses(provider, body, opts) {
 
 export async function callAnthropicMessages(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/v1/messages");
+  // OAuth 在真正发请求前尽量刷新 access token，避免 401
+  if (isAnthropicOAuthProvider(provider) && !provider._anthropicAccessToken) {
+    try {
+      const ensured = await ensureAnthropicAccessToken({
+        provider,
+        proxyUrl: provider.proxyUrl || opts?.proxyUrl || "",
+        fetchImpl: opts?.fetchImpl
+      });
+      if (ensured.ok && ensured.accessToken) {
+        provider = {
+          ...provider,
+          _anthropicAccessToken: ensured.accessToken,
+          _anthropicEmail: ensured.email || "",
+          _anthropicAccountId: ensured.accountId || ""
+        };
+      }
+    } catch {
+      // 刷新失败时仍用磁盘上的 access token 尝试一次
+    }
+  }
   return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), opts);
 }
 
@@ -253,6 +323,10 @@ export function providerReady(provider) {
   if (!provider?.baseUrl) return false;
   if (isAccountPoolProvider(provider)) return accountPoolReady(provider);
   if (isCodexOAuthProvider(provider)) return readCodexOAuthAuth({ provider }).ok;
+  if (isAnthropicOAuthProvider(provider)) {
+    const auth = readAnthropicOAuthAuth({ provider });
+    return Boolean(auth.ok && (auth.accessToken || auth.refreshToken));
+  }
   if (provider.authMode === "none") return true;
   if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(provider);
   if (provider.apiKey) return true;

@@ -156,6 +156,19 @@ function normalizeKnownProvider(provider) {
       providerType: "codex_oauth"
     };
   }
+  const looksLikeAnthropicOAuth =
+    withRouting.presetId === "anthropic-oauth" ||
+    withRouting.authMode === "anthropic_oauth" ||
+    withRouting.providerType === "anthropic_oauth";
+  if (looksLikeAnthropicOAuth) {
+    return {
+      ...withRouting,
+      apiFormat: "anthropic_messages",
+      authMode: "anthropic_oauth",
+      providerType: "anthropic_oauth",
+      baseUrl: withRouting.baseUrl || "https://api.anthropic.com"
+    };
+  }
   const looksLikeXiaomiMiMo = baseUrl.includes("xiaomimimo.com") || id.includes("xiaomi") || id.includes("mimo") || name.includes("xiaomi") || name.includes("mimo");
   if (looksLikeXiaomiMiMo && baseUrl.endsWith("/anthropic")) {
     return { ...withRouting, apiFormat: "anthropic_messages" };

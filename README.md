@@ -1,9 +1,9 @@
 # Switchyard
 
 > 打破 AI 代理的模型孤岛。一份配置，所有模型，所有代理，无缝协作。  
-> **2.0**：本机 **账号池**（Grok / Codex 多号 OAuth 轮询 + 额度）· Claude Paper Light UI。
+> **2.1**：应用内 **自动更新**（下载安装并重开）· **Anthropic 官方 OAuth** · 账号池（Grok / Codex）· Claude Paper Light UI。
 
-[![version](https://img.shields.io/badge/version-2.0.0-blue)]()
+[![version](https://img.shields.io/badge/version-2.1.0-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 
@@ -159,13 +159,15 @@
 
 ### 下载安装
 
-从 [Releases v2.0.0](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.0.0) 下载：
+从 [Releases v2.1.0](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.1.0) 下载：
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-2.0.0-arm64.dmg` |
-| macOS (Intel / x64) | `Switchyard-2.0.0.dmg` |
-| Windows (x64) | `Switchyard Setup 2.0.0.exe` 或 `Switchyard-2.0.0-win.zip` |
+| macOS (Apple Silicon) | `Switchyard-2.1.0-arm64.dmg` |
+| macOS (Intel / x64) | `Switchyard-2.1.0.dmg` |
+| Windows (x64) | `Switchyard Setup 2.1.0.exe` 或 `Switchyard-2.1.0-win.zip` |
+
+> 已安装 2.0+ 桌面版时，顶栏会提示更新；点击后可下载安装并重新打开。
 
 > ### ⚠️ macOS 用户必读
 >

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.0 — 2026-07-14
+
+### Highlights
+
+- **应用内自动更新**：启动时与每 4 小时检查 GitHub Release；发现新版本后顶栏显示更新按钮，点击后**下载安装包并安装，然后重新打开**（macOS DMG / Windows Setup）。
+- **Anthropic 官方 OAuth**：新增供应商模板「Anthropic Claude（官方 OAuth）」，浏览器完成 Claude 登录后即可调用官方 Messages API；凭证存 `~/.switchyard/oauth/`。
+
+### Auto Update
+
+- 保留定期检测；比较 semver，当前版本 < 最新 Release 时提示。
+- 按平台选择资源：`Switchyard-{ver}-arm64.dmg` / `Switchyard-{ver}.dmg` / `Switchyard Setup {ver}.exe`。
+- macOS：挂载 DMG → 安装到 `/Applications` → `app.relaunch`。
+- Windows：拉起 NSIS 安装器后退出当前进程。
+- 无匹配安装包时回退打开发布页。
+
+### Anthropic OAuth
+
+- 认证方式 `anthropic_oauth`：PKCE + `claude.ai/oauth/authorize`，回调 `http://localhost:54545/callback`。
+- 请求头使用 `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`（非 x-api-key）。
+- 支持浏览器登录、状态刷新、退出登录、粘贴 `refresh_token` 导入。
+- 发请求前自动刷新即将过期的 access token。
+
+### Docs / Notes
+
+- 小版本升级；配置兼容 2.0.0。
+- OAuth 与账号池 token 仅本机，请勿提交 `~/.switchyard/`。
+
 ## 2.0.0 — 2026-07-14
 
 ### Highlights

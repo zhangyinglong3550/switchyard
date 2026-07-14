@@ -106,12 +106,12 @@ export const PROVIDER_PRESETS = [
   },
   {
     id: "anthropic",
-    label: "Anthropic Claude",
+    label: "Anthropic Claude（API Key）",
     providerId: "anthropic",
     name: "Anthropic Claude",
     apiFormat: "anthropic_messages",
     baseUrl: "https://api.anthropic.com",
-    authModes: ["api_key"],
+    authModes: ["api_key", "anthropic_oauth"],
     defaultAuthMode: "api_key",
     apiKeyEnv: "ANTHROPIC_API_KEY",
     dashboardUrl: "https://console.anthropic.com/settings/keys",
@@ -119,6 +119,28 @@ export const PROVIDER_PRESETS = [
       { id: "claude-opus-4-5", displayName: "Claude Opus 4.5", contextWindow: 200000, maxOutputTokens: 32000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { tools: true, stream: true, multimodal: true, images: true } }
+    ]
+  },
+  {
+    id: "anthropic-oauth",
+    label: "Anthropic Claude（官方 OAuth）",
+    providerId: "anthropic-oauth",
+    name: "Anthropic Claude OAuth",
+    apiFormat: "anthropic_messages",
+    baseUrl: "https://api.anthropic.com",
+    authModes: ["anthropic_oauth"],
+    defaultAuthMode: "anthropic_oauth",
+    experimental: true,
+    riskLevel: "medium",
+    riskNote: "通过本地网关复用 Claude / Anthropic 官方 OAuth（Claude Pro/Max 订阅）登录态。请遵守 Anthropic 服务条款；凭证仅保存在本机 ~/.switchyard/oauth/。",
+    dashboardUrl: "https://claude.ai",
+    note: "浏览器完成 Claude 官方 OAuth 登录后即可调用 Messages API，无需 API Key。",
+    models: [
+      { id: "claude-opus-4-5", displayName: "Claude Opus 4.5", contextWindow: 200000, maxOutputTokens: 32000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", contextWindow: 200000, maxOutputTokens: 32000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } }
     ]
   },
   {
@@ -768,6 +790,8 @@ export const PROVIDER_PRESETS = [
 export const AUTH_MODE_LABELS = {
   api_key: "API Key",
   codex_oauth: "Codex OAuth（复用 codex login）",
+  anthropic_oauth: "Anthropic 官方 OAuth（Claude 登录）",
+  account_pool: "账号池（多账号）",
   none: "无需认证"
 };
 
