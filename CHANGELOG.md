@@ -1,11 +1,20 @@
 # Changelog
 
+## 2.1.1 — 2026-07-14
+
+### Fix
+
+- **Anthropic 官方认证对齐 CC Switch**：主路径改为复用本机 Claude Code 登录（Keychain / `.credentials.json` 的 `claudeAiOauth`），浏览器 OAuth 降为高级选项；不再要求用户必须走自建登录。
+
 ## 2.1.0 — 2026-07-14
 
 ### Highlights
 
 - **应用内自动更新**：启动时与每 4 小时检查 GitHub Release；发现新版本后顶栏显示更新按钮，点击后**下载安装包并安装，然后重新打开**（macOS DMG / Windows Setup）。
-- **Anthropic 官方 OAuth**：新增供应商模板「Anthropic Claude（官方 OAuth）」，浏览器完成 Claude 登录后即可调用官方 Messages API；凭证存 `~/.switchyard/oauth/`。
+- **Anthropic 官方认证（对齐 CC Switch）**：新增供应商模板「Anthropic Claude（官方 / Claude Code 登录）」。
+  - **主路径**：复用本机 Claude Code 登录态（macOS Keychain `Claude Code-credentials` / `~/.claude/.credentials.json` 的 `claudeAiOauth`）。
+  - **辅路径**：浏览器 PKCE / 粘贴 `refresh_token`（写入 `~/.switchyard/oauth/`，不覆盖 Claude Code 原凭证）。
+  - 请求头：`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`。
 
 ### Auto Update
 

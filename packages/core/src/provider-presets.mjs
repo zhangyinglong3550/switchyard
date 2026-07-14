@@ -123,18 +123,18 @@ export const PROVIDER_PRESETS = [
   },
   {
     id: "anthropic-oauth",
-    label: "Anthropic Claude（官方 OAuth）",
+    label: "Anthropic Claude（官方 / Claude Code 登录）",
     providerId: "anthropic-oauth",
-    name: "Anthropic Claude OAuth",
+    name: "Anthropic Claude Official",
     apiFormat: "anthropic_messages",
     baseUrl: "https://api.anthropic.com",
     authModes: ["anthropic_oauth"],
     defaultAuthMode: "anthropic_oauth",
     experimental: true,
     riskLevel: "medium",
-    riskNote: "通过本地网关复用 Claude / Anthropic 官方 OAuth（Claude Pro/Max 订阅）登录态。请遵守 Anthropic 服务条款；凭证仅保存在本机 ~/.switchyard/oauth/。",
-    dashboardUrl: "https://claude.ai",
-    note: "浏览器完成 Claude 官方 OAuth 登录后即可调用 Messages API，无需 API Key。",
+    riskNote: "对齐 CC Switch「Claude Official」：复用本机 Claude Code 登录态（Keychain / ~/.claude/.credentials.json）经本地网关调用官方 Messages API。请遵守 Anthropic 服务条款。",
+    dashboardUrl: "https://www.anthropic.com/claude-code",
+    note: "默认复用本机 claude login；也可在高级选项里浏览器 OAuth 或粘贴 refresh_token。",
     models: [
       { id: "claude-opus-4-5", displayName: "Claude Opus 4.5", contextWindow: 200000, maxOutputTokens: 32000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
@@ -790,7 +790,7 @@ export const PROVIDER_PRESETS = [
 export const AUTH_MODE_LABELS = {
   api_key: "API Key",
   codex_oauth: "Codex OAuth（复用 codex login）",
-  anthropic_oauth: "Anthropic 官方 OAuth（Claude 登录）",
+  anthropic_oauth: "Anthropic 官方（复用 Claude Code 登录）",
   account_pool: "账号池（多账号）",
   none: "无需认证"
 };

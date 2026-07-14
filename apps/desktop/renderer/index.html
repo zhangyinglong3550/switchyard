@@ -717,25 +717,32 @@
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
       <div class="callout" id="provider-anthropic-oauth-panel" style="display:none;">
-        <div class="callout-title">Claude 官方 OAuth</div>
+        <div class="callout-title">Claude Official（对齐 CC Switch）</div>
         <div class="callout-body">
-          浏览器登录 Claude（Pro / Max 订阅）后，Switchyard 用官方 OAuth 调用 <code>api.anthropic.com</code> Messages API。
-          凭证仅存本机 <code>~/.switchyard/oauth/</code>，不写入 config.json。
+          与 CC Switch「Claude Official」相同：优先读取本机 <strong>Claude Code 登录态</strong>
+          （macOS Keychain <code>Claude Code-credentials</code>，或 <code>~/.claude/.credentials.json</code> 中的 <code>claudeAiOauth</code>）。
+          请求走官方 <code>api.anthropic.com</code>，使用 <code>Authorization: Bearer</code> + <code>anthropic-beta: oauth-2025-04-20</code>。
+        </div>
+        <div class="callout-body" style="margin-top:8px;">
+          若未检测到登录：在终端执行 <code>claude</code> 按提示登录后点「刷新状态」。
         </div>
         <div id="provider-anthropic-oauth-status" style="margin-top:10px;" class="tiny">检查登录状态…</div>
         <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
-          <button class="btn primary" type="button" id="btn-anthropic-oauth-login">浏览器登录 Claude</button>
-          <button class="btn" type="button" id="btn-anthropic-oauth-refresh-status">刷新状态</button>
-          <button class="btn" type="button" id="btn-anthropic-oauth-logout">退出登录</button>
+          <button class="btn primary" type="button" id="btn-anthropic-oauth-refresh-status">刷新状态</button>
+          <button class="btn" type="button" id="btn-anthropic-oauth-logout">清除 Switchyard 缓存凭证</button>
         </div>
         <details style="margin-top:12px;">
-          <summary class="tiny muted">高级：粘贴 refresh_token 导入</summary>
+          <summary class="tiny muted">高级：浏览器 OAuth / 粘贴 refresh_token（不改 Claude Code 原登录）</summary>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap; gap:8px;">
+            <button class="btn" type="button" id="btn-anthropic-oauth-login">浏览器登录 Claude</button>
+          </div>
           <label style="margin-top:8px;">refresh_token
-            <input class="field" id="provider-anthropic-refresh-token" type="password" autocomplete="off" placeholder="sk-ant-ort… 或官方 refresh token">
+            <input class="field" id="provider-anthropic-refresh-token" type="password" autocomplete="off" placeholder="官方 refresh token">
           </label>
           <div class="actions" style="justify-content:flex-start; margin-top:8px;">
             <button class="btn" type="button" id="btn-anthropic-oauth-import">导入并换取 access_token</button>
           </div>
+          <div class="tiny muted" style="margin-top:6px;">高级凭证写入 <code>~/.switchyard/oauth/</code>，不会覆盖 Claude Code 的 Keychain / .credentials.json。</div>
         </details>
       </div>
       <div class="callout" id="provider-account-pool-panel" style="display:none;">

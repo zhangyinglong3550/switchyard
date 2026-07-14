@@ -10,7 +10,10 @@ import {
   readAnthropicOAuthFile,
   writeAnthropicOAuthFile,
   clearAnthropicOAuthFile,
-  anthropicOAuthAuthPath
+  anthropicOAuthAuthPath,
+  parseClaudeCredentialsJson,
+  normalizeExpiresAt,
+  resolveAnthropicOAuthAuth
 } from "../src/oauth-anthropic.mjs";
 
 test("generatePKCE returns verifier and s256 challenge", () => {
@@ -36,6 +39,44 @@ test("buildAnthropicAuthUrl includes client_id and pkce", () => {
   assert.ok(u.searchParams.get("scope")?.includes("user:inference"));
 });
 
+test("parseClaudeCredentialsJson matches CC Switch claudeAiOauth shape", () => {
+  const ms = Date.now() + 3600_000;
+  const parsed = parseClaudeCredentialsJson(
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "sk-ant-oat-test",
+        refreshToken: "sk-ant-ort-test",
+        expiresAt: ms,
+        emailAddress: "u@example.com",
+        accountUuid: "acc-uuid"
+      }
+    }),
+    "test"
+  );
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.accessToken, "sk-ant-oat-test");
+  assert.equal(parsed.refreshToken, "sk-ant-ort-test");
+  assert.equal(parsed.email, "u@example.com");
+  assert.equal(parsed.accountId, "acc-uuid");
+  assert.ok(parsed.expiresAt.startsWith("20"));
+
+  const alt = parseClaudeCredentialsJson(
+    JSON.stringify({
+      "claude.ai_oauth": { accessToken: "tok2", expiresAt: Math.floor(ms / 1000) }
+    })
+  );
+  assert.equal(alt.ok, true);
+  assert.equal(alt.accessToken, "tok2");
+});
+
+test("normalizeExpiresAt handles seconds and millis", () => {
+  const sec = Math.floor(Date.now() / 1000) + 1000;
+  const iso = normalizeExpiresAt(sec);
+  assert.ok(iso.includes("T"));
+  const ms = Date.now() + 1_000_000;
+  assert.equal(normalizeExpiresAt(ms), new Date(ms).toISOString());
+});
+
 test("write/read/clear anthropic oauth file", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sy-oauth-"));
   const file = path.join(dir, "anthropic.json");
@@ -58,6 +99,18 @@ test("write/read/clear anthropic oauth file", () => {
   assert.equal(cleared.ok, true);
   assert.equal(readAnthropicOAuthFile(file).ok, false);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("resolveAnthropicOAuthAuth prefers memory binding", () => {
+  const auth = resolveAnthropicOAuthAuth({
+    provider: {
+      _anthropicAccessToken: "mem-token",
+      _anthropicEmail: "m@example.com"
+    }
+  });
+  assert.equal(auth.ok, true);
+  assert.equal(auth.source, "memory");
+  assert.equal(auth.accessToken, "mem-token");
 });
 
 test("anthropicOAuthAuthPath defaults and per-provider", () => {

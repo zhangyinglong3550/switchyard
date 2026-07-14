@@ -13,7 +13,7 @@ import {
   ANTHROPIC_OAUTH_BETA,
   anthropicOAuthAuthPath,
   ensureAnthropicAccessToken,
-  readAnthropicOAuthFile
+  resolveAnthropicOAuthAuth
 } from "../oauth-anthropic.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
@@ -121,21 +121,7 @@ export function codexOAuthHeaders(provider) {
 }
 
 export function readAnthropicOAuthAuth({ provider = null, authFile } = {}) {
-  if (provider?._anthropicAccessToken) {
-    return {
-      ok: true,
-      authFile: "(memory)",
-      accessToken: provider._anthropicAccessToken,
-      email: provider._anthropicEmail || "",
-      accountId: provider._anthropicAccountId || ""
-    };
-  }
-  const file = authFile || anthropicOAuthAuthPath(provider?.id || "");
-  let auth = readAnthropicOAuthFile(file);
-  if (!auth.ok && file !== anthropicOAuthAuthPath()) {
-    auth = readAnthropicOAuthFile(anthropicOAuthAuthPath());
-  }
-  return auth;
+  return resolveAnthropicOAuthAuth({ provider, authFile });
 }
 
 /**

@@ -1,5 +1,10 @@
-// Anthropic / Claude 官方 OAuth（对齐 CLIProxyAPI / Claude Code public client）
+// Anthropic / Claude 官方 OAuth
+// 主路径对齐 CC Switch：复用本机 Claude Code 登录态
+//   1) macOS Keychain service "Claude Code-credentials"
+//   2) ~/.claude/.credentials.json  → claudeAiOauth / claude.ai_oauth
+// 辅路径：Switchyard 自管 ~/.switchyard/oauth/ + 可选浏览器 PKCE 登录
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -15,6 +20,7 @@ export const ANTHROPIC_OAUTH_SCOPES =
   "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 export const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
 export const ANTHROPIC_API_VERSION = "2023-06-01";
+export const CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
 const PROXY_AGENTS = new Map();
 const refreshInFlight = new Map();
@@ -33,6 +39,11 @@ function proxyDispatcher(proxyUrl) {
   return PROXY_AGENTS.get(normalized);
 }
 
+/** Claude Code 凭据文件（CC Switch 同源） */
+export function claudeCredentialsPath() {
+  return path.join(os.homedir(), ".claude", ".credentials.json");
+}
+
 export function anthropicOAuthAuthPath(providerId = "") {
   const dir = path.join(os.homedir(), ".switchyard", "oauth");
   const id = String(providerId || "").trim();
@@ -40,6 +51,111 @@ export function anthropicOAuthAuthPath(providerId = "") {
     return path.join(dir, `anthropic-${id}.json`);
   }
   return path.join(dir, "anthropic.json");
+}
+
+/**
+ * 归一化 expiresAt：支持 Unix 秒/毫秒数字、ISO 字符串
+ * @returns {string} ISO 字符串，无法解析时返回 ""
+ */
+export function normalizeExpiresAt(expiresAt) {
+  if (expiresAt == null || expiresAt === "") return "";
+  if (typeof expiresAt === "number" && Number.isFinite(expiresAt)) {
+    const ms = expiresAt > 1e12 ? expiresAt : expiresAt * 1000;
+    return new Date(ms).toISOString();
+  }
+  const s = String(expiresAt).trim();
+  if (!s) return "";
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    const ms = n > 1e12 ? n : n * 1000;
+    return new Date(ms).toISOString();
+  }
+  const ts = Date.parse(s);
+  if (Number.isFinite(ts)) return new Date(ts).toISOString();
+  return s;
+}
+
+/**
+ * 解析 Claude Code 凭据 JSON（Keychain 与文件共用）。
+ * 对齐 CC Switch subscription.rs：claudeAiOauth / claude.ai_oauth
+ */
+export function parseClaudeCredentialsJson(content, source = "file") {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(content || ""));
+  } catch (err) {
+    return { ok: false, reason: `invalid-json: ${err?.message || err}`, source };
+  }
+  const entry =
+    parsed?.claudeAiOauth ||
+    parsed?.["claude.ai_oauth"] ||
+    parsed?.claude_ai_oauth ||
+    null;
+  if (!entry || typeof entry !== "object") {
+    return { ok: false, reason: "missing-claudeAiOauth", source };
+  }
+  const accessToken = String(
+    entry.accessToken || entry.access_token || entry.token || ""
+  ).trim();
+  const refreshToken = String(
+    entry.refreshToken || entry.refresh_token || ""
+  ).trim();
+  if (!accessToken && !refreshToken) {
+    return { ok: false, reason: "missing-tokens", source };
+  }
+  const expiresAt = normalizeExpiresAt(entry.expiresAt ?? entry.expires_at ?? entry.expire ?? "");
+  return {
+    ok: true,
+    source,
+    authFile: source,
+    accessToken,
+    refreshToken,
+    expiresAt,
+    email: String(entry.emailAddress || entry.email || entry.accountEmailAddress || "").trim(),
+    accountId: String(entry.accountUuid || entry.accountId || entry.account_uuid || "").trim(),
+    organizationId: String(entry.organizationUuid || entry.organizationId || "").trim(),
+    subscriptionType: String(entry.subscriptionType || entry.subscription_type || "").trim()
+  };
+}
+
+function readClaudeCredentialsFromKeychain() {
+  if (process.platform !== "darwin") return null;
+  try {
+    const out = execFileSync(
+      "security",
+      ["find-generic-password", "-s", CLAUDE_CODE_KEYCHAIN_SERVICE, "-w"],
+      { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    const json = String(out || "").trim();
+    if (!json) return null;
+    const parsed = parseClaudeCredentialsJson(json, "claude-code-keychain");
+    return parsed.ok ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeCredentialsFromFile(filePath = claudeCredentialsPath()) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { ok: false, reason: "missing-auth-file", source: "claude-code-file", authFile: filePath };
+    }
+    const content = fs.readFileSync(filePath, "utf8");
+    const parsed = parseClaudeCredentialsJson(content, "claude-code-file");
+    if (!parsed.ok) return { ...parsed, authFile: filePath };
+    return { ...parsed, authFile: filePath };
+  } catch (err) {
+    return { ok: false, reason: err?.message || "read-failed", source: "claude-code-file", authFile: filePath };
+  }
+}
+
+/**
+ * 读取 Claude Code 官方登录态（CC Switch 同序：Keychain → 文件）
+ */
+export function readClaudeCodeCredentials() {
+  const fromKeychain = readClaudeCredentialsFromKeychain();
+  if (fromKeychain?.ok) return fromKeychain;
+  return readClaudeCredentialsFromFile();
 }
 
 export function generatePKCE() {
@@ -167,8 +283,13 @@ export function ensureOAuthDir() {
 
 export function readAnthropicOAuthFile(filePath = anthropicOAuthAuthPath()) {
   try {
-    if (!fs.existsSync(filePath)) return { ok: false, reason: "missing-auth-file", authFile: filePath };
+    if (!fs.existsSync(filePath)) return { ok: false, reason: "missing-auth-file", authFile: filePath, source: "switchyard" };
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    // 兼容 Claude Code 形状（若用户直接复制了 .credentials.json）
+    if (raw?.claudeAiOauth || raw?.["claude.ai_oauth"]) {
+      const parsed = parseClaudeCredentialsJson(JSON.stringify(raw), "switchyard-claude-shape");
+      if (parsed.ok) return { ...parsed, authFile: filePath, source: "switchyard" };
+    }
     const accessToken =
       raw?.access_token ||
       raw?.accessToken ||
@@ -182,22 +303,63 @@ export function readAnthropicOAuthFile(filePath = anthropicOAuthAuthPath()) {
       raw?.token_data?.refresh_token ||
       "";
     if (!accessToken && !refreshToken) {
-      return { ok: false, reason: "missing-tokens", authFile: filePath };
+      return { ok: false, reason: "missing-tokens", authFile: filePath, source: "switchyard" };
     }
     return {
       ok: true,
+      source: "switchyard",
       authFile: filePath,
       accessToken: String(accessToken || "").trim(),
       refreshToken: String(refreshToken || "").trim(),
-      expiresAt: String(raw?.expires_at || raw?.expiresAt || raw?.expire || raw?.token_data?.expired || "").trim(),
+      expiresAt: normalizeExpiresAt(raw?.expires_at || raw?.expiresAt || raw?.expire || raw?.token_data?.expired || ""),
       email: String(raw?.email || raw?.account?.email_address || raw?.token_data?.email || "").trim(),
       accountId: String(raw?.account_id || raw?.accountId || raw?.account?.uuid || "").trim(),
       organizationId: String(raw?.organization_id || raw?.organizationId || "").trim(),
       updatedAt: String(raw?.updated_at || raw?.last_refresh || "").trim()
     };
   } catch (err) {
-    return { ok: false, reason: err?.message || "invalid-auth-file", authFile: filePath };
+    return { ok: false, reason: err?.message || "invalid-auth-file", authFile: filePath, source: "switchyard" };
   }
+}
+
+/**
+ * 解析 Anthropic OAuth 凭证（优先级对齐 CC Switch + 本地扩展）
+ * 1. provider 内存绑定
+ * 2. Claude Code Keychain / ~/.claude/.credentials.json
+ * 3. Switchyard 自管 oauth 文件
+ */
+export function resolveAnthropicOAuthAuth({ provider = null, authFile } = {}) {
+  if (provider?._anthropicAccessToken) {
+    return {
+      ok: true,
+      source: "memory",
+      authFile: "(memory)",
+      accessToken: provider._anthropicAccessToken,
+      refreshToken: provider._anthropicRefreshToken || "",
+      email: provider._anthropicEmail || "",
+      accountId: provider._anthropicAccountId || "",
+      expiresAt: provider._anthropicExpiresAt || ""
+    };
+  }
+  const claude = readClaudeCodeCredentials();
+  if (claude.ok && (claude.accessToken || claude.refreshToken)) {
+    return claude;
+  }
+  const file = authFile || anthropicOAuthAuthPath(provider?.id || "");
+  let auth = readAnthropicOAuthFile(file);
+  if (!auth.ok && file !== anthropicOAuthAuthPath()) {
+    auth = readAnthropicOAuthFile(anthropicOAuthAuthPath());
+  }
+  if (auth.ok) return auth;
+  // 两者都失败时，保留 Claude 侧原因便于 UI 提示
+  return {
+    ok: false,
+    reason: claude.reason || auth.reason || "missing-credentials",
+    source: claude.source || auth.source || "none",
+    authFile: claude.authFile || auth.authFile || claudeCredentialsPath(),
+    claudeReason: claude.reason,
+    switchyardReason: auth.reason
+  };
 }
 
 export function writeAnthropicOAuthFile(tokens, filePath = anthropicOAuthAuthPath()) {
@@ -231,13 +393,16 @@ export function clearAnthropicOAuthFile(filePath = anthropicOAuthAuthPath()) {
 
 function tokenNearExpiry(expiresAt, skewMs = 5 * 60 * 1000) {
   if (!expiresAt) return false;
-  const ts = Date.parse(expiresAt);
+  const iso = normalizeExpiresAt(expiresAt);
+  const ts = Date.parse(iso || expiresAt);
   if (!Number.isFinite(ts)) return false;
   return ts <= Date.now() + skewMs;
 }
 
 /**
- * 读取可用 access token；必要时用 refresh_token 刷新并回写。
+ * 读取可用 access token；必要时用 refresh_token 刷新。
+ * - Claude Code 凭据：只读，刷新后缓存到 Switchyard oauth 文件（不改 Claude 原文件）
+ * - Switchyard 自管：刷新后回写
  */
 export async function ensureAnthropicAccessToken({
   provider = null,
@@ -246,33 +411,47 @@ export async function ensureAnthropicAccessToken({
   fetchImpl,
   forceRefresh = false
 } = {}) {
-  if (provider?._anthropicAccessToken) {
+  if (provider?._anthropicAccessToken && !forceRefresh) {
     return {
       ok: true,
+      source: "memory",
       accessToken: provider._anthropicAccessToken,
       email: provider._anthropicEmail || "",
       accountId: provider._anthropicAccountId || "",
       authFile: "(memory)"
     };
   }
-  const file = authFile || anthropicOAuthAuthPath(provider?.id || provider?.anthropicOAuthFile || "");
-  const current = readAnthropicOAuthFile(file);
+  const current = resolveAnthropicOAuthAuth({ provider, authFile });
   if (!current.ok) return current;
 
   const needsRefresh = forceRefresh || !current.accessToken || tokenNearExpiry(current.expiresAt);
   if (!needsRefresh) {
     return {
       ok: true,
+      source: current.source,
       accessToken: current.accessToken,
       refreshToken: current.refreshToken,
       email: current.email,
       accountId: current.accountId,
       expiresAt: current.expiresAt,
-      authFile: file
+      authFile: current.authFile
     };
   }
   if (!current.refreshToken) {
-    return { ok: false, reason: "missing-refresh-token", authFile: file };
+    // 无 refresh 时仍尝试用现有 access（与 CC Switch 行为一致）
+    if (current.accessToken && !forceRefresh) {
+      return {
+        ok: true,
+        source: current.source,
+        accessToken: current.accessToken,
+        email: current.email,
+        accountId: current.accountId,
+        expiresAt: current.expiresAt,
+        authFile: current.authFile,
+        stale: true
+      };
+    }
+    return { ok: false, reason: "missing-refresh-token", source: current.source, authFile: current.authFile };
   }
   try {
     const refreshed = await refreshAnthropicTokens(current.refreshToken, {
@@ -284,31 +463,35 @@ export async function ensureAnthropicAccessToken({
       email: refreshed.email || current.email,
       accountId: refreshed.accountId || current.accountId
     };
-    writeAnthropicOAuthFile(merged, file);
+    // 回写 Switchyard 缓存；不修改 Claude Code Keychain/原文件
+    const cacheFile = authFile || anthropicOAuthAuthPath(provider?.id || "");
+    writeAnthropicOAuthFile(merged, cacheFile);
     return {
       ok: true,
+      source: current.source?.startsWith("claude-code") ? "claude-code-refreshed" : "switchyard",
       accessToken: merged.accessToken,
       refreshToken: merged.refreshToken,
       email: merged.email,
       accountId: merged.accountId,
       expiresAt: merged.expiresAt,
-      authFile: file,
+      authFile: cacheFile,
       refreshed: true
     };
   } catch (err) {
     if (current.accessToken && !forceRefresh) {
       return {
         ok: true,
+        source: current.source,
         accessToken: current.accessToken,
         refreshToken: current.refreshToken,
         email: current.email,
         accountId: current.accountId,
         expiresAt: current.expiresAt,
-        authFile: file,
+        authFile: current.authFile,
         refreshError: err?.message || String(err)
       };
     }
-    return { ok: false, reason: err?.message || "refresh-failed", authFile: file };
+    return { ok: false, reason: err?.message || "refresh-failed", source: current.source, authFile: current.authFile };
   }
 }
 
@@ -426,19 +609,25 @@ export async function runAnthropicOAuthLogin({
   });
 }
 
+const SOURCE_LABEL = {
+  "claude-code-keychain": "Claude Code · Keychain",
+  "claude-code-file": "Claude Code · ~/.claude/.credentials.json",
+  "claude-code-refreshed": "Claude Code（已刷新缓存）",
+  switchyard: "Switchyard 自管 OAuth",
+  "switchyard-claude-shape": "Switchyard OAuth",
+  memory: "内存"
+};
+
 export function anthropicOAuthStatus(provider = null) {
-  const file = anthropicOAuthAuthPath(provider?.id || "");
-  const auth = readAnthropicOAuthFile(file);
+  const auth = resolveAnthropicOAuthAuth({ provider });
   if (!auth.ok) {
-    // 回退默认 anthropic.json
-    const fallback = readAnthropicOAuthFile(anthropicOAuthAuthPath());
-    if (!fallback.ok) return { ok: false, loggedIn: false, authFile: file, reason: auth.reason };
     return {
-      ok: true,
-      loggedIn: Boolean(fallback.accessToken || fallback.refreshToken),
-      email: fallback.email,
-      expiresAt: fallback.expiresAt,
-      authFile: fallback.authFile
+      ok: false,
+      loggedIn: false,
+      reason: auth.reason,
+      authFile: auth.authFile || claudeCredentialsPath(),
+      source: auth.source || "none",
+      hint: "请先在本机完成 Claude Code 登录（终端执行 claude / 按提示登录），或使用下方高级选项浏览器授权。"
     };
   }
   return {
@@ -446,6 +635,12 @@ export function anthropicOAuthStatus(provider = null) {
     loggedIn: Boolean(auth.accessToken || auth.refreshToken),
     email: auth.email,
     expiresAt: auth.expiresAt,
-    authFile: auth.authFile
+    accountId: auth.accountId,
+    subscriptionType: auth.subscriptionType || "",
+    authFile: auth.authFile,
+    source: auth.source,
+    sourceLabel: SOURCE_LABEL[auth.source] || auth.source || "",
+    hasAccessToken: Boolean(auth.accessToken),
+    hasRefreshToken: Boolean(auth.refreshToken)
   };
 }

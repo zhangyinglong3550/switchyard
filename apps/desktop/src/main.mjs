@@ -671,11 +671,14 @@ ipcMain.handle("anthropic-oauth:logout", (_e, payload = {}) => {
   const providerId = payload.providerId || payload.id || "";
   const authFile = anthropicOAuthAuthPath(providerId);
   const result = clearAnthropicOAuthFile(authFile);
-  // 同时清默认文件（若不同）
+  // 只清 Switchyard 自管缓存，不碰 Claude Code Keychain / .credentials.json
   const fallback = anthropicOAuthAuthPath();
   if (fallback !== authFile) clearAnthropicOAuthFile(fallback);
-  appendLog({ level: "info", msg: "anthropic oauth logout", authFile });
-  return result;
+  appendLog({ level: "info", msg: "anthropic oauth clear switchyard cache", authFile });
+  return {
+    ...result,
+    note: "已清除 Switchyard 缓存凭证；Claude Code 本机登录不受影响。"
+  };
 });
 ipcMain.handle("anthropic-oauth:import-refresh", async (_e, payload = {}) => {
   const refreshToken = String(payload.refreshToken || payload.refresh_token || "").trim();

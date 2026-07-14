@@ -213,7 +213,7 @@ const AUTH_MODE_LABEL = {
   api_key: "API Key",
   keychain: "系统安全存储",
   codex_oauth: "Codex OAuth",
-  anthropic_oauth: "Anthropic 官方 OAuth",
+  anthropic_oauth: "Anthropic 官方（Claude Code）",
   account_pool: "账号池（多账号）",
   none: "无需认证"
 };
@@ -527,7 +527,7 @@ function syncProviderRiskNote(provider = null) {
     return;
   }
   if (providerHasAnthropicOauthRisk(provider, preset, authMode)) {
-    note.textContent = preset?.riskNote || "通过本地网关复用 Claude 官方 OAuth 登录态。凭证仅保存在本机 ~/.switchyard/oauth/，请遵守 Anthropic 服务条款。";
+    note.textContent = preset?.riskNote || "对齐 CC Switch：复用本机 Claude Code 登录态（Keychain / ~/.claude/.credentials.json）经本地网关调用官方 API。请遵守 Anthropic 服务条款。";
     return;
   }
   note.textContent = preset?.riskNote || "高风险：该官方 Codex OAuth 代理方式会通过本地网关复用官方登录态，官方文档提示可能带来账号限制风险。推荐优先使用官方直连。";
@@ -541,9 +541,10 @@ async function refreshAnthropicOauthStatus() {
   try {
     const st = await invoke("anthropic-oauth:status", { providerId });
     if (st?.loggedIn) {
-      statusEl.innerHTML = `<span class="chip good">已登录</span> ${escapeHtml(st.email || "Claude 账号")}${st.expiresAt ? ` <span class="tiny muted">token 至 ${escapeHtml(String(st.expiresAt).slice(0, 19).replace("T", " "))}</span>` : ""}`;
+      const src = st.sourceLabel || st.source || "";
+      statusEl.innerHTML = `<span class="chip good">已检测到登录</span> ${escapeHtml(st.email || "Claude 账号")}${src ? ` <span class="tiny muted">· ${escapeHtml(src)}</span>` : ""}${st.expiresAt ? ` <span class="tiny muted">token 至 ${escapeHtml(String(st.expiresAt).slice(0, 19).replace("T", " "))}</span>` : ""}`;
     } else {
-      statusEl.innerHTML = `<span class="chip warn">未登录</span> <span class="tiny muted">点击下方按钮用浏览器完成 Claude 官方授权</span>`;
+      statusEl.innerHTML = `<span class="chip warn">未检测到 Claude Code 登录</span> <span class="tiny muted">${escapeHtml(st?.hint || "请先在本机完成 claude 登录，或使用高级选项")}</span>`;
     }
   } catch (err) {
     statusEl.innerHTML = `<span class="chip bad">状态读取失败</span> <span class="tiny muted">${escapeHtml(err?.message || String(err))}</span>`;
@@ -568,7 +569,7 @@ function syncProviderAuthControls() {
     : mode === "codex_oauth"
     ? "已选择 Codex OAuth：Switchyard 会复用本机 codex login 的登录态，不需要在这里填写 API Key。"
     : mode === "anthropic_oauth"
-    ? "已选择 Anthropic 官方 OAuth：用浏览器登录 Claude（Pro/Max）后即可调用官方 Messages API，无需 API Key。凭证保存在 ~/.switchyard/oauth/。"
+    ? "已选择 Anthropic 官方认证（对齐 CC Switch）：复用本机 Claude Code 登录态（macOS Keychain / ~/.claude/.credentials.json），无需填写 API Key。"
     : mode === "account_pool"
     ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
@@ -2338,8 +2339,8 @@ document.getElementById("btn-anthropic-oauth-logout")?.addEventListener("click",
   const form = document.getElementById("provider-form");
   const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
   try {
-    await invoke("anthropic-oauth:logout", { providerId });
-    toast("已清除本机 Claude OAuth 凭证");
+    const r = await invoke("anthropic-oauth:logout", { providerId });
+    toast(r?.note || "已清除 Switchyard 缓存凭证（Claude Code 登录不受影响）");
     await refreshAnthropicOauthStatus();
   } catch (err) {
     toast(err?.message || String(err), "error");
