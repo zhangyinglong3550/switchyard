@@ -58,7 +58,9 @@ const MARKER = "managed-by-switchyard";
 
 export const CODEX_ACCESS_MODES = Object.freeze({
   SWITCHYARD_PROXY: "switchyard_proxy",
-  OFFICIAL_DIRECT: "official_direct"
+  OFFICIAL_DIRECT: "official_direct",
+  /** 像 CC Switch：把某个供应商 baseUrl+key 写入 config，App 直连上游、不经 17888 */
+  PROVIDER_DIRECT: "provider_direct"
 });
 
 const CODEX_MODEL_TEMPLATE = {
@@ -781,6 +783,16 @@ export function previewCodexProfile(target) {
   if (target?.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) {
     return mergeCodexOfficialDirectProfile(readText(codexConfigPath()));
   }
+  if (target?.mode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
+    return mergeCodexProviderDirectProfile(readText(codexConfigPath()), {
+      name: target.provider?.name || target.provider?.id || "Provider Direct",
+      baseUrl: target.provider?.baseUrl || "",
+      apiKey: target.apiKey || target.provider?.apiKey || "",
+      model: target.model?.upstreamModel || target.model?.id || target.defaultModel || "",
+      wireApi: target.provider?.apiFormat === "openai_chat" ? "chat" : "responses",
+      disableImageGeneration: looksLikeAigoProvider(target.provider || {})
+    });
+  }
   return renderCodexProfile(target);
 }
 export function previewClaudeCodeProfile(target) {
@@ -1030,6 +1042,148 @@ export function applyCodexOfficialDirect({ dryRun } = {}) {
   return { ...result, mode: CODEX_ACCESS_MODES.OFFICIAL_DIRECT, auth: "codex_official_login" };
 }
 
+/**
+ * 像 CC Switch 导入供应商：App 直连 provider.baseUrl，不经 Switchyard 网关。
+ * 用于 AI Go 等「只允许 Codex 官方客户端」的号池。
+ */
+export function renderCodexProviderDirectBlock({
+  name,
+  baseUrl,
+  apiKey,
+  model,
+  wireApi = "responses",
+  disableImageGeneration = false
+} = {}) {
+  const lines = [
+    "# managed-by: switchyard-provider-direct",
+    `model_provider = "${CODEX_PROVIDER}"`,
+    `model_reasoning_effort = "high"`,
+    `disable_response_storage = true`
+  ];
+  if (model) lines.push(`model = ${tomlString(model)}`);
+  lines.push(
+    "",
+    `[model_providers.${CODEX_PROVIDER}]`,
+    `name = ${tomlString(name || "Provider Direct")}`,
+    `base_url = ${tomlString(String(baseUrl || "").replace(/\/+$/, ""))}`,
+    `wire_api = ${tomlString(wireApi)}`,
+    `requires_openai_auth = true`,
+    `experimental_bearer_token = ${tomlString(apiKey || "")}`
+  );
+  if (disableImageGeneration) {
+    lines.push("", "[features]", "js_repl = false", "image_generation = false");
+  }
+  return lines.join("\n") + "\n";
+}
+
+function looksLikeAigoProvider(provider = {}) {
+  const text = [provider.id, provider.name, provider.baseUrl].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("aigo") || text.includes("aigocode") || text.includes("中转gpt");
+}
+
+export function mergeCodexProviderDirectProfile(existing, opts = {}) {
+  const stripped = stripSwitchyardManagedCodexBlock(existing || "", { replaceModel: true });
+  // 去掉旧的 provider-direct 管理块与 custom provider（避免重复）
+  const withoutOldDirect = stripped
+    .split(/\r?\n/)
+    .filter((line) => !/^#\s*managed-by:\s*switchyard-provider-direct/.test(line.trim()))
+    .join("\n");
+  const withoutCustom = stripCustomProviderSection(withoutOldDirect);
+  const withoutTop = stripTopLevelCodexRoutingKeys(withoutCustom);
+  const block = renderCodexProviderDirectBlock(opts);
+  const rest = withoutTop.trim();
+  return rest ? `${block.trimEnd()}\n\n${rest}\n` : `${block.trimEnd()}\n`;
+}
+
+function stripCustomProviderSection(text) {
+  if (!text) return "";
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (/^\[model_providers\.custom\]/.test(trimmed)) {
+      i += 1;
+      while (i < lines.length && !/^\[[^\]]+\]/.test(lines[i].trim())) i += 1;
+      i -= 1;
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  while (out.length && out[out.length - 1].trim() === "") out.pop();
+  return out.join("\n");
+}
+
+function stripTopLevelCodexRoutingKeys(text) {
+  if (!text) return "";
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let seenTable = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^\[[^\]]+\]/.test(trimmed)) seenTable = true;
+    if (!seenTable && (
+      /^model_provider\s*=/.test(trimmed) ||
+      /^model\s*=/.test(trimmed) ||
+      /^model_catalog_json\s*=/.test(trimmed) ||
+      /^openai_base_url\s*=/.test(trimmed) ||
+      /^model_reasoning_effort\s*=/.test(trimmed) ||
+      /^disable_response_storage\s*=/.test(trimmed)
+    )) continue;
+    // 旧 features.image_generation 由新 block 重写；整段 [features] 若只有 js_repl/image 会重复，保留用户其它 features 表
+    out.push(line);
+  }
+  while (out.length && out[out.length - 1].trim() === "") out.pop();
+  return out.join("\n");
+}
+
+export function applyCodexProviderDirect({
+  provider,
+  model,
+  apiKey,
+  dryRun
+} = {}) {
+  if (!provider?.baseUrl) throw new Error("provider.baseUrl is required for provider_direct");
+  const key = apiKey || provider.apiKey || "";
+  if (!key && provider.authMode !== "none") throw new Error("provider apiKey is required for provider_direct");
+  const upstreamModel = model?.upstreamModel || model?.id || provider.defaultModel || "";
+  // 直连时 Codex 侧 model 用上游模型名（如 gpt-5.5），不要带 provider 前缀
+  const codexModel = model?.upstreamModel || (String(model?.id || "").includes("/")
+    ? String(model.id).split("/").slice(1).join("/")
+    : model?.id) || "";
+  const wireApi = provider.apiFormat === "openai_chat" ? "chat" : "responses";
+  const opts = {
+    name: provider.name || provider.id || "Provider Direct",
+    baseUrl: provider.baseUrl,
+    apiKey: key,
+    model: codexModel,
+    wireApi: wireApi === "chat" ? "chat" : "responses",
+    disableImageGeneration: looksLikeAigoProvider(provider)
+  };
+  const file = codexConfigPath();
+  const existing = readText(file);
+  const next = mergeCodexProviderDirectProfile(existing, opts);
+  if (dryRun) {
+    return {
+      mode: CODEX_ACCESS_MODES.PROVIDER_DIRECT,
+      path: file,
+      preview: next,
+      existing,
+      providerId: provider.id,
+      baseUrl: opts.baseUrl,
+      model: opts.model,
+      note: "App 将直连该供应商 baseUrl（不经 Switchyard 17888），行为对齐 CC Switch 导入。"
+    };
+  }
+  const result = writeText(file, next);
+  return {
+    ...result,
+    mode: CODEX_ACCESS_MODES.PROVIDER_DIRECT,
+    providerId: provider.id,
+    baseUrl: opts.baseUrl,
+    model: opts.model
+  };
+}
+
 export function applyClaudeCode({ host, port, defaultModel, models, dryRun, modelMapping } = {}) {
   const file = claudeCodeConfigPath();
   const existing = readJsonSafe(file);
@@ -1063,6 +1217,7 @@ export function applyHermes({ host, port, defaultModel, models, dryRun } = {}) {
 export function applyProfile(id, opts = {}) {
   if (id === "codex") {
     if (opts.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) return applyCodexOfficialDirect(opts);
+    if (opts.mode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) return applyCodexProviderDirect(opts);
     return applyCodex(opts);
   }
   if (id === "claude-code") return applyClaudeCode(opts);

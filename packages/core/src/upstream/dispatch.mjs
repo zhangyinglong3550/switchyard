@@ -20,7 +20,16 @@ import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
 import { applyOutbound, applyInbound } from "../compat/index.mjs";
 import { rectifyUpstreamRequest } from "../compat/runtime-rectifier.mjs";
+import {
+  bindProviderToAccount,
+  isAccountPoolProvider,
+  markAccountFailure,
+  markAccountSuccess,
+  pickAndRefreshAccount
+} from "../account-pool/index.mjs";
 
+const ACCOUNT_POOL_FAILOVER_STATUSES = new Set([401, 403, 429, 500, 502, 503, 504]);
+const ACCOUNT_POOL_MAX_ATTEMPTS = 3;
 
 function normalizeChatPayload(payload) {
   if (!payload || typeof payload !== "object" || !Array.isArray(payload.choices)) return payload;
@@ -40,7 +49,89 @@ function normalizeChatPayload(payload) {
   return { ...payload, choices };
 }
 
+function withAccountMeta(result, account) {
+  if (!result || !account) return result;
+  return {
+    ...result,
+    accountId: account.id,
+    accountEmail: account.email || ""
+  };
+}
+
+function shouldFailoverStatus(status) {
+  return ACCOUNT_POOL_FAILOVER_STATUSES.has(Number(status) || 0);
+}
+
+async function runWithAccountPool(provider, opts, runner) {
+  if (!isAccountPoolProvider(provider)) {
+    return runner(provider, null);
+  }
+  const excludeIds = [];
+  let lastResult = null;
+  let lastError = null;
+  for (let attempt = 0; attempt < ACCOUNT_POOL_MAX_ATTEMPTS; attempt += 1) {
+    const picked = await pickAndRefreshAccount(provider, {
+      excludeIds,
+      fetchImpl: opts?.fetchImpl
+    });
+    if (!picked.ok) {
+      lastError = picked.error || "account pool unavailable";
+      break;
+    }
+    const account = picked.account;
+    excludeIds.push(account.id);
+    const bound = bindProviderToAccount(provider, account);
+    try {
+      const result = await runner(bound, account);
+      if (result?.kind === "error" && shouldFailoverStatus(result.status)) {
+        markAccountFailure(provider, account, {
+          status: result.status,
+          error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`
+        });
+        lastResult = withAccountMeta(result, account);
+        // 401：同号已在 pick 时 refresh；仍失败则换号
+        continue;
+      }
+      if (result?.kind === "stream" && result.upstream && !result.upstream.ok && shouldFailoverStatus(result.upstream.status)) {
+        markAccountFailure(provider, account, {
+          status: result.upstream.status,
+          error: `stream status ${result.upstream.status}`
+        });
+        lastResult = withAccountMeta({
+          kind: "error",
+          status: result.upstream.status,
+          payload: await readJsonResponse(result.upstream).catch(() => ({ error: `status ${result.upstream.status}` }))
+        }, account);
+        continue;
+      }
+      markAccountSuccess(provider, account);
+      return withAccountMeta(result, account);
+    } catch (err) {
+      const message = err?.message || String(err);
+      markAccountFailure(provider, account, { status: 0, error: message });
+      lastError = message;
+      lastResult = withAccountMeta({
+        kind: "error",
+        status: 502,
+        payload: { error: message }
+      }, account);
+    }
+  }
+  if (lastResult) return lastResult;
+  return {
+    kind: "error",
+    status: 503,
+    payload: { error: lastError || "account pool exhausted" }
+  };
+}
+
 export async function dispatchChat(provider, upstreamModel, chatBody, opts = {}) {
+  return runWithAccountPool(provider, opts, (activeProvider, account) =>
+    dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
+  );
+}
+
+async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, account = null) {
   const ctxModel = { ...(opts.model || {}), id: chatBody._modelId || opts.model?.id || upstreamModel, providerId: opts.model?.providerId || provider.id };
   const ctx = { provider, model: ctxModel, clientId: opts.clientId };
   const stream = Boolean(chatBody.stream);
@@ -53,7 +144,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   if (apiFormat === "openai_chat") {
     const upstreamBody = applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides);
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
-    if (stream) return { kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) };
+    if (stream) return withAccountMeta({ kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const maybeRetry = await readOrRetryRectified({
       upstream,
       body: upstreamBody,
@@ -61,13 +152,16 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
       ctx,
       send: (body) => callOpenAIChat(provider, body, upstreamOptsWithOverrides)
     });
-    if (!maybeRetry.ok) return { kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
+    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const payload = normalizeChatPayload(maybeRetry.payload);
-    return { kind: "json", status: maybeRetry.status, payload: applyInbound(payload, ctx), rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
+    return withAccountMeta({ kind: "json", status: maybeRetry.status, payload: applyInbound(payload, ctx), rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
 
   if (apiFormat === "openai_responses") {
-    const responsesBody = applyBodyOverrides(chatToResponses(outbound, upstreamModel), requestOverrides);
+    let responsesBody = applyBodyOverrides(chatToResponses(outbound, upstreamModel), requestOverrides);
+    if (isAigoLikeProvider(provider, ctxModel)) {
+      responsesBody = stripConflictingImageGenTools(responsesBody);
+    }
     const codexOAuth = isCodexOAuthProvider(provider);
     if (codexOAuth) {
       responsesBody.store = false;
@@ -77,21 +171,21 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
       Object.assign(responsesBody, normalizeChatgptCodexResponsesBody(responsesBody));
     }
     const upstream = await callOpenAIResponses(provider, responsesBody, upstreamOptsWithOverrides);
-    if (stream) return { kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) };
-    if (!upstream.ok) return { kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) };
+    if (stream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     if (codexOAuth) {
       const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
-      return { kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) };
+      return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     }
     const rawResponses = await readJsonResponse(upstream);
     const chatLike = responsesToChatResponse(rawResponses, upstreamModel);
-    return { kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) };
+    return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
 
   if (apiFormat === "anthropic_messages") {
     const anthBody = applyBodyOverrides(chatToAnthropicMessages(outbound, upstreamModel), requestOverrides);
     const upstream = await callAnthropicMessages(provider, anthBody, upstreamOptsWithOverrides);
-    if (stream) return { kind: "stream", upstream, translate: "anthropic", requestOverrides: requestOverrideSummary(requestOverrides) };
+    if (stream) return withAccountMeta({ kind: "stream", upstream, translate: "anthropic", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const maybeRetry = await readOrRetryRectified({
       upstream,
       body: anthBody,
@@ -99,28 +193,38 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
       ctx,
       send: (body) => callAnthropicMessages(provider, body, upstreamOptsWithOverrides)
     });
-    if (!maybeRetry.ok) return { kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
+    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const rawAnth = maybeRetry.payload;
     const chatLike = anthropicMessagesToChatResponse(rawAnth, upstreamModel);
-    return { kind: "json", status: maybeRetry.status, payload: applyInbound(chatLike, ctx), rawPayload: rawAnth, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) };
+    return withAccountMeta({ kind: "json", status: maybeRetry.status, payload: applyInbound(chatLike, ctx), rawPayload: rawAnth, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
 
   throw new Error(`Unsupported provider.apiFormat: ${apiFormat}`);
 }
 
 export async function dispatchResponses(provider, upstreamModel, responsesBody, opts = {}) {
-  const model = { ...(opts.model || {}), id: opts.model?.id || responsesBody?._modelId || upstreamModel, providerId: opts.model?.providerId || provider.id };
-  const ctx = { provider, model, clientId: opts.clientId };
   const apiFormat = provider.apiFormat || "openai_chat";
-  const upstreamOpts = { ...opts, proxyUrl: effectiveProxyUrl(provider, opts.proxyUrl) };
   if (apiFormat !== "openai_responses") {
     const chatBody = stripInternalFields({ ...responsesBody, model: upstreamModel });
     return dispatchChat(provider, upstreamModel, chatBody, opts);
   }
+  return runWithAccountPool(provider, opts, (activeProvider, account) =>
+    dispatchResponsesOnce(activeProvider, upstreamModel, responsesBody, opts, account)
+  );
+}
+
+async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opts = {}, account = null) {
+  const model = { ...(opts.model || {}), id: opts.model?.id || responsesBody?._modelId || upstreamModel, providerId: opts.model?.providerId || provider.id };
+  const ctx = { provider, model, clientId: opts.clientId };
+  const upstreamOpts = { ...opts, proxyUrl: effectiveProxyUrl(provider, opts.proxyUrl) };
 
   const requestOverrides = collectRequestOverrides(provider, model);
   const upstreamOptsWithOverrides = applyHeaderOverrides(upstreamOpts, requestOverrides);
-  const upstreamBody = applyBodyOverrides(stripInternalFields({ ...(responsesBody || {}), model: upstreamModel }), requestOverrides);
+  let upstreamBody = applyBodyOverrides(stripInternalFields({ ...(responsesBody || {}), model: upstreamModel }), requestOverrides);
+  // AIGo / 号池中转：去掉 image_gen hosted 与 function 同名冲突，避免 upstream 400。
+  if (isAigoLikeProvider(provider, model)) {
+    upstreamBody = stripConflictingImageGenTools(upstreamBody);
+  }
   const codexOAuth = isCodexOAuthProvider(provider);
   const clientRequestedStream = Boolean(responsesBody?.stream);
   if (codexOAuth) {
@@ -131,15 +235,15 @@ export async function dispatchResponses(provider, upstreamModel, responsesBody, 
     Object.assign(upstreamBody, normalizeChatgptCodexResponsesBody(upstreamBody));
   }
   const upstream = await callOpenAIResponses(provider, upstreamBody, upstreamOptsWithOverrides);
-  if (clientRequestedStream) return { kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) };
-  if (!upstream.ok) return { kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) };
+  if (clientRequestedStream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+  if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   if (codexOAuth) {
     const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
-    return { kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) };
+    return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
   const rawResponses = await readJsonResponse(upstream);
   const chatLike = responsesToChatResponse(rawResponses, upstreamModel);
-  return { kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) };
+  return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
 }
 
 function stripInternalFields(body) {
@@ -148,6 +252,68 @@ function stripInternalFields(body) {
     if (!key.startsWith("_")) out[key] = value;
   }
   return out;
+}
+
+/** AIGo / aigocode 号池类中转：请求身份与 tools 需特殊处理。 */
+export function isAigoLikeProvider(provider, model = null) {
+  const text = [
+    provider?.id,
+    provider?.name,
+    provider?.baseUrl,
+    model?.id,
+    model?.providerId,
+    model?.upstreamModel,
+    model?.displayName
+  ].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("api.aigocode.app") || text.includes("aigo") || text.includes("中转gpt");
+}
+
+/**
+ * 去掉 Responses tools 里 hosted image_gen 与 function `image_gen.imagegen` 的同名冲突。
+ * ChatGPT App 会带 hosted image_gen；部分中转会再注入 imagegen function，导致 400。
+ */
+export function stripConflictingImageGenTools(body) {
+  if (!body || typeof body !== "object") return body;
+  if (!Array.isArray(body.tools) || body.tools.length === 0) return body;
+
+  const toolName = (tool) => {
+    if (!tool || typeof tool !== "object") return "";
+    return String(tool.name || tool.function?.name || "").trim();
+  };
+  const isHostedImageGen = (tool) => {
+    if (!tool || typeof tool !== "object") return false;
+    const type = String(tool.type || "").toLowerCase();
+    const name = toolName(tool).toLowerCase();
+    if (type === "image_gen" || type === "image_generation") return true;
+    if (type === "namespace" && name === "image_gen") return true;
+    return name === "image_gen" && type !== "function";
+  };
+  const isImageGenFunction = (tool) => {
+    if (!tool || typeof tool !== "object") return false;
+    const type = String(tool.type || "function").toLowerCase();
+    if (type !== "function" && type !== "") return false;
+    const name = toolName(tool).toLowerCase();
+    return name === "image_gen.imagegen" || name === "imagegen" || name.endsWith(".imagegen");
+  };
+
+  const hasHosted = body.tools.some(isHostedImageGen);
+  const hasFunction = body.tools.some(isImageGenFunction);
+  if (!hasHosted && !hasFunction) return body;
+
+  // 优先保留 function 路径不可控（中转可能再次注入），因此去掉 hosted + 冲突 function，
+  // 让上游只剩一种或零种 image 工具，避免 "conflicts with a hosted tool"。
+  const nextTools = [];
+  for (const tool of body.tools) {
+    if (isHostedImageGen(tool) || isImageGenFunction(tool)) continue;
+    if (tool && typeof tool === "object" && String(tool.type || "").toLowerCase() === "namespace" && toolName(tool).toLowerCase() === "image_gen") {
+      const children = Array.isArray(tool.tools) ? tool.tools.filter((child) => !isImageGenFunction(child)) : [];
+      if (!children.length) continue;
+      nextTools.push({ ...tool, tools: children });
+      continue;
+    }
+    nextTools.push(tool);
+  }
+  return { ...body, tools: nextTools };
 }
 
 function collectRequestOverrides(provider, model) {

@@ -84,3 +84,24 @@ test("provider presets · cover mainstream CN and US OpenAI-compatible providers
   assert.ok(presetModelHints("minimax").has("MiniMax-M2.7"));
 });
 
+test("provider presets · Antigravity CLI2API and Sub2API Codex local integrations", () => {
+  const presets = listProviderPresets();
+  const byId = new Map(presets.map((preset) => [preset.id, preset]));
+
+  const anti = byId.get("antigravity-cli2api");
+  assert.ok(anti, "missing antigravity-cli2api preset");
+  assert.equal(anti.apiFormat, "openai_chat");
+  assert.equal(anti.baseUrl, "http://127.0.0.1:8317/v1");
+  assert.equal(anti.defaultAuthMode, "api_key");
+  assert.ok(presetModelHints(anti).has("gemini-3.1-flash-lite"));
+  assert.ok(presetModelHints(anti).has("claude-sonnet-4-6"));
+
+  const sub = byId.get("sub2api-codex");
+  assert.ok(sub, "missing sub2api-codex preset");
+  assert.equal(sub.apiFormat, "openai_responses");
+  assert.match(sub.baseUrl, /\/v1$/);
+  assert.equal(sub.defaultAuthMode, "api_key");
+  assert.ok(presetModelHints(sub).has("gpt-5.5"));
+  assert.ok(presetModelHints(sub).has("gpt-5.4"));
+});
+

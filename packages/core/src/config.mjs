@@ -121,6 +121,32 @@ function normalizeKnownProvider(provider) {
   const baseUrl = String(withRouting.baseUrl || "").toLowerCase();
   const id = String(withRouting.id || "").toLowerCase();
   const name = String(withRouting.name || "").toLowerCase();
+  const looksLikeAccountPool =
+    withRouting.authMode === "account_pool" ||
+    withRouting.providerType === "account_pool" ||
+    String(withRouting.presetId || "").includes("account-pool") ||
+    ["xai_oauth", "antigravity_oauth", "codex_oauth"].includes(withRouting.poolKind);
+  if (looksLikeAccountPool) {
+    let poolKind = withRouting.poolKind || "xai_oauth";
+    if (withRouting.presetId === "antigravity-account-pool") poolKind = "antigravity_oauth";
+    if (withRouting.presetId === "codex-account-pool") poolKind = "codex_oauth";
+    if (withRouting.presetId === "xai-account-pool") poolKind = "xai_oauth";
+    const defaults = {
+      xai_oauth: { baseUrl: "https://api.x.ai/v1", apiFormat: "openai_chat" },
+      antigravity_oauth: { baseUrl: "http://127.0.0.1:8317/v1", apiFormat: "openai_chat" },
+      codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" }
+    };
+    const d = defaults[poolKind] || defaults.xai_oauth;
+    return {
+      ...withRouting,
+      authMode: "account_pool",
+      providerType: "account_pool",
+      poolKind,
+      poolStrategy: withRouting.poolStrategy || "weighted_round_robin",
+      baseUrl: withRouting.baseUrl || d.baseUrl,
+      apiFormat: withRouting.apiFormat || d.apiFormat
+    };
+  }
   const looksLikeCodexOAuth = withRouting.presetId === "codex-oauth" || baseUrl.includes("chatgpt.com/backend-api/codex");
   if (looksLikeCodexOAuth) {
     return {

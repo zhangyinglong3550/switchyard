@@ -1,8 +1,9 @@
 # Switchyard
 
-> 打破 AI 代理的模型孤岛。一份配置，所有模型，所有代理，无缝协作。
+> 打破 AI 代理的模型孤岛。一份配置，所有模型，所有代理，无缝协作。  
+> **2.0**：本机 **账号池**（Grok / Codex 多号 OAuth 轮询 + 额度）· Claude Paper Light UI。
 
-[![tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)]()
+[![version](https://img.shields.io/badge/version-2.0.0-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 
@@ -23,11 +24,33 @@
 
 ![Switchyard 总览](docs/assets/screenshots/01-overview.png)
 
+> **截图说明（2.0）**  
+> 下方产品截图来自 1.x UI，用于说明**能力与工作流**，布局配色已在 2.0 切换为 Claude Paper Light 浅奶油主题。  
+> 账号池 / 额度等新界面以 [docs/ACCOUNT-POOL-MVP.zh-CN.md](docs/ACCOUNT-POOL-MVP.zh-CN.md) 与 Release 说明为准；完整截图集将在后续补拍更新。
+
 ## 演示视频
 
 - [下载/观看产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
 
 > 如果 GitHub 页面内无法直接预览视频，请点击链接下载后本地观看。
+
+---
+
+## 2.0 新增：账号池（多账号 OAuth）
+
+**不用 Sub2API，也能在本机跑多 Codex / 多 Grok 号。**
+
+| 池 | 用途 | 怎么导入 | 额度 |
+|----|------|----------|------|
+| **Grok / xAI** | 直连 `api.x.ai`，加权轮询 | 粘贴 SSO/RT、CPA `xai-*.json` | 官方无稳定公开剩余额度 API |
+| **Codex 订阅** | 直连官方 Responses，失败自动换号 | **多选 JSON / 文件夹**、粘贴 CPA `type:codex`、本机 `auth.json` | **单号 5h + 周窗口剩余**（`wham/usage`） |
+
+- 凭证只在 `~/.switchyard/pools/`，**不写进 config.json / 不进 Git**
+- 调度：加权轮询 / 最久未用 / 最低错误率
+- 失败换号：401 / 403 / 429 / 5xx（最多 3 次）
+- Codex 无 `refresh_token` 时可用 `session_token` 续 access
+
+详细设计与开发入口：**[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md)** · 变更记录：**[CHANGELOG](CHANGELOG.md)**
 
 ---
 
@@ -160,23 +183,17 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Electron Desktop                       │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  │
-│  │ 供应商管理 │ │ 诊断中心   │ │ 会话/日志  │ │ Skills Hub │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│                    Gateway Core                          │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  HTTP Server: /codex  /claude-code  /hermes  /v1 │    │
-│  ├─────────────────────────────────────────────────┤    │
-│  │  Protocol Adaptation (Chat ↔ Responses ↔ Msgs)   │    │
-│  ├─────────────────────────────────────────────────┤    │
-│  │  Compat Patches  │ Vision Fallback  │ Reasoning  │    │
-│  └─────────────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────────────┤
-│  OpenAI │ DeepSeek │ Kimi │ GLM │ Anthropic │ OpenRouter │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Electron Desktop                           │
+│  供应商 · 账号池 · 诊断 · 会话/日志 · Skills Hub · 测试台      │
+├──────────────────────────────────────────────────────────────┤
+│                      Gateway Core                             │
+│  /codex  /claude-code  /hermes  /v1                           │
+│  Protocol adapt · Compat patches · Vision fallback            │
+│  Account pool: pick → refresh token → failover                │
+├──────────────────────────────────────────────────────────────┤
+│  api.x.ai (Grok 池) │ ChatGPT Codex (Codex 池) │ 三方 API Key │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -185,13 +202,13 @@ Skill 管理面板让你统一管理 Codex 和 Claude Code 的 Skills：
 
 ### 下载安装
 
-从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 下载：
+从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 下载 **v2.0.0**：
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-1.3.4-arm64.dmg` |
-| macOS (Intel / x64) | `Switchyard-1.3.4.dmg` |
-| Windows (x64) | `Switchyard Setup 1.3.4.exe` 或 `Switchyard-1.3.4-win.zip` |
+| macOS (Apple Silicon) | `Switchyard-2.0.0-arm64.dmg` |
+| macOS (Intel / x64) | `Switchyard-2.0.0.dmg` |
+| Windows (x64) | `Switchyard Setup 2.0.0.exe` 或 `Switchyard-2.0.0-win.zip` |
 
 > ### ⚠️ macOS 用户必读：安装后首次打开前请执行以下命令
 >

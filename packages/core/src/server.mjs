@@ -41,6 +41,20 @@ function detectClient(req, url) {
   return null;
 }
 
+
+function incomingHeadersFromReq(req) {
+  return { ...(req?.headers || {}) };
+}
+
+function dispatchOptsFromReq(req, base = {}) {
+  return {
+    ...base,
+    incomingHeaders: incomingHeadersFromReq(req),
+    // aigo / 号池：透传 Codex App 身份头（对齐 CC Switch local proxy）
+    forwardClientHeaders: true
+  };
+}
+
 function stripClientPrefix(pathname) {
   for (const { prefix } of CLIENT_PREFIXES) {
     if (pathname === prefix) return "/";
@@ -558,6 +572,14 @@ function recordDispatchCompatibility(record, result) {
   }
   if (result.errorClass) record.requestSummary.errorClass = result.errorClass;
   if (result.requestOverrides) record.requestSummary.requestOverrides = result.requestOverrides;
+  if (result.accountId) {
+    record.accountId = result.accountId;
+    record.requestSummary.accountId = result.accountId;
+    if (result.accountEmail) {
+      record.accountEmail = result.accountEmail;
+      record.requestSummary.accountEmail = result.accountEmail;
+    }
+  }
 }
 
 function emitTraceStart(emit, record) {
@@ -645,7 +667,8 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
     // 流式支持 openai_chat 直通和 anthropic_messages 翻译两种模式。
-    const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, stream: true, proxyUrl: route.model.proxyUrl });
+    const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, dispatchOptsFromReq(req, { clientId, model: route.model, stream: true, proxyUrl: route.model.proxyUrl }));
+    recordDispatchCompatibility(requestRecord, result);
     if (result.kind === "stream") {
       recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
       if (result.translate === "anthropic") {
@@ -670,7 +693,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
     emit({ level: "info", msg: "chat", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat, syntheticStream: true });
     return streamChatPayloadAsSse(res, result.payload, body.model);
   }
-  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
   recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
@@ -708,7 +731,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     const upstreamBody = { ...body, model: route.upstreamModel, _modelId: route.model.id };
     if (body.stream) {
       const dispatchNativeStream = async () => {
-        const next = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+        const next = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
         if (next.kind !== "stream") {
           if (next.kind === "error") throw new Error(requestPayloadError(next.payload) || `status ${next.status}`);
           throw new Error("native Responses retry did not return a stream");
@@ -730,7 +753,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
         }
       });
     }
-    const result = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+    const result = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
     recordDispatchCompatibility(requestRecord, result);
     if (result.kind === "error") {
       requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
@@ -755,7 +778,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
     if (apiFormat === "openai_responses") {
-      const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       if (result.kind === "stream" && result.translate === "responses") {
         recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
         return pipeRawStream(result.upstream, res, {
@@ -772,7 +795,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       }
     }
     if (apiFormat !== "openai_chat") {
-      const fallback = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      const fallback = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       recordDispatchCompatibility(requestRecord, fallback);
       if (fallback.kind === "error") {
         requestRecord.error = requestPayloadError(fallback.payload) || `status ${fallback.status}`;
@@ -787,7 +810,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       emit({ level: "info", msg: "responses", model: body.model, upstream: route.upstreamModel, apiFormat: route.provider.apiFormat, syntheticStream: true });
       return streamResponsePayload(res, chatToResponse(fallback.payload, body.model, { namespaceMap }));
     }
-    const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+    const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
     if (!result.upstream?.ok) {
       const payload = await readJsonResponse(result.upstream);
       requestRecord.error = requestPayloadError(payload) || `status ${result.upstream?.status || 0}`;
@@ -798,7 +821,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
     return streamChatAsResponses(result.upstream, res, body.model, { namespaceMap });
   }
-  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
   recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;
@@ -1158,7 +1181,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
     if ((route.provider.apiFormat || "openai_chat") !== "openai_chat") {
       let result = null;
       try {
-      result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+      result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       recordDispatchCompatibility(requestRecord, result);
       } catch (err) {
         requestRecord.error = errorMessage(err);
@@ -1177,11 +1200,11 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
       maybeCaptureClaudeDebugResponse(requestRecord, responsePayload, { status: result.status, stream: true, stage: "handleAnthropicMessages:synthetic-stream" });
       return streamMessageAsAnthropic(chatToAnthropic(result.payload, body.model), res);
     }
-    const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+    const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
     recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
     return streamChatAsAnthropic(result.upstream, res, body.model);
   }
-  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, { clientId, model: route.model, proxyUrl: route.model.proxyUrl });
+  const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
   recordDispatchCompatibility(requestRecord, result);
   if (result.kind === "error") {
     requestRecord.error = requestPayloadError(result.payload) || `status ${result.status}`;

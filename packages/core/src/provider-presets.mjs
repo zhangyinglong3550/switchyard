@@ -62,6 +62,32 @@ export const PROVIDER_PRESETS = [
     ]
   },
   {
+    id: "xai-account-pool",
+    label: "Grok / xAI 账号池",
+    providerId: "grok-pool",
+    name: "Grok 账号池",
+    apiFormat: "openai_chat",
+    baseUrl: "https://api.x.ai/v1",
+    authModes: ["account_pool"],
+    defaultAuthMode: "account_pool",
+    poolKind: "xai_oauth",
+    poolStrategy: "weighted_round_robin",
+    experimental: true,
+    riskLevel: "medium",
+    riskNote: "使用自有 xAI / SuperGrok 订阅号的本机多账号池。token 仅保存在本机 ~/.switchyard/pools/，不上传。请遵守 xAI 服务条款，勿用于未授权的账号共享。",
+    dashboardUrl: "https://console.x.ai",
+    note: "支持从 CLIProxyAPI（~/.cli-proxy-api-grok）批量导入 xai-*.json，加权轮询 + 失败换号。保存供应商后在「账号池」面板管理账号。",
+    models: [
+      { id: "grok-4.5", displayName: "Grok 4.5", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "grok-4.3", displayName: "Grok 4.3", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "grok-build-0.1", displayName: "Grok Build 0.1", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "grok-composer-2.5-fast", displayName: "Grok Composer 2.5 Fast（上游 /models 可能不列出）", contextWindow: 256000, capabilities: { tools: true, stream: true } },
+      { id: "grok-4.20-0309-reasoning", displayName: "Grok 4.20 Reasoning", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "grok-4.20-0309-non-reasoning", displayName: "Grok 4.20 Non-Reasoning", contextWindow: 256000, capabilities: { tools: true, stream: true } },
+      { id: "grok-4.20-multi-agent-0309", displayName: "Grok 4.20 Multi-Agent", contextWindow: 256000, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
     id: "openai",
     label: "OpenAI（API Key）",
     providerId: "openai",
@@ -603,6 +629,92 @@ export const PROVIDER_PRESETS = [
     dashboardUrl: "https://build.nvidia.com/settings/api-keys",
     models: [
       { id: "moonshotai/kimi-k2.5", displayName: "Kimi K2.5", contextWindow: 262144, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
+    id: "antigravity-cli2api",
+    label: "Antigravity（外挂 CLIProxyAPI）",
+    providerId: "antigravity",
+    name: "Antigravity CLI2API",
+    apiFormat: "openai_chat",
+    baseUrl: "http://127.0.0.1:8317/v1",
+    authModes: ["api_key"],
+    defaultAuthMode: "api_key",
+    apiKeyEnv: "CLIPROXY_API_KEY",
+    dashboardUrl: "https://github.com/router-for-me/CLIProxyAPI",
+    note: "外挂模式：号池与协议翻译都在 CLIProxyAPI。默认端口 8317，Key 与 cliproxy config 中 api-keys 一致。",
+    models: [
+      { id: "gemini-3.1-flash-lite", displayName: "Gemini 3.1 Flash Lite", contextWindow: 1000000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gemini-3-flash", displayName: "Gemini 3 Flash", contextWindow: 1000000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gemini-3.5-flash-low", displayName: "Gemini 3.5 Flash Low", contextWindow: 1000000, capabilities: { tools: true, stream: true } },
+      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6（via Antigravity）", contextWindow: 200000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-opus-4-6-thinking", displayName: "Claude Opus 4.6 Thinking（via Antigravity）", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
+    id: "antigravity-account-pool",
+    label: "Antigravity 账号池（内置管理）",
+    providerId: "antigravity-pool",
+    name: "Antigravity 账号池",
+    apiFormat: "openai_chat",
+    baseUrl: "http://127.0.0.1:8317/v1",
+    authModes: ["account_pool"],
+    defaultAuthMode: "account_pool",
+    poolKind: "antigravity_oauth",
+    poolStrategy: "weighted_round_robin",
+    apiKeyEnv: "CLIPROXY_API_KEY",
+    experimental: true,
+    riskLevel: "medium",
+    riskNote: "账号在 Switchyard 管理并同步到 ~/.cli-proxy-api；请求仍经 CLIProxyAPI 做协议翻译与多号轮询。请保持 8317 进程运行。",
+    note: "从 CLIProxyAPI 导入 antigravity-*.json。保存/刷新后会同步回 auth-dir。本地 API Key 填 cliproxy 的 sk-…。",
+    models: [
+      { id: "gemini-3.5-flash-low", displayName: "Gemini 3.5 Flash Low", contextWindow: 1000000, capabilities: { tools: true, stream: true } },
+      { id: "gemini-3-flash", displayName: "Gemini 3 Flash", contextWindow: 1000000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", contextWindow: 200000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-opus-4-6-thinking", displayName: "Claude Opus 4.6 Thinking", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
+    id: "codex-account-pool",
+    label: "Codex 订阅账号池（多号）",
+    providerId: "codex-pool",
+    name: "Codex 订阅池",
+    apiFormat: "openai_responses",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    authModes: ["account_pool"],
+    defaultAuthMode: "account_pool",
+    poolKind: "codex_oauth",
+    poolStrategy: "weighted_round_robin",
+    experimental: true,
+    riskLevel: "high",
+    riskNote: "多 ChatGPT/Codex 订阅 OAuth 本地轮询，可能触发官方风控。仅建议用于自有账号；请遵守 OpenAI 服务条款。",
+    note: "导入 ~/.codex/auth.json 或多份 tokens。直连官方 Codex Responses，支持加权轮询与失败换号。",
+    models: [
+      { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.4", displayName: "GPT-5.4", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.4-mini", displayName: "GPT-5.4-Mini", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.3-codex-spark", displayName: "GPT-5.3-Codex-Spark", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
+    id: "sub2api-codex",
+    label: "Sub2API（Codex 外挂中转）",
+    providerId: "sub2api-codex",
+    name: "Sub2API Codex",
+    apiFormat: "openai_responses",
+    baseUrl: "http://127.0.0.1:3000/v1",
+    authModes: ["api_key"],
+    defaultAuthMode: "api_key",
+    apiKeyEnv: "SUB2API_API_KEY",
+    dashboardUrl: "https://github.com/Wei-Shaw/sub2api",
+    experimental: true,
+    riskLevel: "medium",
+    riskNote: "Sub2API 聚合订阅账号额度中转。请使用自建或可信实例；勿把管理后台密码写入 Switchyard。",
+    note: "外挂 Sub2API：号池在 Sub2API 侧。Base URL 填到 /v1。",
+    models: [
+      { id: "gpt-5.5", displayName: "GPT-5.5 · Sub2API", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.4", displayName: "GPT-5.4 · Sub2API", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.4-mini", displayName: "GPT-5.4-Mini · Sub2API", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } }
     ]
   },
   {

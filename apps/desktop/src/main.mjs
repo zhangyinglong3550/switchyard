@@ -57,7 +57,8 @@ import {
   providerReady,
   proxyDispatcher,
   readCodexOAuthAuth,
-  isCodexOAuthProvider
+  isCodexOAuthProvider,
+  isAccountPoolProvider
 } from "../../../packages/core/src/upstream/clients.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
@@ -72,6 +73,24 @@ import {
   recommendCompatRules,
   registryRecommendationsForConfig
 } from "../../../packages/core/src/compat/registry.mjs";
+import {
+  bindProviderToAccount,
+  deleteAccounts,
+  importAntigravityFromCpaDirs,
+  importCodexAccountsFromText,
+  importCodexFromPaths,
+  importXaiAccountsFromCpaDirs,
+  importXaiAccountsFromText,
+  listPoolAccountsPublic,
+  patchAccounts,
+  pickAndRefreshAccount,
+  poolKindOf,
+  savePool,
+  loadPool,
+  syncAntigravityPoolToCliproxyDir,
+  refreshPoolQuotas,
+  refreshAccountQuota
+} from "../../../packages/core/src/account-pool/index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
@@ -153,9 +172,9 @@ function clientDefaultModel(cfg, clientId, visibleModels = []) {
 }
 
 function codexProfileMode(mode) {
-  return mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT
-    ? CODEX_ACCESS_MODES.OFFICIAL_DIRECT
-    : CODEX_ACCESS_MODES.SWITCHYARD_PROXY;
+  if (mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) return CODEX_ACCESS_MODES.OFFICIAL_DIRECT;
+  if (mode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) return CODEX_ACCESS_MODES.PROVIDER_DIRECT;
+  return CODEX_ACCESS_MODES.SWITCHYARD_PROXY;
 }
 
 const COMPAT_DIRECTIONS = ["outbound", "inbound", "stream"];
@@ -460,6 +479,281 @@ ipcMain.handle("import:ccswitch", () => {
   if (!result.ok) throw new Error(result.error || "import failed");
   return result;
 });
+
+function resolvePoolKind(payload = {}, providerId = "") {
+  const explicit = String(payload.poolKind || "").trim();
+  if (explicit) return explicit;
+  try {
+    const cfg = readConfig();
+    const provider = (cfg.providers || []).find((p) => p.id === providerId);
+    if (provider) return poolKindOf(provider);
+  } catch {}
+  return "xai_oauth";
+}
+
+ipcMain.handle("account-pool:list", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return listPoolAccountsPublic(providerId, {
+    poolKind: resolvePoolKind(payload, providerId)
+  });
+});
+
+ipcMain.handle("account-pool:import-text", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+
+  // Codex：粘贴 JSON / RT 列表（不依赖 ~/.cli-proxy-api）
+  if (poolKind === "codex_oauth") {
+    return importCodexAccountsFromText(providerId, payload.text || "", {
+      skipDuplicates: payload.skipDuplicates !== false
+    });
+  }
+  if (poolKind === "antigravity_oauth") {
+    return {
+      ok: false,
+      error: "Antigravity 粘贴导入暂未开放，可先用 Codex / Grok 池"
+    };
+  }
+
+  // Grok / xAI：优先用前端传入的 proxy，否则读供应商配置，再 fallback 本机 7890
+  let proxyUrl = String(payload.proxyUrl || "").trim();
+  if (!proxyUrl) {
+    try {
+      const cfg = readConfig();
+      const provider = (cfg.providers || []).find((p) => p.id === providerId);
+      proxyUrl = String(provider?.proxyUrl || "").trim();
+    } catch {}
+  }
+  if (!proxyUrl) proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "http://127.0.0.1:7890";
+  // 自动 SSO→OAuth：卡密 / sso=JWT 粘贴后走 Device Flow 转换
+  return importXaiAccountsFromText(providerId, payload.text || "", {
+    poolKind,
+    skipDuplicates: payload.skipDuplicates !== false,
+    convertSso: payload.convertSso !== false,
+    proxyUrl,
+    gapMs: payload.gapMs ?? 2500
+  });
+});
+
+ipcMain.handle("account-pool:import-cpa", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+  if (poolKind === "antigravity_oauth") {
+    return importAntigravityFromCpaDirs(providerId, {
+      dirs: payload.dirs,
+      skipDuplicates: payload.skipDuplicates !== false,
+      syncToCliproxy: payload.syncToCliproxy !== false
+    });
+  }
+  if (poolKind === "codex_oauth") {
+    return importCodexFromPaths(providerId, {
+      paths: payload.paths,
+      dirs: payload.dirs,
+      skipDuplicates: payload.skipDuplicates !== false
+    });
+  }
+  return importXaiAccountsFromCpaDirs(providerId, {
+    dirs: payload.dirs,
+    skipDuplicates: payload.skipDuplicates !== false
+  });
+});
+
+ipcMain.handle("account-pool:import-antigravity", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return importAntigravityFromCpaDirs(providerId, {
+    dirs: payload.dirs,
+    skipDuplicates: payload.skipDuplicates !== false,
+    syncToCliproxy: payload.syncToCliproxy !== false
+  });
+});
+
+ipcMain.handle("account-pool:import-codex", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return importCodexFromPaths(providerId, {
+    paths: payload.paths,
+    dirs: payload.dirs,
+    skipDuplicates: payload.skipDuplicates !== false
+  });
+});
+
+/** 弹窗多选本地 JSON 文件并导入账号池（Codex 主用；也可给 xAI 用） */
+ipcMain.handle("account-pool:import-files-dialog", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: poolKind === "codex_oauth" ? "选择 Codex 账号 JSON（可多选）" : "选择账号 JSON（可多选）",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "JSON", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths?.length) {
+    return { ok: false, cancelled: true, added: 0, skipped: 0, scanned: 0 };
+  }
+  if (poolKind === "codex_oauth") {
+    return {
+      ...importCodexFromPaths(providerId, {
+        paths: result.filePaths,
+        dirs: [],
+        skipDuplicates: payload.skipDuplicates !== false
+      }),
+      selectedFiles: result.filePaths.length
+    };
+  }
+  if (poolKind === "xai_oauth") {
+    let added = 0;
+    let skipped = 0;
+    let scanned = 0;
+    const errors = [];
+    for (const file of result.filePaths) {
+      try {
+        const text = fs.readFileSync(file, "utf8");
+        const one = await importXaiAccountsFromText(providerId, text, {
+          poolKind: "xai_oauth",
+          skipDuplicates: payload.skipDuplicates !== false,
+          convertSso: false
+        });
+        if (one.ok) {
+          added += one.added || 0;
+          skipped += one.skipped || 0;
+          scanned += 1;
+        } else {
+          errors.push({ file, error: one.error });
+        }
+      } catch (err) {
+        errors.push({ file, error: err?.message || String(err) });
+      }
+    }
+    return {
+      ok: added > 0 || skipped > 0,
+      added,
+      skipped,
+      scanned,
+      selectedFiles: result.filePaths.length,
+      errors,
+      error: added || skipped ? undefined : (errors[0]?.error || "未导入任何账号")
+    };
+  }
+  return {
+    ok: false,
+    error: `${poolKind} 暂不支持文件多选导入`,
+    selectedFiles: result.filePaths.length
+  };
+});
+
+/** 弹窗选择文件夹，扫描其中全部 codex/CPA json */
+ipcMain.handle("account-pool:import-dir-dialog", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: poolKind === "codex_oauth" ? "选择存放 Codex JSON 的文件夹" : "选择账号 JSON 文件夹",
+    properties: ["openDirectory"]
+  });
+  if (result.canceled || !result.filePaths?.[0]) {
+    return { ok: false, cancelled: true, added: 0, skipped: 0, scanned: 0 };
+  }
+  const dir = result.filePaths[0];
+  if (poolKind === "codex_oauth") {
+    return {
+      ...importCodexFromPaths(providerId, {
+        paths: [],
+        dirs: [dir],
+        skipDuplicates: payload.skipDuplicates !== false
+      }),
+      selectedDir: dir
+    };
+  }
+  if (poolKind === "xai_oauth") {
+    return {
+      ...importXaiAccountsFromCpaDirs(providerId, {
+        dirs: [dir],
+        skipDuplicates: payload.skipDuplicates !== false
+      }),
+      selectedDir: dir
+    };
+  }
+  if (poolKind === "antigravity_oauth") {
+    return {
+      ...importAntigravityFromCpaDirs(providerId, {
+        dirs: [dir],
+        skipDuplicates: payload.skipDuplicates !== false,
+        syncToCliproxy: payload.syncToCliproxy !== false
+      }),
+      selectedDir: dir
+    };
+  }
+  return { ok: false, error: `${poolKind} 暂不支持文件夹导入`, selectedDir: dir };
+});
+
+ipcMain.handle("account-pool:sync-antigravity", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return syncAntigravityPoolToCliproxyDir(providerId, {
+    authDir: payload.authDir
+  });
+});
+
+/** 刷新账号池额度：Codex 查 wham/usage；Grok 仅展示团队信息 */
+ipcMain.handle("account-pool:refresh-quota", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+  let proxyUrl = String(payload.proxyUrl || "").trim();
+  let provider = { id: providerId, authMode: "account_pool", poolKind, proxyUrl };
+  try {
+    const cfg = readConfig();
+    const found = (cfg.providers || []).find((p) => p.id === providerId);
+    if (found) {
+      provider = { ...found, poolKind: found.poolKind || poolKind };
+      if (!proxyUrl) proxyUrl = String(found.proxyUrl || "").trim();
+    }
+  } catch {}
+  if (!proxyUrl) proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "http://127.0.0.1:7890";
+  provider.proxyUrl = proxyUrl;
+
+  if (payload.accountId) {
+    return refreshAccountQuota(provider, String(payload.accountId), {
+      forceRefreshToken: payload.forceRefreshToken === true
+    });
+  }
+  return refreshPoolQuotas(provider, {
+    accountIds: payload.accountIds || null,
+    concurrency: payload.concurrency ?? 3
+  });
+});
+
+ipcMain.handle("account-pool:patch", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return patchAccounts(providerId, payload.accountIds || [], payload.patch || {}, {
+    poolKind: resolvePoolKind(payload, providerId)
+  });
+});
+
+ipcMain.handle("account-pool:delete", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  return deleteAccounts(providerId, payload.accountIds || [], {
+    poolKind: resolvePoolKind(payload, providerId)
+  });
+});
+
+ipcMain.handle("account-pool:set-strategy", (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const pool = loadPool(providerId, { poolKind: resolvePoolKind(payload, providerId) });
+  if (payload.strategy) pool.strategy = payload.strategy;
+  return savePool(pool);
+});
+
 ipcMain.handle("provider:presets", () => listProviderPresets());
 ipcMain.handle("provider:test", async (_e, provider) => testProviderConnectivity(provider));
 ipcMain.handle("provider-health:list", () => getProviderHealthMonitor().snapshot());
@@ -482,10 +776,12 @@ ipcMain.handle("compat:active", () => activeCompatSnapshot(readConfig()));
 ipcMain.handle("compat:registry:snapshot", () => registryRecommendationsForConfig(readConfig()));
 ipcMain.handle("compat:registry:recommend", (_e, payload = {}) => recommendCompatRules(payload));
 ipcMain.handle("provider:discover-models", async (_e, provider) => {
-  const probe = { ...provider };
+  const resolved = await resolveProbeProvider(provider);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+  const probe = resolved.provider;
   const baseUrl = String(probe.baseUrl || "").replace(/\/+$/, "");
   if (!baseUrl) throw new Error("缺少 Base URL");
-  const preset = providerPresetFor(probe);
+  const preset = providerPresetFor({ ...provider, ...probe, authMode: provider.authMode });
   const hints = presetModelHints(preset);
   const presetModels = Array.from(hints.values()).map((model) => normalizeHintModel(model));
   if (isCodexOAuthProvider(probe)) {
@@ -618,10 +914,13 @@ ipcMain.handle("diagnostics:run", async () => {
   };
 });
 
-ipcMain.handle("profile:apply", async (_e, { clientId, mode } = {}) => {
+ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId } = {}) => {
   const status = statusFromServer();
   const profileMode = clientId === "codex" ? codexProfileMode(mode) : undefined;
-  if (!status.running && profileMode !== CODEX_ACCESS_MODES.OFFICIAL_DIRECT) throw new Error("Gateway not running");
+  const skipGateway =
+    profileMode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT ||
+    profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT;
+  if (!status.running && !skipGateway) throw new Error("Gateway not running");
   const cfg = readConfig();
   const visibleModels = listModelsForClient(cfg, clientId);
   const opts = {
@@ -632,8 +931,18 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode } = {}) => {
     models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
+  if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
+    const provider = (cfg.providers || []).find((item) => item.id === providerId);
+    if (!provider) throw new Error(`provider not found: ${providerId || "(empty)"}`);
+    const model = (cfg.models || []).find((item) => item.id === modelId)
+      || (cfg.models || []).find((item) => item.providerId === provider.id && item.enabled !== false)
+      || null;
+    opts.provider = provider;
+    opts.model = model;
+    opts.apiKey = provider.apiKey || "";
+  }
   const result = applyProfile(clientId, opts);
-  if (clientId === "codex" && profileMode !== CODEX_ACCESS_MODES.OFFICIAL_DIRECT) syncCodexArtifacts("profile-apply");
+  if (clientId === "codex" && profileMode === CODEX_ACCESS_MODES.SWITCHYARD_PROXY) syncCodexArtifacts("profile-apply");
   appendLog({
     level: "info",
     msg: `profile applied: ${clientId}`,
@@ -642,6 +951,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode } = {}) => {
     backup: result.backup || null,
     visibleModels: visibleModels.length,
     defaultModel: opts.defaultModel || null,
+    providerId: result.providerId || providerId || null,
     catalogPath: result.catalogPath || null,
     cachePath: result.cachePath || null,
     ccSwitchCatalogPath: result.ccSwitchCatalogPath || null,
@@ -678,18 +988,30 @@ ipcMain.handle("profile:status", (_e, { clientId }) => {
   }));
   return { exists, current: current ? current.slice(0, 600) : null, backups: backups.length, backupItems: backups };
 });
-ipcMain.handle("profile:preview", (_e, { clientId, mode } = {}) => {
+ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } = {}) => {
   const status = statusFromServer();
   const cfg = readConfig();
   const visibleModels = listModelsForClient(cfg, clientId);
+  const profileMode = clientId === "codex" ? codexProfileMode(mode) : undefined;
   const opts = {
     host: status.running ? status.host : "127.0.0.1",
     port: status.running ? status.port : 17888,
-    mode: clientId === "codex" ? codexProfileMode(mode) : undefined,
+    mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
     models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
+  if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
+    const provider = (cfg.providers || []).find((item) => item.id === providerId)
+      || (cfg.providers || []).find((item) => String(item.id).includes("aigo-codex"))
+      || null;
+    const model = (cfg.models || []).find((item) => item.id === modelId)
+      || (cfg.models || []).find((item) => item.providerId === provider?.id)
+      || null;
+    opts.provider = provider;
+    opts.model = model;
+    opts.apiKey = provider?.apiKey || "";
+  }
   if (clientId === "codex") return { text: previewCodexProfile(opts), path: profileTargets().codex };
   if (clientId === "claude-code") return { text: previewClaudeCodeProfile(opts), path: profileTargets()["claude-code"] };
   if (clientId === "hermes") return { text: previewHermesProfile(opts), path: profileTargets().hermes };
@@ -1262,8 +1584,24 @@ function getProviderHealthMonitor() {
   return providerHealthMonitor;
 }
 
-async function testProviderConnectivity(provider) {
+async function resolveProbeProvider(provider) {
   const probe = { ...provider };
+  if (!isAccountPoolProvider(probe)) return { ok: true, provider: probe };
+  const picked = await pickAndRefreshAccount(probe);
+  if (!picked.ok) {
+    return { ok: false, error: picked.error || "账号池无可用账号，请先导入凭证" };
+  }
+  return {
+    ok: true,
+    provider: bindProviderToAccount(probe, picked.account),
+    accountEmail: picked.account.email || picked.account.id
+  };
+}
+
+async function testProviderConnectivity(provider) {
+  const resolved = await resolveProbeProvider(provider);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+  const probe = resolved.provider;
   const baseUrl = String(probe.baseUrl || "").replace(/\/+$/, "");
   if (!baseUrl) return { ok: false, error: "缺少 Base URL" };
   if (isCodexOAuthProvider(probe)) {
@@ -1437,7 +1775,7 @@ function mergeModelHint(item, hints) {
 
 function normalizeDiscoveredModels(payload, hints = new Map()) {
   const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
-  return list.map((item) => {
+  const discovered = list.map((item) => {
     const id = item?.id || item?.slug || item?.model || item?.name || "";
     if (!id) return null;
     const modalities = inputModalities(item);
@@ -1458,4 +1796,25 @@ function normalizeDiscoveredModels(payload, hints = new Map()) {
       raw: item
     }, hints);
   }).filter(Boolean);
+  // 上游 /models 可能不列出部分可用模型（如 Composer、预设补充项）；把预设 hints 中未返回的补进结果
+  return mergeDiscoveredWithPresetModels(discovered, hints);
+}
+
+/** 合并上游发现列表与预设 hints：已有的用上游，缺失的用预设补齐。 */
+function mergeDiscoveredWithPresetModels(discovered, hints = new Map()) {
+  const byId = new Map();
+  for (const item of discovered || []) {
+    if (item?.id) byId.set(item.id, item);
+  }
+  for (const [id, hint] of hints || []) {
+    if (!id || byId.has(id)) continue;
+    const normalized = normalizeHintModel(hint);
+    if (!normalized.id) continue;
+    byId.set(normalized.id, {
+      ...normalized,
+      fromPreset: true,
+      raw: { ...(hint || {}), _switchyardPresetOnly: true }
+    });
+  }
+  return Array.from(byId.values());
 }

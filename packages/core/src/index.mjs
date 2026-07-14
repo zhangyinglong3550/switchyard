@@ -8,3 +8,4 @@ export * from "./profile-writer.mjs";
 export * from "./history-unify.mjs";
 export * from "./compat/index.mjs";
 export * from "./utils.mjs";
+export * from "./account-pool/index.mjs";

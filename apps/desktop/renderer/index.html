@@ -37,7 +37,7 @@
     </div>
     <div style="margin-top:auto;">
       <div class="group-title">服务</div>
-      <div style="padding:10px; background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:6px 6px 0;">
+      <div class="sidebar-service-card">
         <div style="display:flex; align-items:center; justify-content:space-between;">
           <span class="status-pill stopped" id="service-pill"><span class="dot"></span><span id="service-state">未启动</span></span>
           <span class="tiny muted" id="service-port">-</span>
@@ -49,9 +49,9 @@
           <button class="btn" id="btn-restart" style="flex:1; justify-content:center;">重启</button>
         </div>
       </div>
-    <div id="version-bar" style="padding:6px 10px; display:flex; align-items:center; justify-content:space-between; border-top:1px solid var(--border); margin-top:4px;">
+    <div id="version-bar" class="sidebar-version-bar">
       <span class="tiny muted" id="app-version">v-</span>
-      <button id="btn-update" class="btn" style="display:none; font-size:11px; padding:2px 8px; color:#fff; background:#2563eb; border-color:#2563eb;">⬆ 更新</button>
+      <button id="btn-update" class="btn primary" style="display:none; font-size:11px; padding:2px 8px;">⬆ 更新</button>
     </div>
   </aside>
 
@@ -716,6 +716,55 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-account-pool-panel" style="display:none;">
+        <div class="callout-title" id="provider-pool-title">账号池</div>
+        <div class="callout-body" id="provider-pool-body">
+          凭证保存在本机 <code>~/.switchyard/pools/</code>，不会写入 config.json。
+        </div>
+        <input type="hidden" name="poolKind" id="provider-pool-kind" value="xai_oauth" />
+        <div class="row" style="margin-top:10px;">
+          <label>调度策略
+            <select class="field" name="poolStrategy" id="provider-pool-strategy">
+              <option value="weighted_round_robin">加权轮询</option>
+              <option value="least_recently_used">最久未用</option>
+              <option value="lowest_error_rate">最低错误率</option>
+            </select>
+          </label>
+          <label class="tiny muted" style="align-self:end;" id="provider-pool-count">0 个账号</label>
+        </div>
+        <label style="margin-top:8px;" id="provider-pool-import-text-wrap">粘贴导入
+          <textarea class="field" id="provider-pool-import-text" rows="4" placeholder="粘贴导入内容"></textarea>
+        </label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn" type="button" id="btn-pool-import-text">导入粘贴内容</button>
+          <button class="btn primary" type="button" id="btn-pool-import-files">选择 JSON 文件…</button>
+          <button class="btn" type="button" id="btn-pool-import-dir">选择文件夹…</button>
+          <button class="btn" type="button" id="btn-pool-import-cpa">从本机默认路径导入</button>
+          <button class="btn" type="button" id="btn-pool-refresh-quota">刷新额度</button>
+          <button class="btn" type="button" id="btn-pool-refresh">刷新列表</button>
+        </div>
+        <div class="tiny muted" style="margin-top:8px;" id="provider-pool-access-hint">
+          「状态」= 健康度（健康/降级/冷却）；「额度」= 套餐剩余窗口（Codex 为 5h/周）；
+          「Access」= <strong>OAuth 访问令牌</strong>过期时间，不是订阅日。鼠标悬停状态可看上次错误。
+        </div>
+        <div class="account-pool-table-wrap" style="margin-top:12px; max-height:280px; overflow:auto;">
+          <table class="data" id="provider-pool-table">
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>状态</th>
+                <th>权重</th>
+                <th>额度</th>
+                <th>Access（非订阅）</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="provider-pool-tbody">
+              <tr><td colspan="6" class="tiny muted">尚未导入账号</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <details class="callout-details">
         <summary class="callout-title">用量查询配置</summary>
         <div class="callout-body">可跟随预设，也可为自定义供应商配置余额/套餐查询接口。API Key 与请求地址留空时自动使用供应商配置。</div>

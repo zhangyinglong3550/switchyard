@@ -151,8 +151,87 @@ const AUTH_MODE_LABEL = {
   api_key: "API Key",
   keychain: "系统安全存储",
   codex_oauth: "Codex OAuth",
+  account_pool: "账号池（多账号）",
   none: "无需认证"
 };
+
+const POOL_KIND_UI = {
+  xai_oauth: {
+    label: "Grok / xAI",
+    chip: "账号池 · Grok/xAI",
+    title: "Grok / xAI 账号池",
+    body: "凭证保存在本机 ~/.switchyard/pools/，不会写入 config.json。支持：CLIProxyAPI xai-*.json、refresh_token 列表、卡密 SSO（email----pass----eyJ…）。SSO 会自动走 Device Flow 转成官方 OAuth。",
+    importPlaceholder: "CPA JSON、每行 refresh_token，或 email----password----eyJ...(SSO)\nSSO 会自动转换成 OAuth（可能需要几十秒/号）",
+    importBtn: "从 CLIProxyAPI 默认目录导入",
+    showPaste: true,
+    showFilePick: true,
+    authNote: "已选择账号池：请在下方导入 xAI/Grok 账号。token 仅存本机 pools 目录，支持加权轮询与失败换号。"
+  },
+  antigravity_oauth: {
+    label: "Antigravity",
+    chip: "账号池 · Antigravity",
+    title: "Antigravity 账号池",
+    body: "账号在 Switchyard 管理并同步到 ~/.cli-proxy-api；请求经本机 CLIProxyAPI（默认 8317）做协议翻译与多号轮询。请保持 8317 进程运行，API Key 使用 cliproxy 的 sk-…。",
+    importPlaceholder: "（Antigravity 可用「选择文件夹…」或默认路径导入 antigravity-*.json）",
+    importBtn: "从 CLIProxyAPI 默认目录导入",
+    showPaste: false,
+    showFilePick: true,
+    authNote: "已选择 Antigravity 账号池：可从文件夹导入 antigravity-*.json；刷新后会同步回 auth-dir。"
+  },
+  codex_oauth: {
+    label: "Codex 订阅",
+    chip: "账号池 · Codex",
+    title: "Codex 订阅账号池",
+    body: "凭证只存 ~/.switchyard/pools/codex_oauth/。推荐：点「选择 JSON 文件…」多选本地一堆 type:codex JSON；或「选择文件夹…」整目录导入。也支持粘贴 / 导入本机 ~/.codex/auth.json。",
+    importPlaceholder: "可选：粘贴 CPA type:codex JSON / 数组 / NDJSON。批量文件请用下方「选择 JSON 文件…」",
+    importBtn: "导入本机 ~/.codex/auth.json",
+    showPaste: true,
+    showFilePick: true,
+    authNote: "已选择 Codex 账号池：批量多选本地 JSON 即可。无 refresh_token 时用 session_token 续 access。"
+  }
+};
+
+function currentPoolKind() {
+  const form = document.getElementById("provider-form");
+  const hidden = document.getElementById("provider-pool-kind")?.value?.trim();
+  if (hidden) return hidden;
+  const preset = providerPresetById(document.getElementById("provider-preset-select")?.value);
+  if (preset?.poolKind) return preset.poolKind;
+  const existing = state.config?.providers?.find((p) => p.id === (form?._editId || form?.querySelector?.('[name="id"]')?.value));
+  if (existing?.poolKind) return existing.poolKind;
+  if (existing?.presetId === "antigravity-account-pool") return "antigravity_oauth";
+  if (existing?.presetId === "codex-account-pool") return "codex_oauth";
+  if (existing?.presetId === "xai-account-pool") return "xai_oauth";
+  return "xai_oauth";
+}
+
+function poolKindUi(kind = currentPoolKind()) {
+  return POOL_KIND_UI[kind] || POOL_KIND_UI.xai_oauth;
+}
+
+function syncProviderPoolUi() {
+  const kind = currentPoolKind();
+  const ui = poolKindUi(kind);
+  const kindInput = document.getElementById("provider-pool-kind");
+  if (kindInput) kindInput.value = kind;
+  const title = document.getElementById("provider-pool-title");
+  if (title) title.textContent = ui.title;
+  const body = document.getElementById("provider-pool-body");
+  if (body) body.textContent = ui.body;
+  const ta = document.getElementById("provider-pool-import-text");
+  if (ta) ta.placeholder = ui.importPlaceholder;
+  const pasteWrap = document.getElementById("provider-pool-import-text-wrap");
+  if (pasteWrap) pasteWrap.style.display = ui.showPaste ? "" : "none";
+  const pasteBtn = document.getElementById("btn-pool-import-text");
+  if (pasteBtn) pasteBtn.style.display = ui.showPaste ? "" : "none";
+  const showFilePick = ui.showFilePick !== false;
+  const filesBtn = document.getElementById("btn-pool-import-files");
+  if (filesBtn) filesBtn.style.display = showFilePick ? "" : "none";
+  const dirBtn = document.getElementById("btn-pool-import-dir");
+  if (dirBtn) dirBtn.style.display = showFilePick ? "" : "none";
+  const importBtn = document.getElementById("btn-pool-import-cpa");
+  if (importBtn) importBtn.textContent = ui.importBtn;
+}
 
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
@@ -345,7 +424,11 @@ function providerPresetById(id) {
 function renderAuthModeOptions(preset, selected = "api_key") {
   const select = document.getElementById("provider-auth-mode");
   if (!select) return;
-  const modes = preset?.authModes?.length ? Array.from(new Set([...preset.authModes, "keychain"])) : ["api_key", "keychain", "none"];
+  let modes = preset?.authModes?.length ? Array.from(new Set([...preset.authModes, "keychain"])) : ["api_key", "keychain", "none"];
+  // account_pool 预设不强制追加 keychain，避免混淆
+  if (preset?.defaultAuthMode === "account_pool" || preset?.authModes?.includes("account_pool")) {
+    modes = Array.from(new Set(preset.authModes || ["account_pool"]));
+  }
   const current = modes.includes(selected) ? selected : (preset?.defaultAuthMode || modes[0] || "api_key");
   select.innerHTML = modes.map((mode) => `<option value="${escapeHtml(mode)}">${escapeHtml(AUTH_MODE_LABEL[mode] || mode)}</option>`).join("");
   select.value = current;
@@ -385,6 +468,7 @@ function syncProviderAuthControls() {
   if (baseUrl) document.getElementById("provider-form").querySelector('[name="baseUrl"]').value = baseUrl;
   const keyFields = document.getElementById("provider-key-fields");
   const note = document.getElementById("provider-auth-note");
+  const poolPanel = document.getElementById("provider-account-pool-panel");
   if (!keyFields || !note) return;
   const needsKey = mode === "api_key" || mode === "keychain";
   keyFields.style.display = needsKey ? "" : "none";
@@ -393,7 +477,28 @@ function syncProviderAuthControls() {
     ? "已选择系统安全存储：macOS 使用 Keychain，Windows 使用当前用户 DPAPI 加密存储；配置文件只保存引用，不保存明文。"
     : mode === "codex_oauth"
     ? "已选择 Codex OAuth：Switchyard 会复用本机 codex login 的登录态，不需要在这里填写 API Key。"
+    : mode === "account_pool"
+    ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
+  if (poolPanel) {
+    poolPanel.style.display = mode === "account_pool" ? "" : "none";
+    if (mode === "account_pool") {
+      if (preset?.poolKind) {
+        const kindInput = document.getElementById("provider-pool-kind");
+        if (kindInput) kindInput.value = preset.poolKind;
+      }
+      if (preset?.poolStrategy) {
+        const strategy = document.getElementById("provider-pool-strategy");
+        if (strategy && !strategy.dataset.userTouched) strategy.value = preset.poolStrategy;
+      }
+      // Antigravity 混合模式需要 cliproxy API Key
+      if (preset?.poolKind === "antigravity_oauth" && keyFields) {
+        keyFields.style.display = "";
+      }
+      syncProviderPoolUi();
+      refreshProviderPoolList().catch(() => {});
+    }
+  }
 }
 
 function applyProviderPreset(preset) {
@@ -404,9 +509,19 @@ function applyProviderPreset(preset) {
   form.querySelector('[name="name"]').value = preset.name || preset.label || "";
   form.querySelector('[name="apiFormat"]').value = preset.apiFormat || "openai_chat";
   form.querySelector('[name="apiKeyEnv"]').value = preset.apiKeyEnv || "";
+  if (preset.baseUrl) form.querySelector('[name="baseUrl"]').value = preset.baseUrl;
+  if (preset.poolKind) {
+    const kindInput = document.getElementById("provider-pool-kind");
+    if (kindInput) kindInput.value = preset.poolKind;
+  }
+  if (preset.poolStrategy) {
+    const strategy = document.getElementById("provider-pool-strategy");
+    if (strategy && !strategy.dataset.userTouched) strategy.value = preset.poolStrategy;
+  }
   renderAuthModeOptions(preset, preset.defaultAuthMode || "api_key");
   renderCompatPackOptions("provider-compat-packs", preset.compatPacks || []);
   syncUsageCheckForm(preset.usage_check || {});
+  syncProviderPoolUi();
 }
 
 function usageProviderValue(config = {}) {
@@ -469,6 +584,10 @@ function providerBalanceCell(provider) {
 }
 
 function providerAuthCell(provider) {
+  if (provider.authMode === "account_pool") {
+    const kind = provider.poolKind || "xai_oauth";
+    return `<span class="chip good">${escapeHtml(poolKindUi(kind).chip)}</span>`;
+  }
   if (provider.authMode === "codex_oauth") return '<span class="chip good">Codex OAuth</span>';
   if (provider.authMode === "keychain" || provider.keychainAccount) return '<span class="chip good">安全存储</span>';
   if (provider.authMode === "none") return '<span class="chip good">无需认证</span>';
@@ -731,7 +850,8 @@ function renderModels() {
 
 const CODEX_PROFILE_MODES = {
   OFFICIAL_DIRECT: "official_direct",
-  SWITCHYARD_PROXY: "switchyard_proxy"
+  SWITCHYARD_PROXY: "switchyard_proxy",
+  PROVIDER_DIRECT: "provider_direct"
 };
 
 const PROFILE_META = {
@@ -830,7 +950,7 @@ function renderClients() {
               <button class="btn" data-profile-preview-mode="switchyard_proxy">预览三方代理</button>
               <button class="btn primary" data-profile-apply-mode="switchyard_proxy">切到三方代理</button>
             </div>
-            <p class="client-help">这一步改写 ~/.codex/config.toml。官方直连不经过 Switchyard；三方代理写入 model_provider = custom 并同步模型列表。</p>
+            <p class="client-help">这一步改写 ~/.codex/config.toml。官方直连=OpenAI 登录；三方代理=经 17888；供应商直连=像 CC Switch 把默认供应商 baseUrl+key 写入，App 直连上游（适合 AI Go）。</p>
           </div>
           <div class="codex-access-step">
             <div class="client-section-label">2. 历史会话（可选）</div>
@@ -1269,9 +1389,9 @@ document.getElementById("btn-diagnostics-apply-capabilities")?.addEventListener(
 
 async function profilePreview(clientId, mode) {
   try {
-    const { text, path } = await invoke("profile:preview", { clientId, mode });
+    const { text, path } = await invoke("profile:preview", mode === CODEX_PROFILE_MODES.PROVIDER_DIRECT ? { clientId, mode, providerId: (state.config?.clients?.codex?.defaultModel || "").split("/")[0] === "aigo-codex" ? "aigo-codex" : (state.config?.providers || []).find(p=>String(p.id).includes("aigo"))?.id, modelId: state.config?.clients?.codex?.defaultModel } : { clientId, mode });
     const status = await invoke("profile:status", { clientId });
-    const modeLabel = mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "官方直连" : mode === CODEX_PROFILE_MODES.SWITCHYARD_PROXY ? "三方代理" : "";
+    const modeLabel = mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "官方直连" : mode === CODEX_PROFILE_MODES.SWITCHYARD_PROXY ? "三方代理" : mode === CODEX_PROFILE_MODES.PROVIDER_DIRECT ? "供应商直连" : "";
     document.getElementById("profile-dialog-title").textContent = `预览 · ${PROFILE_META[clientId]?.label || clientId}${modeLabel ? ` · ${modeLabel}` : ""}`;
     document.getElementById("profile-dialog-meta").textContent = `目标：${path} · 已有备份：${status.backups}`;
     document.getElementById("profile-dialog-body").textContent = text;
@@ -1283,12 +1403,21 @@ async function profilePreview(clientId, mode) {
 
 async function profileApply(clientId, mode) {
   try {
-    const r = await invoke("profile:apply", { clientId, mode });
+    const payload = { clientId, mode };
+    if (mode === CODEX_PROFILE_MODES.PROVIDER_DIRECT) {
+      const cfg = state.config || {};
+      const defaultModelId = cfg.clients?.codex?.defaultModel || cfg.defaultModel || "";
+      const model = (cfg.models || []).find((item) => item.id === defaultModelId) || (cfg.models || []).find((item) => String(item.providerId || "").includes("aigo")) || null;
+      payload.providerId = model?.providerId || (cfg.providers || []).find((p) => String(p.id).includes("aigo"))?.id;
+      payload.modelId = model?.id || defaultModelId || null;
+      if (!payload.providerId) throw new Error("供应商直连需要默认模型对应的 provider（请先把 clients.codex.defaultModel 设为 aigo-codex/...）");
+    }
+    const r = await invoke("profile:apply", payload);
     await refreshAll();
     const catalog = r.catalogPath ? `；模型目录：${r.catalogPath}` : "";
     const modelCount = Number.isFinite(r.modelCount) ? `；模型：${r.modelCount}` : "";
     const ccSwitch = r.ccSwitchProfilePath ? "；已同步 CC Switch 网关入口" : "";
-    const direct = r.mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "；已切到官方直连，请确认 Codex App/CLI 已登录" : "";
+    const direct = r.mode === CODEX_PROFILE_MODES.OFFICIAL_DIRECT ? "；已切到官方直连，请确认 Codex App/CLI 已登录" : r.mode === CODEX_PROFILE_MODES.PROVIDER_DIRECT ? "；已切到供应商直连（App 不经 17888，对齐 CC Switch）" : "";
     toast(`已写入 ${r.path}${r.backup ? "（已备份）" : ""}${catalog}${modelCount}${ccSwitch}${direct}`);
   } catch (err) {
     toast(`写入失败：${err.message}`);
@@ -1502,20 +1631,20 @@ function renderProviderDiscovery() {
       .map(([k]) => `<span class="chip">${escapeHtml(CAPABILITY_LABEL[k] || k)}</span>`)
       .join("");
     return `
-      <tr class="discovery-table-row" data-discovery-idx="${index}">
-        <td style="width:32px; text-align:center;">
+      <tr class="discovery-table-row" data-discovery-idx="${index}" id="discovery-main-${index}">
+        <td style="text-align:center; padding-top:14px;">
           <input type="checkbox" data-discovery-enabled="${index}" ${model.enabled ? "checked" : ""}>
         </td>
-        <td class="mono" style="min-width:160px;">${escapeHtml(model.upstreamModel)}</td>
-        <td class="chip-row compact">${capChips || '<span class="tiny muted">-</span>'}</td>
-        <td style="width:160px;">
+        <td class="discovery-model-cell">${escapeHtml(model.upstreamModel)}</td>
+        <td class="discovery-caps-cell"><div class="chip-row compact">${capChips || '<span class="tiny muted">-</span>'}</div></td>
+        <td class="discovery-actions-cell">
           <div class="row-actions">
             <button class="btn" type="button" data-discovery-edit="${index}">编辑</button>
             <button class="btn" type="button" data-discovery-delete="${index}">删除</button>
           </div>
         </td>
       </tr>
-      <tr class="discovery-expand-row" id="discovery-expand-${index}" style="display:none;">
+      <tr class="discovery-expand-row is-collapsed" id="discovery-expand-${index}" hidden>
         <td colspan="4">
           <div class="discovery-expand-body">
             <div class="row">
@@ -1539,11 +1668,17 @@ function renderProviderDiscovery() {
 
   wrap.innerHTML = `
     <table class="data compact discovery-table">
+      <colgroup>
+        <col class="discovery-col-check">
+        <col class="discovery-col-model">
+        <col class="discovery-col-caps">
+        <col class="discovery-col-actions">
+      </colgroup>
       <thead><tr>
-        <th style="width:32px;"></th>
+        <th></th>
         <th>模型</th>
         <th>能力</th>
-        <th style="width:160px;"></th>
+        <th></th>
       </tr></thead>
       <tbody>${tableRows}</tbody>
     </table>
@@ -1559,10 +1694,30 @@ function renderProviderDiscovery() {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.discoveryEdit);
       const expandRow = document.getElementById(`discovery-expand-${idx}`);
+      const mainRow = document.getElementById(`discovery-main-${idx}`);
       if (!expandRow) return;
-      const isOpen = expandRow.style.display !== "none";
-      expandRow.style.display = isOpen ? "none" : "";
-      btn.textContent = isOpen ? "编辑" : "收起";
+      const isOpen = !expandRow.hidden && !expandRow.classList.contains("is-collapsed");
+      if (isOpen) {
+        expandRow.hidden = true;
+        expandRow.classList.add("is-collapsed");
+        expandRow.style.display = "none";
+        mainRow?.classList.remove("is-open");
+        btn.textContent = "编辑";
+      } else {
+        // 同时只展开一行，避免多行底线交错
+        wrap.querySelectorAll(".discovery-expand-row").forEach((row) => {
+          row.hidden = true;
+          row.classList.add("is-collapsed");
+          row.style.display = "none";
+        });
+        wrap.querySelectorAll(".discovery-table-row.is-open").forEach((row) => row.classList.remove("is-open"));
+        wrap.querySelectorAll("[data-discovery-edit]").forEach((b) => { b.textContent = "编辑"; });
+        expandRow.hidden = false;
+        expandRow.classList.remove("is-collapsed");
+        expandRow.style.display = "";
+        mainRow?.classList.add("is-open");
+        btn.textContent = "收起";
+      }
     });
   });
 
@@ -1787,7 +1942,20 @@ function collectProviderForm() {
     apiKey: raw.apiKey?.trim(),
     usage_check: usageCheckFromForm(raw)
   };
-  if (authMode === "keychain") {
+  if (authMode === "account_pool") {
+    data.providerType = "account_pool";
+    data.poolKind = raw.poolKind || document.getElementById("provider-pool-kind")?.value || currentPoolKind();
+    data.poolStrategy = raw.poolStrategy || document.getElementById("provider-pool-strategy")?.value || "weighted_round_robin";
+    // Antigravity 混合模式：请求走 CLIProxyAPI，需要本机 API Key
+    if (data.poolKind === "antigravity_oauth") {
+      if (!data.apiKey && !data.apiKeyEnv) {
+        data.apiKey = "sk-cliproxy-grok-local";
+      }
+    } else {
+      delete data.apiKeyEnv;
+      delete data.apiKey;
+    }
+  } else if (authMode === "keychain") {
     data.keychainAccount = data.id;
     data._keychainSecret = data.apiKey;
     delete data.apiKeyEnv;
@@ -1797,6 +1965,151 @@ function collectProviderForm() {
     delete data.apiKey;
   }
   return data;
+}
+
+function currentProviderFormId() {
+  const form = document.getElementById("provider-form");
+  return form?.querySelector('[name="id"]')?.value?.trim() || form?._editId || "";
+}
+
+function healthChipClass(health) {
+  if (health === "healthy") return "chip good";
+  if (health === "cooldown" || health === "disabled") return "chip bad";
+  return "chip warn";
+}
+
+function quotaChipClass(account) {
+  if (account.quotaLimitReached) return "chip bad";
+  if (account.quotaOk && account.quotaPrimaryRemainingPercent != null) {
+    if (account.quotaPrimaryRemainingPercent <= 10) return "chip bad";
+    if (account.quotaPrimaryRemainingPercent <= 30) return "chip warn";
+    return "chip good";
+  }
+  if (account.quotaError) return "chip warn";
+  return "chip";
+}
+
+async function refreshProviderPoolList() {
+  const tbody = document.getElementById("provider-pool-tbody");
+  const countEl = document.getElementById("provider-pool-count");
+  if (!tbody) return;
+  syncProviderPoolUi();
+  const providerId = currentProviderFormId();
+  const poolKind = currentPoolKind();
+  if (!providerId) {
+    tbody.innerHTML = `<tr><td colspan="6" class="tiny muted">请先填写并保存供应商标识</td></tr>`;
+    if (countEl) countEl.textContent = "0 个账号";
+    return;
+  }
+  try {
+    const pool = await invoke("account-pool:list", { providerId, poolKind });
+    const accounts = pool?.accounts || [];
+    if (countEl) countEl.textContent = `${accounts.length} 个账号`;
+    const strategy = document.getElementById("provider-pool-strategy");
+    if (strategy && pool?.strategy) strategy.value = pool.strategy;
+    if (!accounts.length) {
+      const emptyHint = poolKind === "codex_oauth"
+        ? "尚未导入账号 · 可点「选择 JSON 文件…」批量导入"
+        : poolKind === "antigravity_oauth"
+        ? "尚未导入账号 · 可从文件夹导入"
+        : "尚未导入账号 · 可粘贴或导入";
+      tbody.innerHTML = `<tr><td colspan="6" class="tiny muted">${emptyHint}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = accounts.map((account) => {
+      const email = escapeHtml(account.email || account.name || account.id.slice(0, 8));
+      const health = account.health || "healthy";
+      const healthLabel = escapeHtml(account.healthLabel || health);
+      const enabled = account.enabled !== false;
+      const failHint = account.consecutiveFailures
+        ? `连续失败 ${account.consecutiveFailures}`
+        : "";
+      const errHint = account.lastError ? String(account.lastError).slice(0, 200) : "";
+      const statusTitle = escapeHtml([failHint, errHint].filter(Boolean).join(" · ") || "运行健康度");
+      const accessLabel = escapeHtml(
+        account.accessStatusLabel ||
+        (account.tokenExpired
+          ? (account.canAutoRefresh ? "Access 已过期 · 可自动续" : "Access 已过期 · 无续期凭证")
+          : (account.expiresAt ? `Access 有效至 ${String(account.expiresAt).replace("T", " ").slice(0, 16)}` : "Access 未知"))
+      );
+      const accessChip = account.tokenExpired
+        ? (account.canAutoRefresh ? "chip warn" : "chip bad")
+        : "chip good";
+      const quotaLabel = escapeHtml(account.quotaLabel || "未查询");
+      const quotaTitle = escapeHtml(
+        [
+          account.planType ? `plan ${account.planType}` : "",
+          account.quotaSummary || "",
+          account.quotaError || "",
+          account.quotaFetchedAt ? `查询于 ${String(account.quotaFetchedAt).replace("T", " ").slice(0, 16)}` : ""
+        ].filter(Boolean).join(" · ") || "点击「刷新额度」查询"
+      );
+      const planChip = account.planType
+        ? ` <span class="chip">${escapeHtml(account.planType)}</span>`
+        : "";
+      return `<tr data-account-id="${escapeHtml(account.id)}">
+        <td>${email}${enabled ? "" : ' <span class="chip warn">停用</span>'}${planChip}</td>
+        <td><span class="${healthChipClass(health)}" title="${statusTitle}">${healthLabel}</span></td>
+        <td>${escapeHtml(account.weight || 1)}</td>
+        <td class="tiny"><span class="${quotaChipClass(account)}" title="${quotaTitle}">${quotaLabel}</span></td>
+        <td class="tiny"><span class="${accessChip}" title="OAuth access token 过期时间，不是订阅到期">${accessLabel}</span>${account.hasRefreshToken || account.hasSessionToken ? ' <span class="chip good">可续</span>' : ""}</td>
+        <td>
+          <button class="btn tiny" type="button" data-pool-quota="${escapeHtml(account.id)}">额度</button>
+          <button class="btn tiny" type="button" data-pool-toggle="${escapeHtml(account.id)}" data-enabled="${enabled ? "1" : "0"}">${enabled ? "停用" : "启用"}</button>
+          <button class="btn tiny" type="button" data-pool-delete="${escapeHtml(account.id)}">删除</button>
+        </td>
+      </tr>`;
+    }).join("");
+    tbody.querySelectorAll("[data-pool-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-pool-toggle");
+        const enabled = btn.getAttribute("data-enabled") === "1";
+        await invoke("account-pool:patch", {
+          providerId,
+          poolKind,
+          accountIds: [id],
+          patch: { enabled: !enabled }
+        });
+        await refreshProviderPoolList();
+        toast(enabled ? "已停用账号" : "已启用账号");
+      });
+    });
+    tbody.querySelectorAll("[data-pool-delete]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-pool-delete");
+        if (!confirm("确认从账号池删除该账号？")) return;
+        await invoke("account-pool:delete", { providerId, poolKind, accountIds: [id] });
+        await refreshProviderPoolList();
+        toast("已删除账号");
+      });
+    });
+    tbody.querySelectorAll("[data-pool-quota]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-pool-quota");
+        try {
+          toast("查询额度中…");
+          const form = document.getElementById("provider-form");
+          const proxyUrl = form?.querySelector('[name="proxyUrl"]')?.value?.trim() || "";
+          const result = await invoke("account-pool:refresh-quota", {
+            providerId,
+            poolKind,
+            accountId: id,
+            proxyUrl
+          });
+          await refreshProviderPoolList();
+          if (!result?.ok && !result?.quota?.ok) {
+            toast(result?.quota?.summary || result?.error || "额度查询失败");
+          } else {
+            toast(result?.quota?.summary || "额度已更新");
+          }
+        } catch (err) {
+          toast(err?.message || String(err));
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" class="tiny muted">加载失败：${escapeHtml(err?.message || err)}</td></tr>`;
+  }
 }
 
 document.getElementById("models-search").addEventListener("input", (e) => {
@@ -1831,6 +2144,18 @@ function openProviderDialog(editId) {
     form.querySelector('[name="apiKeyEnv"]').value = existing.apiKeyEnv || "";
     form.querySelector('[name="apiKey"]').value = existing.apiKey || "";
     renderAuthModeOptions(providerPresetById(existing.presetId), existing.authMode || "api_key");
+    if (existing.poolKind) {
+      const kindInput = document.getElementById("provider-pool-kind");
+      if (kindInput) kindInput.value = existing.poolKind;
+    }
+    if (existing.poolStrategy) {
+      const strategy = document.getElementById("provider-pool-strategy");
+      if (strategy) {
+        strategy.value = existing.poolStrategy;
+        delete strategy.dataset.userTouched;
+      }
+    }
+    syncProviderPoolUi();
     syncProviderRiskNote(existing);
     renderClientScopeOptions("provider-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("provider-compat-packs", existing.compatPacks || []);
@@ -1888,6 +2213,118 @@ document.getElementById("provider-auth-mode").addEventListener("change", () => {
   syncProviderAuthControls();
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
 });
+document.getElementById("provider-pool-strategy")?.addEventListener("change", async (e) => {
+  e.target.dataset.userTouched = "1";
+  const providerId = currentProviderFormId();
+  if (!providerId) return;
+  try {
+    await invoke("account-pool:set-strategy", {
+      providerId,
+      poolKind: currentPoolKind(),
+      strategy: e.target.value
+    });
+  } catch {}
+});
+document.getElementById("btn-pool-refresh")?.addEventListener("click", () => {
+  refreshProviderPoolList().catch((err) => toast(err?.message || String(err)));
+});
+document.getElementById("btn-pool-refresh-quota")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  try {
+    toast(poolKind === "codex_oauth" ? "正在批量查询 Codex 额度…" : "正在查询账号信息…");
+    const form = document.getElementById("provider-form");
+    const proxyUrl = form?.querySelector('[name="proxyUrl"]')?.value?.trim() || "";
+    const result = await invoke("account-pool:refresh-quota", { providerId, poolKind, proxyUrl });
+    await refreshProviderPoolList();
+    toast(`额度刷新完成：成功 ${result.success || 0}，失败 ${result.failed || 0}，共 ${result.total || 0}`);
+  } catch (err) {
+    toast(err?.message || String(err));
+  }
+});
+document.getElementById("btn-pool-import-text")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  if (poolKind === "antigravity_oauth") return toast("Antigravity 粘贴导入暂未开放");
+  const text = document.getElementById("provider-pool-import-text")?.value || "";
+  if (!text.trim()) {
+    return toast(poolKind === "codex_oauth"
+      ? "请粘贴 Codex auth.json / JSON 数组 / refresh_token 列表"
+      : "请粘贴 JSON / RT / 卡密 SSO");
+  }
+  try {
+    toast(poolKind === "codex_oauth"
+      ? "正在导入 Codex 账号…"
+      : "正在导入（若含 SSO 会自动转换，请稍候）…");
+    const form = document.getElementById("provider-form");
+    const proxyUrl = form?.querySelector('[name="proxyUrl"]')?.value?.trim() || "";
+    const result = await invoke("account-pool:import-text", {
+      providerId,
+      poolKind,
+      text,
+      proxyUrl,
+      convertSso: poolKind === "xai_oauth"
+    });
+    if (!result.ok) return toast(result.error || "导入失败");
+    document.getElementById("provider-pool-import-text").value = "";
+    await refreshProviderPoolList();
+    const conv = result.converted ? `，SSO转换 ${result.converted}` : "";
+    const fail = result.convertErrors?.length ? `，转换失败 ${result.convertErrors.length}` : "";
+    toast(`导入完成：新增 ${result.added}，跳过 ${result.skipped}${conv}${fail}`);
+  } catch (err) {
+    toast(err?.message || String(err));
+  }
+});
+document.getElementById("btn-pool-import-cpa")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  try {
+    toast("正在从本机导入…");
+    const result = await invoke("account-pool:import-cpa", { providerId, poolKind });
+    if (!result.ok) return toast(result.error || "导入失败");
+    await refreshProviderPoolList();
+    const label = poolKind === "codex_oauth"
+      ? "Codex auth"
+      : poolKind === "antigravity_oauth"
+      ? "Antigravity"
+      : "CLIProxyAPI";
+    const syncHint = result.sync?.written != null ? `，同步 CPA ${result.sync.written}` : "";
+    toast(`从 ${label} 导入：新增 ${result.added}，跳过 ${result.skipped}，扫描 ${result.scanned || 0}${syncHint}`);
+  } catch (err) {
+    toast(err?.message || String(err));
+  }
+});
+document.getElementById("btn-pool-import-files")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  try {
+    const result = await invoke("account-pool:import-files-dialog", { providerId, poolKind });
+    if (result?.cancelled) return;
+    if (!result?.ok) return toast(result?.error || "导入失败");
+    await refreshProviderPoolList();
+    toast(`已选 ${result.selectedFiles || 0} 个文件：新增 ${result.added}，跳过 ${result.skipped}，识别 ${result.scanned || 0}`);
+  } catch (err) {
+    toast(err?.message || String(err));
+  }
+});
+document.getElementById("btn-pool-import-dir")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  try {
+    const result = await invoke("account-pool:import-dir-dialog", { providerId, poolKind });
+    if (result?.cancelled) return;
+    if (!result?.ok) return toast(result?.error || "导入失败");
+    await refreshProviderPoolList();
+    toast(`文件夹导入：新增 ${result.added}，跳过 ${result.skipped}，识别 ${result.scanned || 0}`);
+  } catch (err) {
+    toast(err?.message || String(err));
+  }
+});
 document.getElementById("provider-form").addEventListener("input", (e) => {
   if (["id", "name", "baseUrl"].includes(e.target?.name)) refreshProviderCompatRecommendations().catch(() => {});
 });
@@ -1909,6 +2346,15 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
   const editId = form._editId;
   if (data.authMode === "keychain" && keychainSecret) {
     await invoke("keychain:set", { account: data.keychainAccount || data.id, secret: keychainSecret });
+  }
+  if (data.authMode === "account_pool" && data.poolStrategy) {
+    try {
+      await invoke("account-pool:set-strategy", {
+        providerId: data.id,
+        poolKind: data.poolKind || "xai_oauth",
+        strategy: data.poolStrategy
+      });
+    } catch {}
   }
   let providers = [...state.config.providers];
   const discoveredModels = state.providerDiscovery

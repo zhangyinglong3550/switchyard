@@ -7,6 +7,7 @@ import dns from "node:dns";
 import { ProxyAgent } from "undici";
 import { safeJsonParse } from "../utils.mjs";
 import { getProviderKeychainSecret, hasKeychainSecret } from "../keychain-store.mjs";
+import { accountPoolReady, isAccountPoolProvider } from "../account-pool/index.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
@@ -17,6 +18,8 @@ try {
 
 export function resolveApiKey(provider) {
   if (provider?.authMode === "none") return "";
+  // 账号池在 dispatch 层绑定后会变成临时 api_key；未绑定前不在这里读池
+  if (isAccountPoolProvider(provider) && !provider?.apiKey) return "";
   if (provider?.authMode === "keychain" || provider?.keychainAccount) return getProviderKeychainSecret(provider);
   if (provider?.apiKey) return provider.apiKey;
   if (provider?.apiKeyEnv) return process.env[provider.apiKeyEnv] || "";
@@ -28,6 +31,8 @@ export function isCodexOAuthProvider(provider) {
     provider?.authProvider === "codex_oauth" ||
     provider?.providerType === "codex_oauth";
 }
+
+export { isAccountPoolProvider };
 
 export function codexAuthPath() {
   return path.join(os.homedir(), ".codex", "auth.json");
@@ -59,6 +64,15 @@ function extractAccountId(auth, accessToken, provider) {
 }
 
 export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null } = {}) {
+  // 账号池绑定的多 Codex 号：内存 token 优先
+  if (provider?._codexAccessToken) {
+    return {
+      ok: true,
+      authFile: "(account-pool)",
+      accessToken: provider._codexAccessToken,
+      accountId: provider._codexAccountId || provider.codexAccountId || provider.accountId || ""
+    };
+  }
   try {
     if (!fs.existsSync(authFile)) return { ok: false, reason: "missing-auth-file", authFile };
     const auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
@@ -110,6 +124,40 @@ function requestOverrideHeaders(opts) {
     out[name] = String(value);
   }
   return out;
+}
+
+/** 从 Codex App 入站请求提取应透传给上游的身份/协议头（对齐 CC Switch proxy 思路）。 */
+export function extractForwardableClientHeaders(incoming = {}) {
+  if (!incoming || typeof incoming !== "object") return {};
+  const drop = new Set([
+    "host", "connection", "content-length", "transfer-encoding", "keep-alive",
+    "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
+    // 请求体/协商类头必须由 Switchyard 自己写，避免覆盖上游 Content-Type 导致 xAI 等返回 415
+    "content-type", "accept", "accept-encoding", "accept-language",
+    "authorization", "x-api-key", "x-goog-api-key",
+    "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto", "x-forwarded-for", "forwarded",
+    "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "true-client-ip",
+    "x-request-id", "x-correlation-id", "x-trace-id", "traceparent", "tracestate"
+  ]);
+  const out = {};
+  for (const [rawKey, rawValue] of Object.entries(incoming)) {
+    const key = String(rawKey || "").trim();
+    if (!key || drop.has(key.toLowerCase())) continue;
+    const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+    if (value == null || value === "") continue;
+    out[key] = String(value);
+  }
+  return out;
+}
+
+export function buildOutboundAuthAndClientHeaders(provider, scheme, opts = {}) {
+  const auth = providerAuthHeaders(provider, scheme);
+  const overrides = requestOverrideHeaders(opts);
+  const client = opts?.forwardClientHeaders === false
+    ? {}
+    : extractForwardableClientHeaders(opts?.incomingHeaders || opts?.clientHeaders || {});
+  // 顺序：客户端身份头 → 供应商 auth（覆盖 dummy Authorization）→ requestOverrides
+  return { ...client, ...auth, ...overrides };
 }
 
 function joinUrl(baseUrl, suffix) {
@@ -183,13 +231,13 @@ async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKee
 
 export async function callOpenAIChat(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/chat/completions");
-  return postJson(url, body, { ...providerAuthHeaders(provider, "bearer"), ...requestOverrideHeaders(opts) }, opts);
+  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), opts);
 }
 
 export async function callOpenAIResponses(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/responses");
   const codexOAuth = isCodexOAuthProvider(provider);
-  return postJson(url, body, { ...providerAuthHeaders(provider, "bearer"), ...requestOverrideHeaders(opts) }, {
+  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), {
     ...opts,
     noKeepAlive: opts?.noKeepAlive ?? codexOAuth,
     retryOnFetchError: opts?.retryOnFetchError ?? codexOAuth
@@ -198,11 +246,12 @@ export async function callOpenAIResponses(provider, body, opts) {
 
 export async function callAnthropicMessages(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/v1/messages");
-  return postJson(url, body, { ...providerAuthHeaders(provider, "anthropic"), ...requestOverrideHeaders(opts) }, opts);
+  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), opts);
 }
 
 export function providerReady(provider) {
   if (!provider?.baseUrl) return false;
+  if (isAccountPoolProvider(provider)) return accountPoolReady(provider);
   if (isCodexOAuthProvider(provider)) return readCodexOAuthAuth({ provider }).ok;
   if (provider.authMode === "none") return true;
   if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(provider);
