@@ -684,6 +684,23 @@
       </label>
       <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
       <label>Provider 代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890；所有模型默认继承"></label>
+      <details class="callout-details compact" open>
+        <summary class="callout-title">网关重试（供应商级 · 对 Agent 透明）</summary>
+        <div class="callout-body">
+          调用该供应商下模型失败时，网关<strong>先在本地重试可恢复错误</strong>，成功后再把结果返回给 Agent；不会把中间失败立刻甩给客户端。
+          默认最多 3 次（网络失败 / 429 / 5xx）；流式仅在尚未写出内容前重试。下方模型可单独覆盖本设置。
+        </div>
+        <div class="row">
+          <label>启用重试
+            <select class="field" name="retryEnabled">
+              <option value="default">默认（开）</option>
+              <option value="on">强制开启</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="默认 3"></label>
+        </div>
+      </details>
       <label>高级：路由策略
         <select class="field" name="routingMode">
           <option value="auto">自动（协议一致时原生透传）</option>
@@ -921,17 +938,19 @@
       </label>
       <label>代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890"></label>
       <details class="callout-details compact">
-        <summary class="callout-title">网关重试（可恢复失败）</summary>
-        <div class="callout-body">默认最多 3 次，仅网络失败/429/5xx；流式仅在尚未向客户端写出内容前重试。填 1 或关闭即禁用。</div>
+        <summary class="callout-title">网关重试（模型级 · 覆盖供应商）</summary>
+        <div class="callout-body">
+          与供应商级相同：失败先在网关重试，成功后再回给 Agent。此处可覆盖该模型所属供应商的重试设置；默认继承供应商 / 全局（最多 3 次）。
+        </div>
         <div class="row">
           <label>启用重试
             <select class="field" name="retryEnabled">
-              <option value="default">默认（开）</option>
+              <option value="default">继承供应商（默认开）</option>
               <option value="on">强制开启</option>
               <option value="off">关闭</option>
             </select>
           </label>
-          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="默认 3"></label>
+          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="继承供应商 / 默认 3"></label>
         </div>
       </details>
       <div class="callout compact">

@@ -2034,11 +2034,41 @@ function applyCompatRecommendations(target) {
   toast(applied.length ? `已勾选 ${applied.length} 个推荐兼容包` : "没有可应用的兼容包");
 }
 
+/** 从表单字段解析网关重试配置（供应商 / 模型共用字段名） */
+function collectRetryFromRaw(raw) {
+  const retryEnabled = String(raw.retryEnabled || "default");
+  const retryMaxRaw = String(raw.retryMaxAttempts || "").trim();
+  const retryMaxAttempts = retryMaxRaw ? Math.min(10, Math.max(1, Number(retryMaxRaw) || 1)) : undefined;
+  if (retryEnabled === "off") {
+    return { enabled: false, ...(retryMaxAttempts ? { maxAttempts: 1 } : {}) };
+  }
+  if (retryEnabled === "on" || retryMaxAttempts) {
+    return {
+      ...(retryEnabled === "on" ? { enabled: true } : {}),
+      maxAttempts: retryMaxAttempts || 3
+    };
+  }
+  return undefined;
+}
+
+function fillRetryFormFields(form, retry) {
+  if (!form) return;
+  const enabled = form.querySelector('[name="retryEnabled"]');
+  const max = form.querySelector('[name="retryMaxAttempts"]');
+  if (!enabled || !max) return;
+  const r = retry || {};
+  if (r.enabled === false) enabled.value = "off";
+  else if (r.enabled === true) enabled.value = "on";
+  else enabled.value = "default";
+  max.value = r.maxAttempts || "";
+}
+
 function collectProviderForm() {
   const form = document.getElementById("provider-form");
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
   const authMode = raw.authMode || "api_key";
+  const retry = collectRetryFromRaw(raw);
   const data = {
     id: raw.id?.trim(),
     name: raw.name?.trim(),
@@ -2048,6 +2078,7 @@ function collectProviderForm() {
     baseUrl: raw.baseUrl?.trim(),
     proxyUrl: raw.proxyUrl?.trim() || undefined,
     routingMode: raw.routingMode || "auto",
+    ...(retry ? { retry } : {}),
     allowedClients: collectClientScopeOptions("provider-visible-clients"),
     compatPacks: collectCompatPackOptions("provider-compat-packs"),
     apiKeyEnv: raw.apiKeyEnv?.trim(),
@@ -2261,6 +2292,7 @@ function openProviderDialog(editId) {
     form.querySelector('[name="routingMode"]').value = existing.routingMode || "auto";
     form.querySelector('[name="apiKeyEnv"]').value = existing.apiKeyEnv || "";
     form.querySelector('[name="apiKey"]').value = existing.apiKey || "";
+    fillRetryFormFields(form, existing.retry);
     renderAuthModeOptions(providerPresetById(existing.presetId), existing.authMode || "api_key");
     if (existing.poolKind) {
       const kindInput = document.getElementById("provider-pool-kind");
@@ -2303,6 +2335,7 @@ function openProviderDialog(editId) {
     form.querySelector('[name="id"]').readOnly = false;
     const idNoteNew = document.getElementById("provider-id-rename-note");
     if (idNoteNew) idNoteNew.style.display = "none";
+    fillRetryFormFields(form, null);
     renderAuthModeOptions(null, "api_key");
     syncProviderRiskNote(null);
     renderClientScopeOptions("provider-visible-clients", ["*"]);
@@ -2731,11 +2764,7 @@ function openModelDialog(editId) {
     form.querySelector('[name="aliases"]').value = (existing.aliases || []).join(", ");
     form.querySelector('[name="visionFallbackModelId"]').value = existing.visionFallbackModelId || "";
     form.querySelector('[name="proxyUrl"]').value = existing.proxyUrl || "";
-    const retry = existing.retry || {};
-    if (retry.enabled === false) form.querySelector('[name="retryEnabled"]').value = "off";
-    else if (retry.enabled === true) form.querySelector('[name="retryEnabled"]').value = "on";
-    else form.querySelector('[name="retryEnabled"]').value = "default";
-    form.querySelector('[name="retryMaxAttempts"]').value = retry.maxAttempts || "";
+    fillRetryFormFields(form, existing.retry);
     renderClientScopeOptions("model-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("model-compat-packs", existing.compatPacks || []);
     if (existing.capabilities) {
@@ -2751,8 +2780,7 @@ function openModelDialog(editId) {
   } else {
     renderClientScopeOptions("model-visible-clients", ["*"]);
     renderCompatPackOptions("model-compat-packs", []);
-    form.querySelector('[name="retryEnabled"]').value = "default";
-    form.querySelector('[name="retryMaxAttempts"]').value = "";
+    fillRetryFormFields(form, null);
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
     form.querySelector('[name="cap-reasoning"]').checked = false;
@@ -2779,18 +2807,7 @@ function collectModelForm() {
   const form = document.getElementById("model-form");
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
-  const retryEnabled = String(raw.retryEnabled || "default");
-  const retryMaxRaw = String(raw.retryMaxAttempts || "").trim();
-  const retryMaxAttempts = retryMaxRaw ? Math.min(10, Math.max(1, Number(retryMaxRaw) || 1)) : undefined;
-  let retry;
-  if (retryEnabled === "off") {
-    retry = { enabled: false, ...(retryMaxAttempts ? { maxAttempts: 1 } : {}) };
-  } else if (retryEnabled === "on" || retryMaxAttempts) {
-    retry = {
-      ...(retryEnabled === "on" ? { enabled: true } : {}),
-      maxAttempts: retryMaxAttempts || 3
-    };
-  }
+  const retry = collectRetryFromRaw(raw);
   return {
     id: String(raw.id || "").trim(),
     providerId: String(raw.providerId || "").trim(),
