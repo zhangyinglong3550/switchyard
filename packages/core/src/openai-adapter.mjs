@@ -334,6 +334,7 @@ class ThinkTagStreamSplitter {
 
 export async function streamChatAsResponses(upstream, res, requestedModel, options = {}) {
   const namespaceMap = options.namespaceMap || {};
+  const onUsage = typeof options.onUsage === "function" ? options.onUsage : null;
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -353,6 +354,7 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
   let nextOutputIndex = 0;
   let reasoningOutputIndex = null;
   let messageOutputIndex = null;
+  let capturedUsage = null;
   const thinkSplitter = new ThinkTagStreamSplitter();
   const ensureReasoningStarted = () => {
     if (reasoningStarted) return;
@@ -462,6 +464,20 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     if (!data || data === "[DONE]") return;
     const event = safeJsonParse(data);
     if (!event) return;
+    // Chat 流最终 usage（stream_options.include_usage）
+    if (event.usage && typeof event.usage === "object") {
+      capturedUsage = {
+        prompt_tokens: Number(event.usage.prompt_tokens || event.usage.input_tokens || 0) || 0,
+        completion_tokens: Number(event.usage.completion_tokens || event.usage.output_tokens || 0) || 0,
+        total_tokens: Number(event.usage.total_tokens || 0) || 0
+      };
+      if (!capturedUsage.total_tokens) {
+        capturedUsage.total_tokens = capturedUsage.prompt_tokens + capturedUsage.completion_tokens;
+      }
+      if (capturedUsage.total_tokens > 0 && onUsage) {
+        try { onUsage(capturedUsage); } catch {}
+      }
+    }
     const choice = event.choices?.[0] || {};
     const rawDelta = choice.delta || {};
     const finishReason = choice.finish_reason;
@@ -640,7 +656,18 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
       output.push(completedCall);
     }
   }
-  writeEvent(res, "response.completed", { type: "response.completed", response: { ...baseResponse, status: "completed", output } });
+  const completedResponse = { ...baseResponse, status: "completed", output };
+  if (capturedUsage && (capturedUsage.total_tokens || capturedUsage.prompt_tokens || capturedUsage.completion_tokens)) {
+    completedResponse.usage = {
+      input_tokens: capturedUsage.prompt_tokens || 0,
+      output_tokens: capturedUsage.completion_tokens || 0,
+      total_tokens: capturedUsage.total_tokens || 0
+    };
+    if (onUsage) {
+      try { onUsage(capturedUsage); } catch {}
+    }
+  }
+  writeEvent(res, "response.completed", { type: "response.completed", response: completedResponse });
   res.write("data: [DONE]\n\n");
   res.end();
 }

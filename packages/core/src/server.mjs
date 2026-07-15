@@ -14,6 +14,13 @@ import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { responsesToChat, chatToResponse, streamChatAsResponses, extractNamespaceMap } from "./openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
+import {
+  applyUsageToRequestRecord,
+  extractUsageFromSseDataLine,
+  extractUsageFromSseJson,
+  mergeUsage,
+  normalizeUsageObject
+} from "./stream-usage.mjs";
 registerBuiltinPatches();
 
 const CLIENT_PROTOCOL = {
@@ -534,6 +541,14 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
       argumentsPreview: `${functionCallDeltaCount} delta events, ${functionCallDoneCount} done events`
     });
   }
+  // 流式 usage：优先 diag 解析到的 usage，再回退空
+  const streamUsage = summary?.usage
+    ? {
+      promptTokens: firstNumber(summary.usage.prompt_tokens, summary.usage.promptTokens),
+      completionTokens: firstNumber(summary.usage.completion_tokens, summary.usage.completionTokens),
+      totalTokens: firstNumber(summary.usage.total_tokens, summary.usage.totalTokens)
+    }
+    : normalizeResponseUsage(null);
   return {
     stream: true,
     status,
@@ -541,7 +556,7 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
     reasoning: "",
     toolCalls,
     finishReason: summary?.sawTerminalEvent ? "completed" : "incomplete",
-    usage: normalizeResponseUsage(null),
+    usage: streamUsage,
     error,
     streamDiagnostics: summary || null,
     streamEventSummary: {
@@ -561,6 +576,8 @@ function recordStreamDiagnostics(record, summary, { status = 0, error = "" } = {
   if (!record || !summary) return;
   if (!record.requestSummary) record.requestSummary = {};
   record.requestSummary.streamDiagnostics = summary;
+  // 把流式解析到的 usage 落到 requestRecord 顶层，request_logs 入库才能汇总 Token
+  if (summary.usage) applyUsageToRequestRecord(record, summary.usage);
   record.responseSummary = responseSummaryFromStreamDiagnostics(summary, { status, error: error || record.error || "" });
 }
 
@@ -624,12 +641,8 @@ function recordResponsePreview(record, payload) {
 
 function recordUsage(record, payload) {
   if (!record) return;
-  const usage = payload?.usage || {};
-  const prompt = firstNumber(usage.prompt_tokens, usage.input_tokens);
-  const completion = firstNumber(usage.completion_tokens, usage.output_tokens);
-  record.promptTokens = prompt;
-  record.completionTokens = completion;
-  record.totalTokens = firstNumber(usage.total_tokens, prompt + completion);
+  // 兼容 chat/responses/anthropic 的 usage 字段名
+  applyUsageToRequestRecord(record, payload?.usage || payload);
 }
 
 function requestPayloadError(payload) {
@@ -675,8 +688,14 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
         // Anthropic SSE → OpenAI Chat SSE 实时翻译
         return streamAnthropicAsChat(result.upstream, res, body.model);
       }
-      // openai_chat 直通
-      return pipeStream(result.upstream, res, { provider: route.provider, model: route.model });
+      // openai_chat 直通：流结束后把 usage 落库
+      return pipeStream(result.upstream, res, {
+        provider: route.provider,
+        model: route.model,
+        onStreamSummary: (summary) => {
+          recordStreamDiagnostics(requestRecord, summary, { status: result.upstream?.status || 0 });
+        }
+      });
     }
     // 上游不支持流式或返回错误，fallback 到非流式 + 合成 SSE
     if (result.kind === "error") {
@@ -819,7 +838,15 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       return;
     }
     recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
-    return streamChatAsResponses(result.upstream, res, body.model, { namespaceMap });
+    return streamChatAsResponses(result.upstream, res, body.model, {
+      namespaceMap,
+      onUsage: (usage) => {
+        applyUsageToRequestRecord(requestRecord, usage);
+        if (!requestRecord.responseSummary) requestRecord.responseSummary = {};
+        requestRecord.responseSummary.usage = normalizeResponseUsage(usage);
+        requestRecord.responseSummary.stream = true;
+      }
+    });
   }
   const result = await dispatchChat(route.provider, route.upstreamModel, chatBody, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
   recordDispatchCompatibility(requestRecord, result);
@@ -945,9 +972,9 @@ function streamMeaningfulResponsesEventSeen(text) {
 }
 
 function createStreamDiagnostics(protocol) {
-  if (protocol !== "responses") return null;
+  // chat / responses 都收集 usage；responses 额外有事件计数
   return {
-    protocol,
+    protocol: protocol || "stream",
     chunkCount: 0,
     byteCount: 0,
     eventCounts: {},
@@ -957,6 +984,7 @@ function createStreamDiagnostics(protocol) {
     preludeRetryCount: 0,
     sawTerminalEvent: false,
     sawMeaningfulEvent: false,
+    usage: null,
     _lineBuffer: "",
     _eventName: "message"
   };
@@ -1004,6 +1032,9 @@ function observeResponsesStreamText(diag, text) {
       continue;
     }
     incrementCounter(diag.dataTypeCounts, parseJsonType(data));
+    // 流式 usage：从 response.completed / chat final chunk / message_delta 等提取
+    const usage = extractUsageFromSseDataLine(data);
+    if (usage) diag.usage = mergeUsage(diag.usage, usage);
   }
 }
 
@@ -1018,6 +1049,7 @@ function publicStreamDiagnostics(diag, extra = {}) {
     doneCount: diag.doneCount,
     retryCount: diag.retryCount,
     preludeRetryCount: diag.preludeRetryCount,
+    usage: diag.usage || null,
     sawTerminalEvent: Boolean(extra.sawTerminalEvent ?? diag.sawTerminalEvent),
     sawMeaningfulEvent: Boolean(extra.sawMeaningfulEvent ?? diag.sawMeaningfulEvent)
   };
@@ -1034,7 +1066,8 @@ async function pipeRawStream(upstream, res, { protocol = "", model = "", onError
   let sawMeaningfulEvent = false;
   let scanTail = "";
   const decoder = new TextDecoder();
-  const streamDiagnostics = createStreamDiagnostics(protocol);
+  // 始终建 diag，以便提取流式 usage（chat/responses 均可）
+  const streamDiagnostics = createStreamDiagnostics(protocol || "responses");
   let retried = false;
   let pendingPreludeChunks = [];
   let pendingPreludeBytes = 0;
@@ -1232,9 +1265,16 @@ async function pipeStream(upstream, res, ctx) {
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive"
   });
-  if (!upstream.body) { res.end(); return; }
+  if (!upstream.body) {
+    if (typeof ctx?.onStreamSummary === "function") {
+      try { ctx.onStreamSummary({ protocol: "chat", usage: null, sawTerminalEvent: false }); } catch {}
+    }
+    res.end();
+    return;
+  }
   const decoder = new TextDecoder();
   let buf = "";
+  let usage = null;
   try {
     for await (const chunk of upstream.body) {
       buf += decoder.decode(chunk, { stream: true });
@@ -1243,17 +1283,37 @@ async function pipeStream(upstream, res, ctx) {
       buf = lines.pop() || "";
       for (const line of lines) {
         if (!line) { res.write("\n"); continue; }
+        // 提取 chat SSE usage（含 stream_options.include_usage 最终 chunk）
+        if (line.startsWith("data:")) {
+          const nextUsage = extractUsageFromSseDataLine(line.slice(5).trim());
+          if (nextUsage) usage = mergeUsage(usage, nextUsage);
+        }
         const transformed = ctx ? applyStreamLine(line, ctx) : line;
         if (transformed == null) continue;
         res.write(transformed + "\n");
       }
     }
     if (buf) {
+      if (buf.startsWith("data:")) {
+        const nextUsage = extractUsageFromSseDataLine(buf.slice(5).trim());
+        if (nextUsage) usage = mergeUsage(usage, nextUsage);
+      }
       const transformed = ctx ? applyStreamLine(buf, ctx) : buf;
       if (transformed != null) res.write(transformed);
     }
   } catch (err) {
     writeStreamError(res, err);
+  } finally {
+    if (typeof ctx?.onStreamSummary === "function") {
+      try {
+        ctx.onStreamSummary({
+          protocol: "chat",
+          usage,
+          sawTerminalEvent: true,
+          sawMeaningfulEvent: true
+        });
+      } catch {}
+    }
   }
   res.end();
 }
