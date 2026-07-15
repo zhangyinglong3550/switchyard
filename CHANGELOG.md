@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.3 — 2026-07-15
+
+### Fix
+
+- **双供应商同名模型串路由**：如 `beike/gpt-5.6` 与 `codex/gpt-5.6` 同时存在时，不再因共享上游名 `gpt-5.6` 而 first-wins 打到一家。
+  - 路由：短名（upstream/alias）仅在全局唯一时生效；冲突时只认完整 model id。
+  - Codex catalog：上游名冲突时两边都用完整 slug（`beike/gpt-5.6` / `codex/gpt-5.6`），避免官方 Codex 被压成裸 `gpt-5.6` 后与另一家混淆。
+
+### 说明
+
+- 请重载配置并重新同步 Codex profile，刷新 model catalog。
+- 在 Codex 中选择带完整 id / 供应商后缀的项；旧会话若锁了裸 `gpt-5.6` 请新开会话。
+
 ## 2.1.2 — 2026-07-14
 
 ### Fix
