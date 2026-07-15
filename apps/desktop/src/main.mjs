@@ -199,45 +199,150 @@ function sendUpdateEvent(channel, payload) {
   }
 }
 
+async function fetchLatestReleaseViaApi(fetchImpl) {
+  const res = await fetchImpl(GITHUB_RELEASES_API, {
+    headers: {
+      "User-Agent": "Switchyard-Desktop",
+      Accept: "application/vnd.github+json"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    const err = new Error(`GitHub API ${res.status}${body ? `: ${body.slice(0, 180)}` : ""}`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  return {
+    latestTag: String(data.tag_name || "").replace(/^v/, ""),
+    url: data.html_url || "https://github.com/zhangyinglong3550/switchyard/releases/latest",
+    notes: String(data.body || "").slice(0, 2000),
+    publishedAt: data.published_at || "",
+    assets: data.assets || []
+  };
+}
+
+/** API 限流时：跟 releases/latest 重定向解析 tag（不吃 REST 配额） */
+async function fetchLatestReleaseViaRedirect(fetchImpl) {
+  const page = "https://github.com/zhangyinglong3550/switchyard/releases/latest";
+  const res = await fetchImpl(page, {
+    headers: { "User-Agent": "Switchyard-Desktop", Accept: "text/html" },
+    signal: AbortSignal.timeout(15000),
+    redirect: "manual"
+  });
+  const location = res.headers.get("location") || res.headers.get("Location") || "";
+  // 跟随一轮（有的环境返回 302）
+  let tagUrl = location;
+  if (!tagUrl && res.status >= 300 && res.status < 400) {
+    tagUrl = location;
+  }
+  if (!tagUrl && res.ok) {
+    // 已到最终页
+    tagUrl = res.url || page;
+  }
+  if (tagUrl && !tagUrl.startsWith("http")) {
+    tagUrl = new URL(tagUrl, "https://github.com").toString();
+  }
+  const finalUrl = tagUrl || res.url || page;
+  const m = String(finalUrl).match(/\/releases\/tag\/v?([^/?#]+)/i);
+  const latestTag = m ? String(m[1]).replace(/^v/, "") : "";
+  if (!latestTag) throw new Error(`无法从 releases 页解析版本: ${finalUrl}`);
+  // 无 API 资产列表时构造常见下载名
+  const version = latestTag;
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const candidates = process.platform === "darwin"
+    ? (arch === "arm64"
+      ? [`Switchyard-${version}-arm64.dmg`, `Switchyard-${version}.dmg`]
+      : [`Switchyard-${version}.dmg`, `Switchyard-${version}-arm64.dmg`])
+    : [`Switchyard Setup ${version}.exe`, `Switchyard.Setup.${version}.exe`, `Switchyard-${version}-win.zip`];
+  const assets = candidates.map((name) => ({
+    name,
+    browser_download_url: `https://github.com/zhangyinglong3550/switchyard/releases/download/v${version}/${encodeURIComponent(name).replace(/%20/g, "%20")}`,
+    size: 0
+  }));
+  return {
+    latestTag,
+    url: finalUrl.includes("/tag/") ? finalUrl : `https://github.com/zhangyinglong3550/switchyard/releases/tag/v${version}`,
+    notes: "",
+    publishedAt: "",
+    assets
+  };
+}
+
+function broadcastUpdateAvailable(info) {
+  if (!info) return;
+  pendingUpdateInfo = info;
+  sendUpdateEvent("app:update-available", info);
+}
+
 async function checkForUpdate() {
+  const currentVersion = app.getVersion();
   try {
     const { fetch } = await import("undici");
-    const res = await fetch(GITHUB_RELEASES_API, {
-      headers: {
-        "User-Agent": "Switchyard-Desktop",
-        Accept: "application/vnd.github+json"
-      },
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const latestTag = String(data.tag_name || "").replace(/^v/, "");
-    const currentVersion = app.getVersion();
+    let release;
+    try {
+      release = await fetchLatestReleaseViaApi(fetch);
+    } catch (apiErr) {
+      appendLog({
+        level: "warn",
+        msg: "update check: GitHub API failed, fallback to releases redirect",
+        error: apiErr?.message || String(apiErr)
+      });
+      release = await fetchLatestReleaseViaRedirect(fetch);
+    }
+    const latestTag = release.latestTag;
     if (!latestTag || !semverGt(latestTag, currentVersion)) {
       pendingUpdateInfo = null;
       return { ok: true, updateAvailable: false, current: currentVersion, latest: latestTag || currentVersion };
     }
-    const asset = pickReleaseAsset(data.assets || []);
+    const asset = pickReleaseAsset(release.assets || []);
     const info = {
       current: currentVersion,
       latest: latestTag,
-      url: data.html_url || "https://github.com/zhangyinglong3550/switchyard/releases/latest",
-      notes: String(data.body || "").slice(0, 2000),
-      publishedAt: data.published_at || "",
+      url: release.url,
+      notes: release.notes || "",
+      publishedAt: release.publishedAt || "",
       asset
     };
-    pendingUpdateInfo = info;
-    sendUpdateEvent("app:update-available", info);
+    broadcastUpdateAvailable(info);
+    appendLog({
+      level: "info",
+      msg: "update available",
+      current: currentVersion,
+      latest: latestTag,
+      asset: asset?.name || ""
+    });
     return { ok: true, updateAvailable: true, ...info };
-  } catch {
-    return null;
+  } catch (err) {
+    appendLog({
+      level: "warn",
+      msg: "update check failed",
+      current: currentVersion,
+      error: err?.message || String(err)
+    });
+    return { ok: false, updateAvailable: false, current: currentVersion, error: err?.message || String(err) };
   }
 }
 
 function startUpdateChecker() {
-  checkForUpdate();
+  // 等窗口内容加载后再查，避免 renderer 尚未订阅就推送导致按钮不显示
+  const run = () => {
+    checkForUpdate().catch(() => {});
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.webContents.isLoading()) {
+      mainWindow.webContents.once("did-finish-load", () => {
+        setTimeout(run, 500);
+      });
+    } else {
+      setTimeout(run, 300);
+    }
+  } else {
+    setTimeout(run, 800);
+  }
   if (updateCheckTimer) clearInterval(updateCheckTimer);
-  updateCheckTimer = setInterval(() => checkForUpdate(), UPDATE_CHECK_INTERVAL_MS);
+  updateCheckTimer = setInterval(run, UPDATE_CHECK_INTERVAL_MS);
   updateCheckTimer.unref?.();
 }
 
@@ -550,6 +655,12 @@ function createMainWindow() {
   win.loadFile(path.resolve(__dirname, "..", "renderer", "index.html"));
   win.webContents.on("console-message", (_e, level, message) => {
     appendLog({ level: level === 0 ? "info" : "warn", msg: `renderer: ${message}` });
+  });
+  // 页面就绪后：若启动时已检测到更新，再推一次，避免 IPC 订阅竞态丢事件
+  win.webContents.on("did-finish-load", () => {
+    if (pendingUpdateInfo) {
+      sendUpdateEvent("app:update-available", pendingUpdateInfo);
+    }
   });
   // 点窗口关闭按钮（叉）时，不退出应用，只隐藏窗口，网关继续后台运行。
   // 只有走托盘菜单 / 应用菜单的"退出"（isQuitting=true）才真正退出。

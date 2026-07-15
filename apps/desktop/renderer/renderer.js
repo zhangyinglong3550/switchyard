@@ -14,24 +14,37 @@ const { invoke, onLog, onUpdateAvailable, onUpdateProgress } = window.lls;
 // ── 自动更新提示 + 下载安装 ──────────────────────────────────
 let pendingUpdateInfo = null;
 let updateInstalling = false;
+function applyUpdateAvailableUi(info) {
+  const versionEl = document.getElementById("app-version");
+  const btnUpdate = document.getElementById("btn-update");
+  if (!info?.latest) return;
+  pendingUpdateInfo = info;
+  if (versionEl) versionEl.textContent = "v" + (info.current || "");
+  if (btnUpdate && !updateInstalling) {
+    btnUpdate.style.display = "";
+    btnUpdate.disabled = false;
+    btnUpdate.textContent = "⬆ 更新到 v" + info.latest;
+    btnUpdate.title = info.asset
+      ? `点击下载并安装 v${info.latest}（${info.asset.name}）`
+      : `点击打开发布页下载 v${info.latest}`;
+  }
+}
+
 function initUpdateChecker() {
   const versionEl = document.getElementById("app-version");
   const btnUpdate = document.getElementById("btn-update");
   invoke("app:version").then((v) => { if (versionEl) versionEl.textContent = "v" + v; }).catch(() => {});
   if (onUpdateAvailable) {
     onUpdateAvailable((info) => {
-      pendingUpdateInfo = info;
-      if (versionEl) versionEl.textContent = "v" + info.current;
-      if (btnUpdate && !updateInstalling) {
-        btnUpdate.style.display = "";
-        btnUpdate.disabled = false;
-        btnUpdate.textContent = "⬆ 更新到 v" + info.latest;
-        btnUpdate.title = info.asset
-          ? `点击下载并安装 v${info.latest}（${info.asset.name}）`
-          : `点击打开发布页下载 v${info.latest}`;
-      }
+      applyUpdateAvailableUi(info);
     });
   }
+  // 主动再查一次：避免主进程检查早于本页订阅 IPC 导致按钮不出现
+  invoke("app:check-update")
+    .then((r) => {
+      if (r?.updateAvailable) applyUpdateAvailableUi(r);
+    })
+    .catch(() => {});
   if (onUpdateProgress) {
     onUpdateProgress((p) => {
       if (!btnUpdate) return;

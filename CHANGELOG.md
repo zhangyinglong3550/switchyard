@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.5 — 2026-07-15
+
+### Fix
+
+- **自动更新提示不出现**：启动检查若早于页面 IPC 订阅会丢事件；现改为页面加载后检查 + 渲染进程主动 `app:check-update` + `did-finish-load` 重推。
+- **GitHub API 限流/失败**：API 失败时回退到 `releases/latest` 重定向解析版本；失败写入 gateway 日志（不再静默吞掉）。
+
 ## 2.1.4 — 2026-07-15
 
 ### Features
