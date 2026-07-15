@@ -199,6 +199,69 @@ body {
   border-color: #ddd2c2;
 }
 
+/* 简化版：隐藏详细功能导航 */
+.nav-simple-hidden {
+  display: none !important;
+}
+
+.ui-density-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  user-select: none;
+  font-size: 11px;
+  color: var(--sidebar-muted);
+  font-weight: 600;
+}
+
+.ui-density-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.ui-density-slider {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: #d8cfc2;
+  border: 1px solid #cfc3b3;
+  transition: background 140ms, border-color 140ms;
+  flex-shrink: 0;
+}
+
+.ui-density-slider::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  transition: transform 140ms;
+}
+
+.ui-density-toggle input:checked + .ui-density-slider {
+  background: #c47a4a;
+  border-color: #b56b45;
+}
+
+.ui-density-toggle input:checked + .ui-density-slider::after {
+  transform: translateX(14px);
+}
+
+.ui-density-label {
+  min-width: 2em;
+  letter-spacing: 0.02em;
+}
+
 .icon-square {
   width: 20px;
   height: 20px;

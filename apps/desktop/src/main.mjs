@@ -125,7 +125,7 @@ let updateCheckTimer = null;
 let pendingUpdateInfo = null;
 let updateInstallInProgress = false;
 const GITHUB_RELEASES_API = "https://api.github.com/repos/zhangyinglong3550/switchyard/releases/latest";
-const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 小时
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 分钟
 
 function semverGt(a, b) {
   const pa = String(a || "").replace(/^v/, "").split(".").map(Number);

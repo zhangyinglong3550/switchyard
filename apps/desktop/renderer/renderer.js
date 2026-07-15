@@ -380,7 +380,52 @@ function formatLocalTime(value) {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
+const UI_DENSITY_KEY = "switchyard.uiDensity";
+const CORE_TABS = new Set(["overview", "providers", "models", "clients"]);
+
+function getUiDensity() {
+  try {
+    const v = localStorage.getItem(UI_DENSITY_KEY);
+    if (v === "detailed" || v === "simple") return v;
+  } catch {
+    // ignore
+  }
+  return "simple"; // 默认简化版：只保留总览 / 供应商 / 模型 / 客户端
+}
+
+function isDetailedUi() {
+  return getUiDensity() === "detailed";
+}
+
+function applyUiDensity(density) {
+  const mode = density === "detailed" ? "detailed" : "simple";
+  try {
+    localStorage.setItem(UI_DENSITY_KEY, mode);
+  } catch {
+    // ignore
+  }
+  document.body.dataset.uiDensity = mode;
+  const detailed = mode === "detailed";
+  const toggle = document.getElementById("ui-density-detailed");
+  const label = document.getElementById("ui-density-label");
+  if (toggle) toggle.checked = detailed;
+  if (label) label.textContent = detailed ? "详细" : "简化";
+
+  document.querySelectorAll("[data-nav-tier='detailed']").forEach((el) => {
+    el.classList.toggle("nav-simple-hidden", !detailed);
+  });
+
+  // 切到简化版时，若当前在隐藏 Tab，回到总览
+  const active = document.querySelector(".nav a.active")?.dataset?.tab;
+  if (!detailed && active && !CORE_TABS.has(active)) {
+    setActiveTab("overview");
+  }
+}
+
 function setActiveTab(tab) {
+  if (!isDetailedUi() && tab && !CORE_TABS.has(tab)) {
+    tab = "overview";
+  }
   document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${tab}`));
   if (tab === "logs") refreshLogTail().catch(() => {});
@@ -391,6 +436,16 @@ function setActiveTab(tab) {
 document.querySelectorAll(".nav a").forEach((a) => {
   a.addEventListener("click", () => setActiveTab(a.dataset.tab));
 });
+
+function initUiDensityToggle() {
+  applyUiDensity(getUiDensity());
+  const toggle = document.getElementById("ui-density-detailed");
+  if (!toggle) return;
+  toggle.addEventListener("change", () => {
+    applyUiDensity(toggle.checked ? "detailed" : "simple");
+    toast(toggle.checked ? "已切换到详细版（全部功能）" : "已切换到简化版（总览 / 供应商 / 模型 / 客户端）");
+  });
+}
 
 async function refreshAll() {
   const [config, status, configPath, presets, compatPacks, compatActive, providerHealth] = await Promise.all([
@@ -4715,6 +4770,7 @@ document.getElementById("btn-test-batch")?.addEventListener("click", async () =>
 });
 
 /* Init */
+initUiDensityToggle();
 refreshAll();
 initUpdateChecker();
 

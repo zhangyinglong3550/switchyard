@@ -9,31 +9,36 @@
 <body>
 <div class="screen app-shell">
   <aside class="sidebar">
-    <div class="sidebar-header toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent;">
+    <div class="sidebar-header toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent; flex-wrap:wrap;">
       <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+      <label class="ui-density-toggle" title="关闭=简化版（仅总览/供应商/模型/客户端）；打开=详细版（全部功能）">
+        <input type="checkbox" id="ui-density-detailed" />
+        <span class="ui-density-slider" aria-hidden="true"></span>
+        <span class="ui-density-label" id="ui-density-label">简化</span>
+      </label>
     </div>
     <div class="sidebar-scroll">
       <div>
         <div class="group-title">工作区</div>
         <nav class="nav" id="primary-nav">
-          <a data-tab="overview" class="active"><span class="icon-square">⌂</span>总览</a>
-          <a data-tab="providers"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
-          <a data-tab="models"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
-          <a data-tab="clients"><span class="icon-square">◉</span>客户端</a>
-          <a data-tab="diagnostics"><span class="icon-square">◎</span>诊断中心</a>
+          <a data-tab="overview" data-nav-tier="core" class="active"><span class="icon-square">⌂</span>总览</a>
+          <a data-tab="providers" data-nav-tier="core"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
+          <a data-tab="models" data-nav-tier="core"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
+          <a data-tab="clients" data-nav-tier="core"><span class="icon-square">◉</span>客户端</a>
+          <a data-tab="diagnostics" data-nav-tier="detailed"><span class="icon-square">◎</span>诊断中心</a>
         </nav>
       </div>
-      <div>
+      <div id="tools-nav-block" data-nav-tier="detailed">
         <div class="group-title">工具</div>
         <nav class="nav" id="tools-nav">
-          <a data-tab="usage"><span class="icon-square">▥</span>用量</a>
-          <a data-tab="logs"><span class="icon-square">≣</span>日志</a>
-          <a data-tab="test"><span class="icon-square">▶</span>测试台</a>
-          <a data-tab="sessions"><span class="icon-square">◫</span>会话</a>
-          <a data-tab="traces"><span class="icon-square">⌁</span>调用可视化</a>
-          <a data-tab="skills"><span class="icon-square">✎</span>Skills</a>
-          <a data-tab="plugins"><span class="icon-square">◇</span>插件</a>
-          <a data-tab="settings"><span class="icon-square">⚙</span>偏好设置</a>
+          <a data-tab="usage" data-nav-tier="detailed"><span class="icon-square">▥</span>用量</a>
+          <a data-tab="logs" data-nav-tier="detailed"><span class="icon-square">≣</span>日志</a>
+          <a data-tab="test" data-nav-tier="detailed"><span class="icon-square">▶</span>测试台</a>
+          <a data-tab="sessions" data-nav-tier="detailed"><span class="icon-square">◫</span>会话</a>
+          <a data-tab="traces" data-nav-tier="detailed"><span class="icon-square">⌁</span>调用可视化</a>
+          <a data-tab="skills" data-nav-tier="detailed"><span class="icon-square">✎</span>Skills</a>
+          <a data-tab="plugins" data-nav-tier="detailed"><span class="icon-square">◇</span>插件</a>
+          <a data-tab="settings" data-nav-tier="detailed"><span class="icon-square">⚙</span>偏好设置</a>
         </nav>
       </div>
     </div>
