@@ -71,3 +71,46 @@ test("buildRouter dedupes alias keys", () => {
   assert.equal(r.models.get("alpha").id, "p/main");
   assert.equal(r.models.get("main").id, "p/main");
 });
+
+test("resolveRoute · 双供应商同名模型：完整 id 各自命中，短名不串号", () => {
+  const cfg = mergeWithDefaults({
+    defaultModel: "provider-a/gpt-5.5",
+    providers: [
+      { id: "provider-a", name: "A", apiFormat: "openai_chat", baseUrl: "http://a" },
+      { id: "provider-b", name: "B", apiFormat: "openai_chat", baseUrl: "http://b" }
+    ],
+    models: [
+      { id: "provider-a/gpt-5.5", providerId: "provider-a", upstreamModel: "gpt-5.5", aliases: ["gpt-5.5"] },
+      { id: "provider-b/gpt-5.5", providerId: "provider-b", upstreamModel: "gpt-5.5", aliases: ["gpt-5.5"] }
+    ]
+  });
+  validateConfig(cfg);
+
+  const a = resolveRoute(cfg, "provider-a/gpt-5.5");
+  const b = resolveRoute(cfg, "provider-b/gpt-5.5");
+  assert.equal(a.provider.id, "provider-a");
+  assert.equal(a.model.id, "provider-a/gpt-5.5");
+  assert.equal(b.provider.id, "provider-b");
+  assert.equal(b.model.id, "provider-b/gpt-5.5");
+
+  // 短名歧义：不再 first-wins 绑死到 A，而是回退 defaultModel（完整 id）
+  const short = resolveRoute(cfg, "gpt-5.5");
+  assert.equal(short.model.id, "provider-a/gpt-5.5");
+  assert.equal(short.provider.id, "provider-a");
+
+  const router = buildRouter(cfg);
+  assert.equal(router.models.has("gpt-5.5"), false);
+  assert.equal(router.models.get("provider-a/gpt-5.5").providerId, "provider-a");
+  assert.equal(router.models.get("provider-b/gpt-5.5").providerId, "provider-b");
+  assert.ok(router.ambiguousSecondaryKeys.has("gpt-5.5"));
+});
+
+test("resolveRoute · 唯一短名仍可路由（单供应商兼容）", () => {
+  const cfg = mergeWithDefaults({
+    providers: [{ id: "only", apiFormat: "openai_chat", baseUrl: "http://x" }],
+    models: [{ id: "only/gpt-5.5", providerId: "only", upstreamModel: "gpt-5.5" }]
+  });
+  const r = resolveRoute(cfg, "gpt-5.5");
+  assert.equal(r.model.id, "only/gpt-5.5");
+  assert.equal(r.provider.id, "only");
+});

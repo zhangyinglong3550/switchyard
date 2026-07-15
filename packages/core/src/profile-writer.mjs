@@ -306,12 +306,40 @@ function supportsCodexPriorityTier({ providerId, upstreamModel }) {
   return !/(mini|spark|auto-review)/.test(model);
 }
 
-function codexCatalogSlugForModel(model) {
+/**
+ * Codex 目录 slug：必须全局唯一，否则多供应商同名模型会互相覆盖。
+ * - 上游名全局唯一时：官方 Codex 仍可用短名 gpt-5.5（兼容旧会话）
+ * - 上游名被多个模型共享时：强制用完整 model.id（如 aigo-gpt/gpt-5.5）
+ */
+function codexCatalogSlugForModel(model, { ambiguousUpstreams = new Set() } = {}) {
   const id = String(model?.id || model?.upstreamModel || "").trim();
   const upstreamModel = String(model?.upstreamModel || id).trim();
   const providerId = String(model?.providerId || "").trim();
-  if (isOfficialCodexModel({ providerId, upstreamModel })) return upstreamModel;
-  return id;
+  const upstreamAmbiguous =
+    ambiguousUpstreams.has(upstreamModel) ||
+    ambiguousUpstreams.has(upstreamModel.toLowerCase());
+  if (upstreamAmbiguous) return id || upstreamModel;
+  if (isOfficialCodexModel({ providerId, upstreamModel })) return upstreamModel || id;
+  return id || upstreamModel;
+}
+
+function ambiguousUpstreamNames(models = []) {
+  // 同一 upstream 名被多个模型占用时视为歧义（大小写敏感，与配置一致）
+  const rawCounts = new Map();
+  for (const model of models) {
+    if (!model || model.enabled === false) continue;
+    const upstream = String(model.upstreamModel || model.id || "").trim();
+    if (!upstream) continue;
+    rawCounts.set(upstream, (rawCounts.get(upstream) || 0) + 1);
+  }
+  const ambiguous = new Set();
+  for (const [key, count] of rawCounts) {
+    if (count > 1) {
+      ambiguous.add(key);
+      ambiguous.add(key.toLowerCase());
+    }
+  }
+  return ambiguous;
 }
 
 function modelMatchesId(model, id) {
@@ -323,12 +351,14 @@ function modelMatchesId(model, id) {
 function codexDefaultModelForCatalog({ models = [], defaultModel } = {}) {
   const value = String(defaultModel || "").trim();
   if (!value) return null;
-  const match = (Array.isArray(models) ? models : []).find((model) => modelMatchesId(model, value));
-  return match ? codexCatalogSlugForModel(match) : value;
+  const list = Array.isArray(models) ? models : [];
+  const ambiguousUpstreams = ambiguousUpstreamNames(list);
+  const match = list.find((model) => modelMatchesId(model, value));
+  return match ? codexCatalogSlugForModel(match, { ambiguousUpstreams }) : value;
 }
 
-function codexCatalogModelFrom(model, index = 0) {
-  const slug = codexCatalogSlugForModel(model);
+function codexCatalogModelFrom(model, index = 0, options = {}) {
+  const slug = codexCatalogSlugForModel(model, options);
   if (!slug) return null;
   const contextWindow = Number.isFinite(model?.contextWindow) ? model.contextWindow : CODEX_MODEL_TEMPLATE.context_window;
   const hasVisionFallback = Boolean(model?.visionFallbackModelId);
@@ -360,15 +390,18 @@ export function buildCodexModelCatalog({ models = [], defaultModel } = {}) {
   const out = [];
   const seen = new Set();
   const source = Array.isArray(models) ? models : [];
+  const ambiguousUpstreams = ambiguousUpstreamNames(source);
   for (const model of source) {
     if (!model || model.enabled === false) continue;
-    const item = codexCatalogModelFrom(model, out.length);
-    if (!item || seen.has(item.slug)) continue;
+    const item = codexCatalogModelFrom(model, out.length, { ambiguousUpstreams });
+    if (!item) continue;
+    // 若仍撞 slug（极端：两个模型 id 相同），跳过后者
+    if (seen.has(item.slug)) continue;
     seen.add(item.slug);
     out.push(item);
   }
   if (!out.length && defaultModel) {
-    const item = codexCatalogModelFrom({ id: defaultModel, displayName: defaultModel }, 0);
+    const item = codexCatalogModelFrom({ id: defaultModel, displayName: defaultModel }, 0, { ambiguousUpstreams });
     if (item) out.push(item);
   }
   return {

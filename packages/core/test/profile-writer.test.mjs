@@ -309,6 +309,22 @@ test("codex profile · model catalog display names include provider to disambigu
   ]);
 });
 
+test("codex profile · 双供应商同名模型 catalog slug 全部保留且唯一", () => {
+  const catalog = pw.buildCodexModelCatalog({
+    models: [
+      { id: "provider-a/gpt-5.5", providerId: "codex", providerName: "A", upstreamModel: "gpt-5.5", displayName: "GPT-5.5" },
+      { id: "provider-b/gpt-5.5", providerId: "aigo-gpt", providerName: "B", upstreamModel: "gpt-5.5", displayName: "GPT-5.5" }
+    ]
+  });
+  const slugs = catalog.models.map((m) => m.slug);
+  assert.deepEqual(slugs, ["provider-a/gpt-5.5", "provider-b/gpt-5.5"]);
+  assert.equal(catalog.models[0]["x-switchyard-provider"], "codex");
+  assert.equal(catalog.models[1]["x-switchyard-provider"], "aigo-gpt");
+  // 显示名仍带供应商，方便在 Codex 里区分
+  assert.equal(catalog.models[0].display_name, "GPT-5.5 · A");
+  assert.equal(catalog.models[1].display_name, "GPT-5.5 · B");
+});
+
 test("codex profile · model catalog prefers provider display names", () => {
   const catalog = pw.buildCodexModelCatalog({
     models: [
