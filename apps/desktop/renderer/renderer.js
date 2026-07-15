@@ -3153,17 +3153,28 @@ async function refreshUsageStats() {
     usageTbody.innerHTML = "";
     for (const row of usage || []) {
       const tr = document.createElement("tr");
+      const requests = Number(row.request_count || 0);
+      const success = Number(row.success_count != null ? row.success_count : Math.max(0, requests - Number(row.error_count || 0)));
+      const errors = Number(row.error_count || 0);
+      const rate = row.success_rate == null || row.success_rate === ""
+        ? (requests > 0 ? Math.round((success / requests) * 1000) / 10 : null)
+        : Number(row.success_rate);
+      const rateText = rate == null || !Number.isFinite(rate) ? "—" : `${rate}%`;
+      const rateClass = rate == null ? "muted" : rate >= 95 ? "chip good" : rate >= 80 ? "chip warn" : "chip bad";
       tr.innerHTML = `
         <td>${escapeHtml(agentLabel(row.client_id))}</td>
         <td class="mono">${escapeHtml(row.model_id || "-")}</td>
-        <td>${escapeHtml(row.request_count || 0)}</td>
-        <td>${escapeHtml(row.error_count || 0)}</td>
+        <td class="mono tiny">${escapeHtml(row.provider_id || "-")}</td>
+        <td>${escapeHtml(requests)}</td>
+        <td>${escapeHtml(success)}</td>
+        <td>${escapeHtml(errors)}</td>
+        <td><span class="${rateClass}">${escapeHtml(rateText)}</span></td>
         <td>${escapeHtml(row.total_tokens || 0)}</td>
         <td>${escapeHtml(row.avg_latency_ms || 0)} ms</td>
       `;
       usageTbody.appendChild(tr);
     }
-    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="6" class="muted">暂无用量数据</td></tr>';
+    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="9" class="muted">暂无用量数据</td></tr>';
   }
   if (reqTbody) {
     reqTbody.innerHTML = "";
@@ -3191,9 +3202,19 @@ async function refreshUsageStats() {
     if (!requests?.length) reqTbody.innerHTML = '<tr><td colspan="6" class="muted">暂无请求记录</td></tr>';
   }
   const totalRequests = (usage || []).reduce((sum, row) => sum + Number(row.request_count || 0), 0);
+  const totalErrors = (usage || []).reduce((sum, row) => sum + Number(row.error_count || 0), 0);
+  const totalSuccess = (usage || []).reduce((sum, row) => {
+    if (row.success_count != null && row.success_count !== "") return sum + Number(row.success_count || 0);
+    return sum + Math.max(0, Number(row.request_count || 0) - Number(row.error_count || 0));
+  }, 0);
   const totalTokens = (usage || []).reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
+  const overallRate = totalRequests > 0 ? Math.round((totalSuccess / totalRequests) * 1000) / 10 : null;
   const usageSummary = document.getElementById("usage-summary");
-  if (usageSummary) usageSummary.textContent = `${totalRequests} 次 · ${totalTokens} tokens`;
+  if (usageSummary) {
+    usageSummary.textContent = overallRate == null
+      ? `${totalRequests} 次 · ${totalTokens} tokens`
+      : `${totalRequests} 次 · 成功 ${totalSuccess} · 失败 ${totalErrors} · 成功率 ${overallRate}% · ${totalTokens} tokens`;
+  }
   const requestSummary = document.getElementById("request-log-summary");
   if (requestSummary) requestSummary.textContent = `${requests?.length || 0} 条`;
   renderUsageDailyChart(daily || [], compareDaily || []);

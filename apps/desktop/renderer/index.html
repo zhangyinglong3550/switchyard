@@ -263,7 +263,7 @@
       <div class="toolbar">
         <div>
           <div class="page-title">用量统计</div>
-          <div class="tiny muted">按 Agent 和模型查看请求量、Token、错误与延迟</div>
+          <div class="tiny muted">按 Agent 和模型查看调用次数、成功率、失败、Token 与延迟</div>
         </div>
         <div style="flex:1;"></div>
         <select class="field" id="usage-agent-filter" style="min-width:160px;">
@@ -308,8 +308,8 @@
           <div class="card">
             <div class="hd"><h3>模型用量</h3><span class="sub" id="usage-summary">-</span></div>
             <div class="table-scroll medium">
-              <table class="data compact">
-                <thead><tr><th>Agent</th><th>模型</th><th>请求</th><th>错误</th><th>Token</th><th>均延迟</th></tr></thead>
+              <table class="data compact" id="usage-model-table">
+                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>均延迟</th></tr></thead>
                 <tbody id="usage-tbody"></tbody>
               </table>
             </div>

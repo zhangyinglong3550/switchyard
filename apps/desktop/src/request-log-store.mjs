@@ -306,69 +306,109 @@ export function listRequestLogs(filters = {}) {
   return runSql(`SELECT * FROM request_logs ${whereClause(filters)} ORDER BY ts DESC, id DESC LIMIT ${limit};`, { json: true });
 }
 
-export function usageByModel(filters = {}) {
-  initRequestLogStore();
-  const limit = Math.min(Math.max(intValue(filters.limit) || 100, 1), 1000);
-  return runSql(`
-    SELECT
-      COALESCE(model_id, requested_model, '(unknown)') AS model_id,
-      provider_id,
+/**
+ * 失败判定：与请求日志语义对齐
+ * - HTTP status >= 400：上游/业务失败
+ * - status = 0：网络/连接失败等未拿到有效 HTTP 状态
+ * 成功：status 在 [200, 399]
+ */
+export const REQUEST_ERROR_SQL = "(status = 0 OR status >= 400)";
+export const REQUEST_SUCCESS_SQL = "(status BETWEEN 200 AND 399)";
+
+function numberOrZero(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** 为聚合行补充 success_count / success_rate（0 次调用时 rate=null） */
+export function enrichUsageStatsRow(row = {}) {
+  const request_count = numberOrZero(row.request_count);
+  const error_count = numberOrZero(row.error_count);
+  let success_count = row.success_count != null && row.success_count !== ""
+    ? numberOrZero(row.success_count)
+    : Math.max(0, request_count - error_count);
+  // 防止脏数据：成功+失败不超过总数
+  if (success_count + error_count > request_count && request_count > 0) {
+    success_count = Math.max(0, request_count - error_count);
+  }
+  const success_rate = request_count > 0
+    ? Math.round((success_count / request_count) * 1000) / 10
+    : null;
+  return {
+    ...row,
+    request_count,
+    error_count,
+    success_count,
+    success_rate,
+    avg_latency_ms: row.avg_latency_ms == null || row.avg_latency_ms === ""
+      ? 0
+      : numberOrZero(row.avg_latency_ms)
+  };
+}
+
+function usageSelectMetrics() {
+  return `
       COUNT(*) AS request_count,
-      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
+      SUM(CASE WHEN ${REQUEST_ERROR_SQL} THEN 1 ELSE 0 END) AS error_count,
+      SUM(CASE WHEN ${REQUEST_SUCCESS_SQL} THEN 1 ELSE 0 END) AS success_count,
       SUM(prompt_tokens) AS prompt_tokens,
       SUM(completion_tokens) AS completion_tokens,
       SUM(total_tokens) AS total_tokens,
       ROUND(AVG(latency_ms), 1) AS avg_latency_ms
+  `;
+}
+
+export function usageByModel(filters = {}) {
+  initRequestLogStore();
+  const limit = Math.min(Math.max(intValue(filters.limit) || 100, 1), 1000);
+  const rows = runSql(`
+    SELECT
+      COALESCE(model_id, requested_model, '(unknown)') AS model_id,
+      provider_id,
+      ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
     GROUP BY COALESCE(model_id, requested_model, '(unknown)'), provider_id
-    ORDER BY total_tokens DESC, request_count DESC
+    ORDER BY request_count DESC, total_tokens DESC
     LIMIT ${limit};
   `, { json: true });
+  return (rows || []).map(enrichUsageStatsRow);
 }
 
 export function usageByAgentModel(filters = {}) {
   initRequestLogStore();
   const limit = Math.min(Math.max(intValue(filters.limit) || 100, 1), 1000);
-  return runSql(`
+  const rows = runSql(`
     SELECT
       COALESCE(client_id, '(unknown)') AS client_id,
       COALESCE(model_id, requested_model, '(unknown)') AS model_id,
       provider_id,
-      COUNT(*) AS request_count,
-      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
-      SUM(prompt_tokens) AS prompt_tokens,
-      SUM(completion_tokens) AS completion_tokens,
-      SUM(total_tokens) AS total_tokens,
-      ROUND(AVG(latency_ms), 1) AS avg_latency_ms
+      ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
     GROUP BY COALESCE(client_id, '(unknown)'), COALESCE(model_id, requested_model, '(unknown)'), provider_id
-    ORDER BY total_tokens DESC, request_count DESC
+    ORDER BY request_count DESC, total_tokens DESC
     LIMIT ${limit};
   `, { json: true });
+  return (rows || []).map(enrichUsageStatsRow);
 }
 
 export function usageDaily(filters = {}) {
   initRequestLogStore();
   const limit = Math.min(Math.max(intValue(filters.limit) || 30, 1), 366);
-  return runSql(`
+  const rows = runSql(`
     SELECT
       date(ts, 'localtime') AS day,
       COALESCE(client_id, '(unknown)') AS client_id,
       COALESCE(model_id, requested_model, '(unknown)') AS model_id,
-      COUNT(*) AS request_count,
-      SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS error_count,
-      SUM(prompt_tokens) AS prompt_tokens,
-      SUM(completion_tokens) AS completion_tokens,
-      SUM(total_tokens) AS total_tokens,
-      ROUND(AVG(latency_ms), 1) AS avg_latency_ms
+      ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
     GROUP BY date(ts, 'localtime'), COALESCE(client_id, '(unknown)'), COALESCE(model_id, requested_model, '(unknown)')
-    ORDER BY day DESC, total_tokens DESC, request_count DESC
+    ORDER BY day DESC, request_count DESC, total_tokens DESC
     LIMIT ${limit * 200};
-  `, { json: true }).slice(0, limit * 200);
+  `, { json: true });
+  return (rows || []).map(enrichUsageStatsRow).slice(0, limit * 200);
 }
 
 export function cleanupRequestLogs({ retainDays = DEFAULT_RETAIN_DAYS, maxRows = DEFAULT_MAX_ROWS, maxBytes = maxBytesValue(), now = new Date() } = {}) {

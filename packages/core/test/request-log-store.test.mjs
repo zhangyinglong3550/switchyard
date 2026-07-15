@@ -76,8 +76,18 @@ test("request log store · writes sanitized SQLite rows and aggregates usage", a
     model_id: row.model_id,
     request_count: row.request_count,
     total_tokens: row.total_tokens,
-    error_count: row.error_count
-  })), [{ model_id: "p/a", request_count: 2, total_tokens: 14, error_count: 1 }]);
+    error_count: row.error_count,
+    success_count: row.success_count,
+    success_rate: row.success_rate
+  })), [{
+    model_id: "p/a",
+    request_count: 2,
+    total_tokens: 14,
+    error_count: 1,
+    success_count: 1,
+    success_rate: 50
+  }]);
+  assert.equal(usage[0].avg_latency_ms, 86.5);
   assert.equal(store.usageByModel({ modelQuery: "p/a" }).length, 1);
   assert.equal(store.usageByModel({ modelQuery: "missing" }).length, 0);
 
@@ -107,6 +117,108 @@ test("request log store · writes sanitized SQLite rows and aggregates usage", a
     totalTokens: 5
   });
   assert.ok(store.usageDaily({ modelId: "p/b" }).some((row) => row.day === "2026-06-24"));
+});
+
+test("request log store · per-model success rate, failure and latency from real writes", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-stats-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=stats-${Date.now()}`);
+
+  // model A: 2 success (200, 201) + 1 fail (500) + 1 network fail (status 0)
+  // latencies: 100, 200, 300, 400 → avg 250
+  const samplesA = [
+    { status: 200, ms: 100 },
+    { status: 201, ms: 200 },
+    { status: 500, ms: 300 },
+    { status: 0, ms: 400 }
+  ];
+  for (const [i, s] of samplesA.entries()) {
+    store.recordRequestEvent({
+      ts: `2026-07-15T10:0${i}:00.000Z`,
+      requestLog: true,
+      method: "POST",
+      path: "/v1/chat/completions",
+      clientId: "codex",
+      providerId: "beike",
+      modelId: "beike/gpt-5.6",
+      requestedModel: "beike/gpt-5.6",
+      status: s.status,
+      ms: s.ms,
+      totalTokens: 10
+    });
+  }
+  // model B: 1 success only — must not mix with A
+  store.recordRequestEvent({
+    ts: "2026-07-15T11:00:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/responses",
+    clientId: "codex",
+    providerId: "codex",
+    modelId: "codex/gpt-5.6",
+    requestedModel: "codex/gpt-5.6",
+    status: 200,
+    ms: 50,
+    totalTokens: 5
+  });
+
+  const byModel = store.usageByModel();
+  const a = byModel.find((row) => row.model_id === "beike/gpt-5.6");
+  const b = byModel.find((row) => row.model_id === "codex/gpt-5.6");
+  assert.ok(a, "beike model aggregate present");
+  assert.ok(b, "codex model aggregate present");
+
+  assert.equal(a.request_count, 4);
+  assert.equal(a.success_count, 2);
+  assert.equal(a.error_count, 2); // 500 + status 0
+  assert.equal(a.success_rate, 50);
+  assert.equal(a.avg_latency_ms, 250);
+  assert.equal(a.provider_id, "beike");
+
+  assert.equal(b.request_count, 1);
+  assert.equal(b.success_count, 1);
+  assert.equal(b.error_count, 0);
+  assert.equal(b.success_rate, 100);
+  assert.equal(b.avg_latency_ms, 50);
+  assert.equal(b.provider_id, "codex");
+
+  const agentRows = store.usageByAgentModel({ agentId: "codex" });
+  assert.equal(agentRows.length, 2);
+  const agentA = agentRows.find((row) => row.model_id === "beike/gpt-5.6");
+  assert.equal(agentA.success_rate, 50);
+  assert.equal(agentA.error_count, 2);
+
+  // enrichUsageStatsRow pure unit on empty / zero
+  const empty = store.enrichUsageStatsRow({ request_count: 0, error_count: 0 });
+  assert.equal(empty.success_rate, null);
+  assert.equal(empty.success_count, 0);
+});
+
+test("usage UI · model table headers include success rate and latency columns", () => {
+  const htmlPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    "../../../apps/desktop/renderer/index.html"
+  );
+  // Windows pathname fix
+  const resolved = fs.existsSync(htmlPath)
+    ? htmlPath
+    : path.join(process.cwd(), "apps/desktop/renderer/index.html");
+  const html = fs.readFileSync(resolved, "utf8");
+  assert.match(html, /id="usage-model-table"/);
+  assert.match(html, /成功率/);
+  assert.match(html, /调用/);
+  assert.match(html, /失败/);
+  assert.match(html, /均延迟/);
+  // renderer renders success_rate
+  const rendererPath = path.join(path.dirname(resolved), "renderer.js");
+  const renderer = fs.readFileSync(rendererPath, "utf8");
+  assert.match(renderer, /success_rate/);
+  assert.match(renderer, /success_count/);
 });
 
 test("request log store · cleanup removes old rows and caps max rows", async (t) => {
