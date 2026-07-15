@@ -98,7 +98,7 @@ test("provider presets · KE uses OpenAI chat and preset models without /models"
   assert.ok(ke.authModes.includes("api_key"));
   assert.ok(Array.isArray(ke.models));
   assert.equal(ke.models.length, 13);
-  const ids = new Set(ke.models.map((m) => m.id));
+  const byId = new Map(ke.models.map((m) => [m.id, m]));
   for (const id of [
     "claude-sonnet-5",
     "claude-4.6-sonnet",
@@ -114,8 +114,28 @@ test("provider presets · KE uses OpenAI chat and preset models without /models"
     "GLM-5.2",
     "GLM-5.1"
   ]) {
-    assert.ok(ids.has(id), `missing model ${id}`);
+    assert.ok(byId.has(id), `missing model ${id}`);
   }
+  // Claude / GPT：能力全开
+  const allOn = { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true };
+  for (const id of [
+    "claude-sonnet-5",
+    "claude-4.6-sonnet",
+    "claude-opus-4-8",
+    "claude-opus-4.6",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra"
+  ]) {
+    assert.deepEqual(byId.get(id).capabilities, allOn, id);
+  }
+  // DeepSeek / GLM 仍按目录
+  assert.equal(byId.get("Deepseek-V4-Pro").capabilities.images, false);
+  assert.equal(byId.get("GLM-5.2").capabilities.tools, true);
+  assert.equal(byId.get("GLM-5.2").capabilities.stream, true);
+  assert.equal(byId.get("GLM-5.2").capabilities.images, false);
 });
 
 test("provider presets · Antigravity CLI2API and Sub2API Codex local integrations", () => {

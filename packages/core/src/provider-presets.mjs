@@ -776,22 +776,23 @@ export const PROVIDER_PRESETS = [
     defaultAuthMode: "api_key",
     apiKeyEnv: "KE_API_KEY",
     preferPresetModels: true,
-    note: "OpenAI 兼容协议（openapi-ait.ke.com）。预制 Claude / GPT / DeepSeek / GLM；API Key 本机自填，勿提交配置。",
-    // 模型清单来源 ait.ke.com，用户挑选写入
+    note: "OpenAI 兼容协议（openapi-ait.ke.com）。能力字段按 ait.ke.com 模型目录 meta 填写；API Key 本机自填，勿提交配置。",
+    // Claude / GPT：按产品要求能力全开；DeepSeek / GLM：仍按 ait 目录
     models: [
-      { id: "claude-sonnet-5", displayName: "Claude Sonnet 5", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
-      { id: "claude-4.6-sonnet", displayName: "Claude 4.6 Sonnet", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
-      { id: "claude-opus-4-8", displayName: "Claude Opus 4.8", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
-      { id: "claude-opus-4.6", displayName: "Claude Opus 4.6", contextWindow: 200000, maxOutputTokens: 128000, capabilities: { stream: true } },
-      { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 922000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gpt-5.4", displayName: "GPT-5.4", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "Deepseek-V4-Pro", displayName: "DeepSeek V4 Pro", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } },
-      { id: "Deepseek-V4-Flash", displayName: "DeepSeek V4 Flash", contextWindow: 1000000, maxOutputTokens: 384000, capabilities: { tools: true, stream: true } },
-      { id: "GLM-5.2", displayName: "GLM-5.2", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } },
-      { id: "GLM-5.1", displayName: "GLM-5.1", contextWindow: 200000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } }
+      { id: "claude-sonnet-5", displayName: "Claude Sonnet 5", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "claude-4.6-sonnet", displayName: "Claude 4.6 Sonnet", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "claude-opus-4-8", displayName: "Claude Opus 4.8", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "claude-opus-4.6", displayName: "Claude Opus 4.6", contextWindow: 200000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 922000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "gpt-5.4", displayName: "GPT-5.4", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: true } },
+      // DeepSeek / GLM：按目录，非全开
+      { id: "Deepseek-V4-Pro", displayName: "DeepSeek V4 Pro", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false } },
+      { id: "Deepseek-V4-Flash", displayName: "DeepSeek V4 Flash", contextWindow: 1000000, maxOutputTokens: 384000, capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false } },
+      { id: "GLM-5.2", displayName: "GLM-5.2", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false } },
+      { id: "GLM-5.1", displayName: "GLM-5.1", capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false } }
     ]
   },
   {
