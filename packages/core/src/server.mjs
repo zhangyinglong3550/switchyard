@@ -589,6 +589,14 @@ function recordDispatchCompatibility(record, result) {
   }
   if (result.errorClass) record.requestSummary.errorClass = result.errorClass;
   if (result.requestOverrides) record.requestSummary.requestOverrides = result.requestOverrides;
+  // 网关同模型重试：写入 request 记录，便于日志与排查
+  if (Number.isFinite(Number(result.retryCount)) && Number(result.retryCount) > 0) {
+    record.retryCount = Number(result.retryCount);
+    record.requestSummary.dispatchRetryCount = Number(result.retryCount);
+    if (Array.isArray(result.retryAttempts) && result.retryAttempts.length) {
+      record.requestSummary.dispatchRetryAttempts = result.retryAttempts;
+    }
+  }
   if (result.accountId) {
     record.accountId = result.accountId;
     record.requestSummary.accountId = result.accountId;

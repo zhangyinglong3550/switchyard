@@ -920,6 +920,20 @@
         </select>
       </label>
       <label>代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890"></label>
+      <details class="callout-details compact">
+        <summary class="callout-title">网关重试（可恢复失败）</summary>
+        <div class="callout-body">默认最多 3 次，仅网络失败/429/5xx；流式仅在尚未向客户端写出内容前重试。填 1 或关闭即禁用。</div>
+        <div class="row">
+          <label>启用重试
+            <select class="field" name="retryEnabled">
+              <option value="default">默认（开）</option>
+              <option value="on">强制开启</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="默认 3"></label>
+        </div>
+      </details>
       <div class="callout compact">
         <div class="callout-title">可见 Agent</div>
         <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，会在供应商可见范围基础上进一步收窄。</div>

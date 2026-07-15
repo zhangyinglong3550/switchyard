@@ -27,6 +27,7 @@ import {
   markAccountSuccess,
   pickAndRefreshAccount
 } from "../account-pool/index.mjs";
+import { withDispatchRetry } from "./retry-policy.mjs";
 
 const ACCOUNT_POOL_FAILOVER_STATUSES = new Set([401, 403, 429, 500, 502, 503, 504]);
 const ACCOUNT_POOL_MAX_ATTEMPTS = 3;
@@ -126,8 +127,11 @@ async function runWithAccountPool(provider, opts, runner) {
 }
 
 export async function dispatchChat(provider, upstreamModel, chatBody, opts = {}) {
-  return runWithAccountPool(provider, opts, (activeProvider, account) =>
-    dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
+  // 可恢复失败时同模型重试（默认最多 3 次）；账号池换号在其内部再套一层
+  return withDispatchRetry(provider, opts.model, opts, () =>
+    runWithAccountPool(provider, opts, (activeProvider, account) =>
+      dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
+    )
   );
 }
 
@@ -208,8 +212,10 @@ export async function dispatchResponses(provider, upstreamModel, responsesBody, 
     const chatBody = stripInternalFields({ ...responsesBody, model: upstreamModel });
     return dispatchChat(provider, upstreamModel, chatBody, opts);
   }
-  return runWithAccountPool(provider, opts, (activeProvider, account) =>
-    dispatchResponsesOnce(activeProvider, upstreamModel, responsesBody, opts, account)
+  return withDispatchRetry(provider, opts.model, opts, () =>
+    runWithAccountPool(provider, opts, (activeProvider, account) =>
+      dispatchResponsesOnce(activeProvider, upstreamModel, responsesBody, opts, account)
+    )
   );
 }
 

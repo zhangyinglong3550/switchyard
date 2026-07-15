@@ -2731,6 +2731,11 @@ function openModelDialog(editId) {
     form.querySelector('[name="aliases"]').value = (existing.aliases || []).join(", ");
     form.querySelector('[name="visionFallbackModelId"]').value = existing.visionFallbackModelId || "";
     form.querySelector('[name="proxyUrl"]').value = existing.proxyUrl || "";
+    const retry = existing.retry || {};
+    if (retry.enabled === false) form.querySelector('[name="retryEnabled"]').value = "off";
+    else if (retry.enabled === true) form.querySelector('[name="retryEnabled"]').value = "on";
+    else form.querySelector('[name="retryEnabled"]').value = "default";
+    form.querySelector('[name="retryMaxAttempts"]').value = retry.maxAttempts || "";
     renderClientScopeOptions("model-visible-clients", existing.allowedClients || ["*"]);
     renderCompatPackOptions("model-compat-packs", existing.compatPacks || []);
     if (existing.capabilities) {
@@ -2746,6 +2751,8 @@ function openModelDialog(editId) {
   } else {
     renderClientScopeOptions("model-visible-clients", ["*"]);
     renderCompatPackOptions("model-compat-packs", []);
+    form.querySelector('[name="retryEnabled"]').value = "default";
+    form.querySelector('[name="retryMaxAttempts"]').value = "";
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
     form.querySelector('[name="cap-reasoning"]').checked = false;
@@ -2772,6 +2779,18 @@ function collectModelForm() {
   const form = document.getElementById("model-form");
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
+  const retryEnabled = String(raw.retryEnabled || "default");
+  const retryMaxRaw = String(raw.retryMaxAttempts || "").trim();
+  const retryMaxAttempts = retryMaxRaw ? Math.min(10, Math.max(1, Number(retryMaxRaw) || 1)) : undefined;
+  let retry;
+  if (retryEnabled === "off") {
+    retry = { enabled: false, ...(retryMaxAttempts ? { maxAttempts: 1 } : {}) };
+  } else if (retryEnabled === "on" || retryMaxAttempts) {
+    retry = {
+      ...(retryEnabled === "on" ? { enabled: true } : {}),
+      maxAttempts: retryMaxAttempts || 3
+    };
+  }
   return {
     id: String(raw.id || "").trim(),
     providerId: String(raw.providerId || "").trim(),
@@ -2782,6 +2801,7 @@ function collectModelForm() {
     maxOutputTokens: Number(raw.maxOutputTokens) || undefined,
     visionFallbackModelId: String(raw.visionFallbackModelId || "").trim() || undefined,
     proxyUrl: String(raw.proxyUrl || "").trim() || undefined,
+    ...(retry ? { retry } : {}),
     allowedClients: collectClientScopeOptions("model-visible-clients"),
     compatPacks: collectCompatPackOptions("model-compat-packs"),
     capabilities: {
