@@ -84,6 +84,40 @@ test("provider presets · cover mainstream CN and US OpenAI-compatible providers
   assert.ok(presetModelHints("minimax").has("MiniMax-M2.7"));
 });
 
+test("provider presets · KE uses OpenAI chat and preset models without /models", () => {
+  const presets = listProviderPresets();
+  const ke = presets.find((preset) => preset.id === "ke");
+  assert.ok(ke, "missing ke preset");
+  assert.equal(ke.name, "KE");
+  assert.equal(ke.providerId, "ke");
+  assert.equal(ke.label, "KE");
+  assert.equal(ke.apiFormat, "openai_chat");
+  assert.equal(ke.baseUrl, "https://openapi-ait.ke.com/v1");
+  assert.equal(ke.preferPresetModels, true);
+  assert.equal(ke.defaultAuthMode, "api_key");
+  assert.ok(ke.authModes.includes("api_key"));
+  assert.ok(Array.isArray(ke.models));
+  assert.equal(ke.models.length, 13);
+  const ids = new Set(ke.models.map((m) => m.id));
+  for (const id of [
+    "claude-sonnet-5",
+    "claude-4.6-sonnet",
+    "claude-opus-4-8",
+    "claude-opus-4.6",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "Deepseek-V4-Pro",
+    "Deepseek-V4-Flash",
+    "GLM-5.2",
+    "GLM-5.1"
+  ]) {
+    assert.ok(ids.has(id), `missing model ${id}`);
+  }
+});
+
 test("provider presets · Antigravity CLI2API and Sub2API Codex local integrations", () => {
   const presets = listProviderPresets();
   const byId = new Map(presets.map((preset) => [preset.id, preset]));

@@ -764,6 +764,37 @@ export const PROVIDER_PRESETS = [
     note: "本机服务通常不需要 Key。"
   },
   {
+    // KE OpenAPI（ait.ke.com / openapi-ait.ke.com）：OpenAI Chat 兼容；模型目录无公开 /models，用预制列表。
+    // 模型清单来源：https://ait.ke.com/models → meta/endpoint/details chat/completions（2026-07-15）
+    id: "ke",
+    label: "KE",
+    providerId: "ke",
+    name: "KE",
+    apiFormat: "openai_chat",
+    baseUrl: "https://openapi-ait.ke.com/v1",
+    authModes: ["api_key", "keychain"],
+    defaultAuthMode: "api_key",
+    apiKeyEnv: "KE_API_KEY",
+    preferPresetModels: true,
+    note: "OpenAI 兼容协议（openapi-ait.ke.com）。预制 Claude / GPT / DeepSeek / GLM；API Key 本机自填，勿提交配置。",
+    // 模型清单来源 ait.ke.com，用户挑选写入
+    models: [
+      { id: "claude-sonnet-5", displayName: "Claude Sonnet 5", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-4.6-sonnet", displayName: "Claude 4.6 Sonnet", contextWindow: 200000, maxOutputTokens: 64000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "claude-opus-4-8", displayName: "Claude Opus 4.8", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "claude-opus-4.6", displayName: "Claude Opus 4.6", contextWindow: 200000, maxOutputTokens: 128000, capabilities: { stream: true } },
+      { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 922000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.4", displayName: "GPT-5.4", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", contextWindow: 1050000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
+      { id: "Deepseek-V4-Pro", displayName: "DeepSeek V4 Pro", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } },
+      { id: "Deepseek-V4-Flash", displayName: "DeepSeek V4 Flash", contextWindow: 1000000, maxOutputTokens: 384000, capabilities: { tools: true, stream: true } },
+      { id: "GLM-5.2", displayName: "GLM-5.2", contextWindow: 1000000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } },
+      { id: "GLM-5.1", displayName: "GLM-5.1", contextWindow: 200000, maxOutputTokens: 128000, capabilities: { tools: true, stream: true } }
+    ]
+  },
+  {
     id: "custom-openai",
     label: "自定义 OpenAI-compatible",
     providerId: "custom",

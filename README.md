@@ -3,7 +3,7 @@
 > 打破 AI 代理的模型孤岛。一份配置，所有模型，所有代理，无缝协作。  
 > **2.2**：网关 **可恢复失败自动重试**（默认 3 次，0/429/5xx）· **2.1** 自动更新 / Anthropic OAuth / 账号池 · Claude Paper Light UI。
 
-[![version](https://img.shields.io/badge/version-2.2.3-blue)]()
+[![version](https://img.shields.io/badge/version-2.2.4-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 
@@ -159,13 +159,13 @@
 
 ### 下载安装
 
-从 [Releases v2.2.3](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.2.3) 下载：
+从 [Releases v2.2.4](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.2.4) 下载：
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-2.2.3-arm64.dmg` |
-| macOS (Intel / x64) | `Switchyard-2.2.3.dmg` |
-| Windows (x64) | `Switchyard Setup 2.2.3.exe` 或 `Switchyard-2.2.3-win.zip` |
+| macOS (Apple Silicon) | `Switchyard-2.2.4-arm64.dmg` |
+| macOS (Intel / x64) | `Switchyard-2.2.4.dmg` |
+| Windows (x64) | `Switchyard Setup 2.2.4.exe` 或 `Switchyard-2.2.4-win.zip` |
 
 > 已安装 2.0+ 桌面版时，顶栏会提示更新；点击后可下载安装并重新打开。
 

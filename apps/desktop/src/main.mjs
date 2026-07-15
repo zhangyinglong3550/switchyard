@@ -1224,6 +1224,10 @@ ipcMain.handle("provider:discover-models", async (_e, provider) => {
   const preset = providerPresetFor({ ...provider, ...probe, authMode: provider.authMode });
   const hints = presetModelHints(preset);
   const presetModels = Array.from(hints.values()).map((model) => normalizeHintModel(model));
+  // 无 /models 的内网网关：直接返回预制模型，避免先打失败接口
+  if (preset?.preferPresetModels && presetModels.length) {
+    return { ok: true, url: "preset:models", models: presetModels };
+  }
   if (isCodexOAuthProvider(probe)) {
     const auth = readCodexOAuthAuth({ provider: probe });
     if (!auth.ok) return { ok: false, error: `未找到可用 Codex OAuth：${auth.reason}` };

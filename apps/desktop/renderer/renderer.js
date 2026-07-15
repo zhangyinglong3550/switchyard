@@ -688,6 +688,30 @@ function applyProviderPreset(preset) {
   renderCompatPackOptions("provider-compat-packs", preset.compatPacks || []);
   syncUsageCheckForm(preset.usage_check || {});
   syncProviderPoolUi();
+  // 无 /models 的供应商：选中模板后直接带出预制模型，不必先点「发现」
+  if (Array.isArray(preset.models) && preset.models.length && (preset.preferPresetModels || !preset.baseUrl)) {
+    const providerId = form.querySelector('[name="id"]')?.value?.trim() || preset.providerId || preset.id;
+    state.providerDiscovery = preset.models.map((item) => ({
+      enabled: true,
+      id: `${providerId}/${item.id}`,
+      providerId,
+      upstreamModel: item.id,
+      displayName: item.displayName || item.id,
+      aliases: Array.isArray(item.aliases) ? [...item.aliases] : [],
+      contextWindow: item.contextWindow,
+      maxOutputTokens: item.maxOutputTokens,
+      allowedClients: ["*"],
+      capabilities: {
+        text: item.capabilities?.text !== false,
+        tools: !!item.capabilities?.tools,
+        reasoning: !!item.capabilities?.reasoning,
+        images: !!item.capabilities?.images,
+        stream: item.capabilities?.stream !== false,
+        multimodal: !!item.capabilities?.multimodal
+      }
+    }));
+    renderProviderDiscovery();
+  }
 }
 
 function usageProviderValue(config = {}) {

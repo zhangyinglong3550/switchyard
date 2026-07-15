@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.4 — 2026-07-15
+
+### Features
+
+- **KE 供应商模板**：OpenAI 兼容内网网关 `https://openapi-ait.ke.com/v1`；无 `/models` 时用预制列表。
+  - 预制模型（13）：Claude Sonnet 5 / 4.6 Sonnet / Opus 4.8 / Opus 4.6；GPT-5.5 / 5.4 / 5.6 sol·luna·terra；DeepSeek V4 Pro·Flash；GLM-5.2 / 5.1。
+  - 选中模板后自动带出模型；API Key 本机自填。
+
 ## 2.2.3 — 2026-07-15
 
 ### Build
