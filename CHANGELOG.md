@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.3 — 2026-07-15
+
+### Build
+
+- **安装包体积优化**（约 -20%）：
+  - 只保留 en / 中文 Electron 语言包（去掉约 40MB 多语言）
+  - 剔除 better-sqlite3 编译源码 `deps/src`（仅保留 `.node` 运行时）
+  - 更紧的 asar 文件过滤；`compression: maximum`
+  - arm64 DMG：约 **99MB → 80MB**；App 解压约 **250MB → 200MB**
+
 ## 2.2.2 — 2026-07-15
 
 ### UX

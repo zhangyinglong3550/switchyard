@@ -1,6 +1,6 @@
 {
   "name": "switchyard",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Local multi-client LLM gateway and desktop control panel for Codex, Claude Code, Hermes and other OpenAI-compatible / Anthropic-compatible tools. Includes multi-account OAuth pools (Grok / Codex) and Anthropic official OAuth.",
   "license": "MIT",
   "repository": {
@@ -40,16 +40,46 @@
   "build": {
     "appId": "com.zhangyinglong.switchyard",
     "productName": "Switchyard",
+    "compression": "maximum",
+    "electronLanguages": [
+      "en",
+      "en-US",
+      "en_US",
+      "zh",
+      "zh-CN",
+      "zh_CN",
+      "zh-TW",
+      "zh_TW",
+      "zh-Hans",
+      "zh-Hant"
+    ],
     "files": [
       "package.json",
       "apps/desktop/**/*",
       "packages/core/**/*",
       "config/**/*",
       "!**/*.map",
-      "!**/test/**"
+      "!**/test/**",
+      "!**/*.{md,markdown,ts,tsx,cts,mts}",
+      "!**/README*",
+      "!**/CHANGELOG*",
+      "!**/LICENSE*",
+      "!**/docs/**",
+      "!**/example/**",
+      "!**/examples/**",
+      "!node_modules/better-sqlite3/deps/**",
+      "!node_modules/better-sqlite3/src/**",
+      "!node_modules/better-sqlite3/build/Release/obj/**",
+      "!node_modules/better-sqlite3/build/Release/.deps/**",
+      "!node_modules/better-sqlite3/build/Release/*.a",
+      "!node_modules/better-sqlite3/build/Release/*.o",
+      "!node_modules/undici/docs/**",
+      "!node_modules/undici/types/**",
+      "!node_modules/undici/scripts/**",
+      "!node_modules/**/{.github,test,tests,__tests__,powered-test}/**"
     ],
     "asarUnpack": [
-      "node_modules/better-sqlite3/**/*"
+      "**/*.node"
     ],
     "afterPack": "./scripts/after-pack-sign.mjs",
     "directories": {
