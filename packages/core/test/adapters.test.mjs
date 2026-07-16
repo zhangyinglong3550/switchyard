@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { responsesToChat, chatToResponse, extractNamespaceMap } from "../src/openai-adapter.mjs";
 import { anthropicToChat, chatToAnthropic } from "../src/anthropic-adapter.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
-import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../src/openai-adapter-out.mjs";
+import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse, streamResponsesAsChat } from "../src/openai-adapter-out.mjs";
+import { Writable } from "node:stream";
 import { SWITCHYARD_THINKING_KEY } from "../src/reasoning.mjs";
 
 test("responsesToChat preserves system + user input", () => {
@@ -132,6 +133,77 @@ test("normalizeChatgptCodexResponsesBody preserves reasoning items and requests 
   assert.equal(normalized.input[0].encrypted_content, "switchyard:anthropic-thinking:v1:test");
   assert.equal(normalized.input[1].role, "user");
   assert.equal(normalized.input[1].content, "Previous assistant response:\nold answer");
+});
+
+test("streamResponsesAsChat emits chat.completion.chunk with id and content", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      controller.enqueue(enc.encode([
+        'data: {"type":"response.created","response":{"id":"r1"}}',
+        "",
+        'data: {"type":"response.output_text.delta","delta":"HEL"}',
+        "",
+        'data: {"type":"response.output_text.delta","delta":"LO"}',
+        "",
+        'data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}',
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+  await streamResponsesAsChat({ body: stream, ok: true, status: 200 }, res, "codex-pool/gpt-5.6-sol");
+  assert.match(body, /"object":"chat\.completion\.chunk"/);
+  assert.match(body, /"id":"chatcmpl_/);
+  assert.match(body, /"content":"HEL"/);
+  assert.match(body, /"content":"LO"/);
+  assert.match(body, /"finish_reason":"stop"/);
+  assert.doesNotMatch(body, /"type":"response\./);
+  assert.match(body, /data: \[DONE\]/);
+});
+
+test("streamResponsesAsChat translates function_call deltas to tool_calls", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      controller.enqueue(enc.encode([
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_terminal_command","arguments":""}}',
+        "",
+        'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"ls\\"}"}',
+        "",
+        'data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\\"command\\":\\"ls\\"}"}',
+        "",
+        'data: {"type":"response.completed","response":{"id":"r1","output":[]}}',
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+  await streamResponsesAsChat({ body: stream, ok: true, status: 200 }, res, "gpt");
+  assert.match(body, /"tool_calls"/);
+  assert.match(body, /run_terminal_command/);
+  assert.match(body, /"finish_reason":"tool_calls"/);
+  assert.match(body, /"id":"chatcmpl_/);
 });
 
 test("responsesStreamToChatResponse preserves streamed function_call arguments", async () => {

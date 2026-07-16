@@ -538,6 +538,66 @@ test("server returns partial Anthropic stream when Codex Responses stream discon
   assert.match(text, /event: message_stop/);
 });
 
+test("server translates Responses SSE to Chat Completions for /v1/chat/completions stream", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      // Codex / Responses 上游返回 Responses SSE（不是 chat.completion.chunk）
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end([
+        "event: response.created",
+        'data: {"type":"response.created","response":{"id":"resp_1"}}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"HELLO"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"));
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  const upPort = upstream.address().port;
+
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "codex-pool", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${upPort}` }],
+    models: [{ id: "codex-pool/gpt-5.6-sol", providerId: "codex-pool", upstreamModel: "gpt-5.6-sol" }]
+  });
+  const server = createServer();
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((r) => server.close(r));
+    await new Promise((r) => upstream.close(r));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // Grok Build 走 /grok/v1/chat/completions
+  const resp = await fetch(`http://127.0.0.1:${port}/grok/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer switchyard-local" },
+    body: JSON.stringify({
+      model: "codex-pool/gpt-5.6-sol",
+      stream: true,
+      messages: [{ role: "user", content: "hi" }]
+    })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  // 必须是 chat.completion.chunk，且带 id；不能原样透传 response.*
+  assert.match(text, /"object":"chat\.completion\.chunk"/);
+  assert.match(text, /"id":"chatcmpl_/);
+  assert.match(text, /"content":"HELLO"/);
+  assert.match(text, /"finish_reason":"stop"/);
+  assert.doesNotMatch(text, /"type":"response\.output_text\.delta"/);
+  assert.match(text, /data: \[DONE\]/);
+});
+
 test("server emits Anthropic SSE error when Codex Responses stream disconnects before text", async (t) => {
   const upstream = http.createServer((req, res) => {
     req.resume();

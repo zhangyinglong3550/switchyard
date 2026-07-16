@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.9 — 2026-07-16
+
+### Fix
+
+- **Grok + GPT（Responses 上游）流式报 `missing field id`**：Grok/OpenCode 等 chat 客户端 `stream=true` 时，上游 `openai_responses`（Codex 池 / aigo-gpt 等）的 Responses SSE 被原样透传，客户端按 `chat.completion.chunk` 解析失败。现对 `translate=responses` 做 **Responses SSE → Chat Completions SSE** 实时翻译（含文本 delta、tool_calls、usage）。
+
 ## 2.2.8 — 2026-07-16
 
 ### Fix

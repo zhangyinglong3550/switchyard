@@ -12,6 +12,7 @@ import { readJsonResponse } from "./upstream/clients.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { responsesToChat, chatToResponse, streamChatAsResponses, extractNamespaceMap } from "./openai-adapter.mjs";
+import { streamResponsesAsChat } from "./openai-adapter-out.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
 import {
@@ -697,6 +698,21 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
       if (result.translate === "anthropic") {
         // Anthropic SSE → OpenAI Chat SSE 实时翻译
         return streamAnthropicAsChat(result.upstream, res, body.model);
+      }
+      if (result.translate === "responses") {
+        // Responses SSE → Chat Completions SSE（Grok/OpenCode 等 chat 客户端 + GPT/Codex 上游）
+        if (!result.upstream?.ok) {
+          const payload = await readJsonResponse(result.upstream);
+          requestRecord.error = requestPayloadError(payload) || `status ${result.upstream?.status || 0}`;
+          recordResponseSummary(requestRecord, payload, { stream: true, status: result.upstream?.status || 0, error: requestRecord.error });
+          json(res, result.upstream?.status || 502, payload);
+          return;
+        }
+        return streamResponsesAsChat(result.upstream, res, body.model, {
+          onStreamSummary: (summary) => {
+            recordStreamDiagnostics(requestRecord, summary, { status: result.upstream?.status || 0 });
+          }
+        });
       }
       // openai_chat 直通：流结束后把 usage 落库
       return pipeStream(result.upstream, res, {

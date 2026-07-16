@@ -395,3 +395,298 @@ export async function responsesStreamToChatResponse(upstream, upstreamModel) {
   }
   return responsesToChatResponse(payload, upstreamModel);
 }
+
+/**
+ * 将 OpenAI Responses SSE 实时翻译为 Chat Completions SSE。
+ * Grok / OpenCode 等 chat 客户端请求 stream=true 且上游是 openai_responses（含 Codex OAuth）时必须走这条路径；
+ * 若原样 pipe Responses 事件，客户端会按 chat.completion.chunk 反序列化并报 missing field `id`。
+ */
+export async function streamResponsesAsChat(upstream, res, requestedModel, options = {}) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+
+  const id = `chatcmpl_${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  let finishReason = null;
+  let usage = null;
+  let roleSent = false;
+  let contentEmitted = false;
+  let streamError = null;
+  const functionCalls = new Map(); // key → { chatIndex, id, name, arguments }
+  let nextToolIndex = 0;
+
+  const writeChatChunk = (delta, opts = {}) => {
+    const chunk = {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: requestedModel,
+      choices: [{
+        index: 0,
+        delta,
+        finish_reason: opts.finishReason ?? null
+      }]
+    };
+    if (opts.usage) chunk.usage = opts.usage;
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  };
+
+  const ensureRole = () => {
+    if (roleSent) return;
+    writeChatChunk({ role: "assistant", content: "" });
+    roleSent = true;
+  };
+
+  const functionCallKey = (event = {}, item = null) => {
+    if (Number.isInteger(event.output_index)) return `output:${event.output_index}`;
+    if (Number.isInteger(event.index)) return `output:${event.index}`;
+    if (event.item_id) return event.item_id;
+    if (item?.id) return item.id;
+    if (item?.call_id) return item.call_id;
+    return "output:0";
+  };
+
+  const ensureFunctionCall = (key, patch = {}) => {
+    let prev = functionCalls.get(key);
+    if (!prev) {
+      prev = {
+        chatIndex: nextToolIndex++,
+        id: "",
+        name: "",
+        arguments: "",
+        announced: false
+      };
+      functionCalls.set(key, prev);
+    }
+    Object.assign(prev, patch);
+    return prev;
+  };
+
+  const announceFunctionCall = (call) => {
+    if (call.announced || !call.name) return;
+    ensureRole();
+    writeChatChunk({
+      tool_calls: [{
+        index: call.chatIndex,
+        id: call.id || `call_${crypto.randomUUID()}`,
+        type: "function",
+        function: { name: call.name, arguments: "" }
+      }]
+    });
+    call.announced = true;
+    finishReason = "tool_calls";
+  };
+
+  const mapUsage = (raw) => {
+    if (!raw || typeof raw !== "object") return null;
+    const prompt = raw.prompt_tokens ?? raw.input_tokens;
+    const completion = raw.completion_tokens ?? raw.output_tokens;
+    const total = raw.total_tokens ?? (
+      (Number.isFinite(prompt) ? prompt : 0) + (Number.isFinite(completion) ? completion : 0) || null
+    );
+    if (prompt == null && completion == null && total == null) return null;
+    return {
+      prompt_tokens: prompt ?? 0,
+      completion_tokens: completion ?? 0,
+      total_tokens: total ?? 0
+    };
+  };
+
+  const handleEvent = (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "error" || event.error) {
+      const message = event.error?.message || event.message || "Responses stream returned an error";
+      throw new Error(message);
+    }
+    if (event.type === "response.failed") {
+      const message = event.response?.error?.message || event.error?.message || "Responses stream failed";
+      throw new Error(message);
+    }
+    if (event.type === "response.created" || event.type === "response.in_progress") {
+      ensureRole();
+      return;
+    }
+    if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+      ensureRole();
+      if (event.delta) {
+        writeChatChunk({ content: event.delta });
+        contentEmitted = true;
+      }
+      if (!finishReason) finishReason = "stop";
+      return;
+    }
+    if (event.type === "response.output_text.done" && typeof event.text === "string") {
+      // delta 路径已推送；仅当从未收到 delta 时补一次全文（少见）
+      if (event.text && !contentEmitted) {
+        ensureRole();
+        writeChatChunk({ content: event.text });
+        contentEmitted = true;
+        if (!finishReason) finishReason = "stop";
+      }
+      return;
+    }
+    if (event.type === "response.content_part.done" && event.part) {
+      const partText = textFromResponsesContentPart(event.part);
+      // 若只有 done 没有 delta，补全文（与 responsesStreamToChatResponse 一致）
+      if (partText && !contentEmitted) {
+        ensureRole();
+        writeChatChunk({ content: partText });
+        contentEmitted = true;
+        if (!finishReason) finishReason = "stop";
+      }
+      return;
+    }
+    if (event.type === "response.output_item.added" && event.item) {
+      const call = functionCallFromResponsesItem(event.item);
+      if (call) {
+        const key = functionCallKey(event, event.item);
+        const state = ensureFunctionCall(key, {
+          id: call.call_id || call.id,
+          name: call.name,
+          arguments: call.arguments || ""
+        });
+        announceFunctionCall(state);
+      } else if (event.item?.type === "message") {
+        ensureRole();
+      }
+      return;
+    }
+    if (event.type === "response.output_item.done" && event.item) {
+      const call = functionCallFromResponsesItem(event.item);
+      if (call) {
+        const key = functionCallKey(event, event.item);
+        const state = ensureFunctionCall(key, {
+          id: call.call_id || call.id || functionCalls.get(key)?.id,
+          name: call.name || functionCalls.get(key)?.name,
+          arguments: call.arguments || functionCalls.get(key)?.arguments || "{}"
+        });
+        announceFunctionCall(state);
+      }
+      return;
+    }
+    if (event.type === "response.function_call_arguments.delta") {
+      const key = functionCallKey(event);
+      const delta = event.delta || event.arguments_delta || event.partial_json || "";
+      const state = ensureFunctionCall(key, {
+        id: event.item_id || functionCalls.get(key)?.id || "",
+        name: event.name || functionCalls.get(key)?.name || ""
+      });
+      if (event.name) state.name = event.name;
+      if (event.item_id) state.id = state.id || event.item_id;
+      announceFunctionCall(state);
+      if (delta) {
+        state.arguments = `${state.arguments || ""}${delta}`;
+        writeChatChunk({
+          tool_calls: [{
+            index: state.chatIndex,
+            function: { arguments: delta }
+          }]
+        });
+      }
+      return;
+    }
+    if (event.type === "response.function_call_arguments.done") {
+      const key = functionCallKey(event);
+      const state = ensureFunctionCall(key, {
+        id: event.item_id || functionCalls.get(key)?.id || "",
+        name: event.name || functionCalls.get(key)?.name || "",
+        arguments: event.arguments || functionCalls.get(key)?.arguments || "{}"
+      });
+      announceFunctionCall(state);
+      return;
+    }
+    if ((event.type === "response.completed" || event.type === "response.done") && event.response) {
+      const mapped = mapUsage(event.response.usage);
+      if (mapped) usage = mapped;
+      // 若流里只有 completed 里的全文、没有 delta，补推一次
+      const payloadText = outputTextFromResponsesPayload(event.response);
+      if (payloadText && !contentEmitted) {
+        ensureRole();
+        writeChatChunk({ content: payloadText });
+        contentEmitted = true;
+        if (!finishReason) finishReason = "stop";
+      }
+      // completed 里可能有 function_call 而流式未完整推过
+      for (const item of event.response.output || []) {
+        const call = functionCallFromResponsesItem(item);
+        if (!call) continue;
+        const key = functionCallKey({ output_index: undefined }, item) || call.call_id || call.id;
+        const state = ensureFunctionCall(key, {
+          id: call.call_id || call.id,
+          name: call.name,
+          arguments: call.arguments || "{}"
+        });
+        if (!state.announced) {
+          announceFunctionCall(state);
+          if (state.arguments) {
+            writeChatChunk({
+              tool_calls: [{
+                index: state.chatIndex,
+                function: { arguments: state.arguments }
+              }]
+            });
+          }
+        }
+      }
+      if (!finishReason) {
+        finishReason = functionCalls.size ? "tool_calls" : "stop";
+      }
+    }
+  };
+
+  const handleData = (data) => {
+    if (!data || data === "[DONE]") return;
+    const event = safeJsonParse(data);
+    handleEvent(event);
+  };
+
+  try {
+    if (!upstream?.body) {
+      throw new Error(`Responses stream empty (status ${upstream?.status || 0})`);
+    }
+    const decoder = new TextDecoder();
+    let buf = "";
+    for await (const chunk of upstream.body) {
+      buf += decoder.decode(chunk, { stream: true });
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        handleData(line.slice(5).trim());
+      }
+    }
+    if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
+    const flushed = decoder.decode();
+    if (flushed) {
+      buf += flushed;
+      if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
+    }
+  } catch (err) {
+    streamError = err;
+  }
+
+  if (streamError) {
+    ensureRole();
+    writeChatChunk({ content: `\n[stream error: ${streamError?.message || streamError}]` });
+  }
+
+  ensureRole();
+  const finalFinish = finishReason || (functionCalls.size ? "tool_calls" : "stop");
+  writeChatChunk({}, { finishReason: finalFinish, usage: usage || undefined });
+  res.write("data: [DONE]\n\n");
+  res.end();
+
+  if (typeof options.onStreamSummary === "function") {
+    try {
+      options.onStreamSummary({
+        protocol: "chat",
+        usage,
+        sawTerminalEvent: true,
+        sawMeaningfulEvent: contentEmitted || functionCalls.size > 0
+      });
+    } catch {}
+  }
+}
