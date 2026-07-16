@@ -37,8 +37,20 @@ export function openCodeConfigPath() {
   return path.join(base, "opencode", "opencode.json");
 }
 
+/** Grok Build：~/.grok/config.toml（可用 GROK_HOME 覆盖） */
+export function grokConfigPath() {
+  const home = process.env.GROK_HOME && String(process.env.GROK_HOME).trim()
+    ? String(process.env.GROK_HOME).trim()
+    : path.join(os.homedir(), ".grok");
+  return path.join(home, "config.toml");
+}
+
 export const OPENCODE_PROVIDER_ID = "switchyard";
 export const OPENCODE_LOCAL_API_KEY = "switchyard-local";
+export const GROK_LOCAL_API_KEY = "switchyard-local";
+export const GROK_MANAGED_BEGIN = "# --- switchyard-managed-models begin ---";
+export const GROK_MANAGED_END = "# --- switchyard-managed-models end ---";
+export const GROK_MODEL_PREFIX = "sy-";
 
 export function codexModelCatalogPath() {
   return process.env.SWITCHYARD_CODEX_MODEL_CATALOG || path.join(DEFAULT_HOME, "codex-model-catalog.json");
@@ -61,7 +73,8 @@ export function profileTargets() {
     codex: codexConfigPath(),
     "claude-code": claudeCodeConfigPath(),
     hermes: hermesYamlConfigPath(),
-    opencode: openCodeConfigPath()
+    opencode: openCodeConfigPath(),
+    grok: grokConfigPath()
   };
 }
 
@@ -727,8 +740,11 @@ export function syncClientModelArtifacts({
   claudeCodeModels = [],
   openCodeModels = [],
   openCodeDefaultModel,
+  grokModels = [],
+  grokDefaultModel,
   forceCodex = false,
-  forceOpenCode = false
+  forceOpenCode = false,
+  forceGrok = false
 } = {}) {
   return {
     codex: syncCodexModelArtifacts({
@@ -747,6 +763,13 @@ export function syncClientModelArtifacts({
       models: openCodeModels,
       defaultModel: openCodeDefaultModel,
       force: forceOpenCode
+    }),
+    grok: syncGrokModelArtifacts({
+      host,
+      port,
+      models: grokModels,
+      defaultModel: grokDefaultModel,
+      force: forceGrok
     })
   };
 }
@@ -977,6 +1000,240 @@ export function syncOpenCodeModelArtifacts({
     backup: result.backup || null,
     changed: true,
     modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
+  };
+}
+
+// ---------- Grok Build (TOML) ----------
+
+function grokBaseUrl({ host, port } = {}) {
+  return `http://${host || "127.0.0.1"}:${port || 17888}/grok/v1`;
+}
+
+/** Grok picker 用的短 id：sy- + 模型 id 安全化（/ → --） */
+export function grokModelAlias(modelId) {
+  const raw = String(modelId || "").trim();
+  if (!raw) return "";
+  const safe = raw
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "--")
+    .replace(/[^A-Za-z0-9._@+-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return `${GROK_MODEL_PREFIX}${safe || "model"}`;
+}
+
+function grokModelLabel(model) {
+  const name = String(model?.displayName || model?.upstreamModel || model?.id || "").trim();
+  const provider = String(model?.providerName || model?.providerId || "").trim();
+  if (name && provider && !name.includes(provider)) return `${name} · ${provider}`;
+  return name || String(model?.id || "model");
+}
+
+function grokContextWindow(model) {
+  const n = Number(model?.contextWindow || model?.context_window || 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 200000;
+}
+
+function grokApiBackend(model) {
+  const format = String(model?.apiFormat || model?.providerApiFormat || "").toLowerCase();
+  if (format === "anthropic_messages") return "messages";
+  if (format === "openai_responses") return "responses";
+  // 默认 chat_completions：与网关 /v1/chat/completions 对齐
+  return "chat_completions";
+}
+
+export function renderGrokModelSection(model, { host, port } = {}) {
+  const id = String(model?.id || "").trim();
+  if (!id) return "";
+  const alias = grokModelAlias(id);
+  const lines = [
+    `[model.${alias}]`,
+    `model = ${tomlString(id)}`,
+    `base_url = ${tomlString(grokBaseUrl({ host, port }))}`,
+    `name = ${tomlString(grokModelLabel(model))}`,
+    `description = ${tomlString(MARKER)}`,
+    `api_key = ${tomlString(GROK_LOCAL_API_KEY)}`,
+    `api_backend = ${tomlString(grokApiBackend(model))}`,
+    `context_window = ${grokContextWindow(model)}`
+  ];
+  return lines.join("\n");
+}
+
+export function buildGrokManagedBlock({ host, port, models = [] } = {}) {
+  const sections = [];
+  const aliases = [];
+  for (const model of distinctModels(models)) {
+    const section = renderGrokModelSection(model, { host, port });
+    if (!section) continue;
+    sections.push(section);
+    aliases.push(grokModelAlias(model.id));
+  }
+  if (!sections.length) {
+    return {
+      text: `${GROK_MANAGED_BEGIN}\n# (no models)\n${GROK_MANAGED_END}\n`,
+      aliases,
+      modelCount: 0
+    };
+  }
+  return {
+    text: `${GROK_MANAGED_BEGIN}\n${sections.join("\n\n")}\n${GROK_MANAGED_END}\n`,
+    aliases,
+    modelCount: aliases.length
+  };
+}
+
+function stripGrokManagedBlock(text) {
+  const src = String(text || "");
+  const begin = src.indexOf(GROK_MANAGED_BEGIN);
+  if (begin < 0) {
+    // 兼容：去掉旧式 sy-* 且 description/base_url 指向 switchyard 的散落段落
+    return stripLooseGrokManagedSections(src);
+  }
+  const end = src.indexOf(GROK_MANAGED_END, begin);
+  if (end < 0) return src.slice(0, begin).replace(/\n{3,}$/g, "\n\n");
+  const after = src.slice(end + GROK_MANAGED_END.length).replace(/^\r?\n/, "");
+  return (src.slice(0, begin) + after).replace(/\n{3,}/g, "\n\n").trimEnd() + (src.endsWith("\n") || after ? "\n" : "");
+}
+
+function stripLooseGrokManagedSections(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const header = line.trim().match(/^\[model\.([^\]]+)\]$/);
+    if (!header) {
+      out.push(line);
+      i += 1;
+      continue;
+    }
+    const name = header[1];
+    const body = [];
+    i += 1;
+    while (i < lines.length && !/^\[[^\]]+\]\s*$/.test(lines[i].trim())) {
+      body.push(lines[i]);
+      i += 1;
+    }
+    const bodyText = body.join("\n");
+    const managed = name.startsWith(GROK_MODEL_PREFIX)
+      || bodyText.includes(MARKER)
+      || /base_url\s*=\s*["'][^"']*\/grok\/v1\/?["']/.test(bodyText);
+    if (managed) continue;
+    out.push(line, ...body);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+function grokModelsDefault(text) {
+  const block = tomlSectionText(text, "models");
+  if (!block) return "";
+  const match = block.match(/^\s*default\s*=\s*(.+?)\s*$/m);
+  return match ? tomlStringValue(match[1]) : "";
+}
+
+/** 在 [models] 表内设置/更新 default，保留其它键 */
+export function upsertGrokModelsDefault(text, defaultAlias) {
+  const src = String(text || "");
+  const lines = src.split(/\r?\n/);
+  const headerIdx = lines.findIndex((line) => line.trim() === "[models]");
+  if (headerIdx < 0) {
+    const block = defaultAlias
+      ? `\n[models]\ndefault = ${tomlString(defaultAlias)}\n`
+      : "";
+    return src.replace(/\s*$/, "") + block + (block ? "" : "\n");
+  }
+  let end = headerIdx + 1;
+  while (end < lines.length && !/^\[[^\]]+\]\s*$/.test(lines[end].trim())) end += 1;
+  const body = lines.slice(headerIdx + 1, end);
+  let found = false;
+  const nextBody = body.map((line) => {
+    if (/^\s*default\s*=/.test(line)) {
+      found = true;
+      if (!defaultAlias) return null;
+      return `default = ${tomlString(defaultAlias)}`;
+    }
+    return line;
+  }).filter((line) => line != null);
+  if (defaultAlias && !found) nextBody.unshift(`default = ${tomlString(defaultAlias)}`);
+  if (!defaultAlias && !found) {
+    // nothing
+  }
+  return [...lines.slice(0, headerIdx + 1), ...nextBody, ...lines.slice(end)].join("\n");
+}
+
+/**
+ * 合并 Grok config.toml：只维护 switchyard 托管块内的 [model.sy-*]，保留用户其它配置与自定义 model。
+ */
+export function mergeGrokProfile(existingText, { host, port, models = [], defaultModel } = {}) {
+  let base = stripGrokManagedBlock(existingText || "");
+  const managed = buildGrokManagedBlock({ host, port, models });
+  const preferredId = String(defaultModel || "").trim();
+  const preferredAlias = preferredId ? grokModelAlias(preferredId) : "";
+  const pickDefault = preferredAlias && managed.aliases.includes(preferredAlias)
+    ? preferredAlias
+    : (managed.aliases[0] || "");
+
+  const currentDefault = grokModelsDefault(base);
+  const currentIsOurs = currentDefault.startsWith(GROK_MODEL_PREFIX)
+    || managed.aliases.includes(currentDefault);
+  // 仅当未设默认、或当前默认是我们托管的 sy-* 时，才改 [models].default
+  if (pickDefault && (!currentDefault || currentIsOurs)) {
+    if (!managed.aliases.includes(currentDefault) || (preferredAlias && preferredAlias !== currentDefault)) {
+      base = upsertGrokModelsDefault(base, pickDefault);
+    }
+  } else if (currentIsOurs && pickDefault && !managed.aliases.includes(currentDefault)) {
+    base = upsertGrokModelsDefault(base, pickDefault);
+  }
+
+  const trimmed = base.replace(/\s*$/, "\n");
+  const next = `${trimmed}${trimmed.endsWith("\n\n") ? "" : "\n"}${managed.text}`;
+  return next.endsWith("\n") ? next : `${next}\n`;
+}
+
+export function previewGrokProfile(target = {}) {
+  return mergeGrokProfile(readText(grokConfigPath()), target);
+}
+
+export function isGrokConfigManaged(text) {
+  const src = String(text || "");
+  return src.includes(GROK_MANAGED_BEGIN)
+    || src.includes(MARKER)
+    || /\[model\.sy-/.test(src)
+    || /base_url\s*=\s*["'][^"']*\/grok\/v1\/?["']/.test(src);
+}
+
+/**
+ * 已托管时自动刷新 Grok 模型清单；未托管则跳过。
+ */
+export function syncGrokModelArtifacts({
+  host,
+  port,
+  models = [],
+  defaultModel,
+  force = false
+} = {}) {
+  const file = grokConfigPath();
+  let existing = "";
+  try { existing = fs.readFileSync(file, "utf8"); } catch {}
+  if (!force && !isGrokConfigManaged(existing)) {
+    return { ok: true, skipped: true, reason: "not-managed", path: file, modelCount: 0 };
+  }
+  const nextText = mergeGrokProfile(existing, { host, port, models, defaultModel });
+  if (existing === nextText) {
+    return {
+      ok: true,
+      path: file,
+      changed: false,
+      modelCount: distinctModels(models).length
+    };
+  }
+  const result = writeText(file, nextText);
+  return {
+    ok: true,
+    path: result.path,
+    backup: result.backup || null,
+    changed: true,
+    modelCount: distinctModels(models).length
   };
 }
 
@@ -1432,6 +1689,20 @@ export function applyOpenCode({ host, port, defaultModel, models, dryRun } = {})
   };
 }
 
+export function applyGrok({ host, port, defaultModel, models, dryRun } = {}) {
+  const file = grokConfigPath();
+  const existing = readText(file);
+  const text = mergeGrokProfile(existing, { host, port, defaultModel, models });
+  if (dryRun) return { path: file, preview: text, existing };
+  const result = writeText(file, text);
+  return {
+    ...result,
+    modelCount: distinctModels(models).length,
+    baseURL: grokBaseUrl({ host, port }),
+    defaultModel: grokModelsDefault(text) || null
+  };
+}
+
 export function applyProfile(id, opts = {}) {
   if (id === "codex") {
     if (opts.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) return applyCodexOfficialDirect(opts);
@@ -1441,6 +1712,7 @@ export function applyProfile(id, opts = {}) {
   if (id === "claude-code") return applyClaudeCode(opts);
   if (id === "hermes") return applyHermes(opts);
   if (id === "opencode") return applyOpenCode(opts);
+  if (id === "grok") return applyGrok(opts);
   throw new Error(`Unknown profile id: ${id}`);
 }
 
@@ -1449,6 +1721,7 @@ export function restoreProfile(id) {
   if (id === "claude-code") return restoreLatest(claudeCodeConfigPath());
   if (id === "hermes") return restoreLatest(hermesYamlConfigPath());
   if (id === "opencode") return restoreLatest(openCodeConfigPath());
+  if (id === "grok") return restoreLatest(grokConfigPath());
   throw new Error(`Unknown profile id: ${id}`);
 }
 
@@ -1457,6 +1730,7 @@ export function restoreProfileBackup(id, backupName) {
   if (id === "claude-code") return restoreBackup(claudeCodeConfigPath(), backupName);
   if (id === "hermes") return restoreBackup(hermesConfigPath(), backupName);
   if (id === "opencode") return restoreBackup(openCodeConfigPath(), backupName);
+  if (id === "grok") return restoreBackup(grokConfigPath(), backupName);
   throw new Error(`Unknown profile id: ${id}`);
 }
 

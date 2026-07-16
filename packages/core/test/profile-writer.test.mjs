@@ -797,3 +797,74 @@ test("preview · returns plain text suitable for UI", () => {
   const her = pw.previewHermesProfile({ host: "127.0.0.1", port: 17888 });
   assert.match(her, /\/hermes\/v1/);
 });
+
+test("grok profile · writes managed model blocks and preserves user config", () => {
+  const file = pw.grokConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    "[cli]",
+    "auto_update = true",
+    "",
+    "[models]",
+    'default = "grok-4.5"',
+    "",
+    "[model.my-custom]",
+    'model = "local"',
+    'base_url = "http://localhost:8000/v1"',
+    'name = "Local"',
+    ""
+  ].join("\n"), "utf8");
+
+  const r = pw.applyGrok({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "coding-plan/GLM-5.2",
+    models: [
+      { id: "coding-plan/GLM-5.2", displayName: "GLM-5.2", providerName: "Coding Plan", contextWindow: 200000 },
+      { id: "grok-pool/grok-4.5", displayName: "Grok 4.5", providerName: "Grok 池" }
+    ]
+  });
+  assert.equal(r.modelCount, 2);
+  const text = fs.readFileSync(file, "utf8");
+  assert.match(text, /\[cli\]/);
+  assert.match(text, /auto_update = true/);
+  assert.match(text, /\[model\.my-custom\]/);
+  assert.match(text, /switchyard-managed-models begin/);
+  assert.match(text, /\[model\.sy-coding-plan--GLM-5\.2\]/);
+  assert.match(text, /model = "coding-plan\/GLM-5\.2"/);
+  assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:17888\/grok\/v1"/);
+  assert.match(text, /api_backend = "chat_completions"/);
+  assert.match(text, /api_key = "switchyard-local"/);
+  // 用户默认是官方 grok-4.5，不应被强制改掉
+  assert.match(text, /default = "grok-4\.5"/);
+});
+
+test("grok profile · auto-refresh when managed; skip when not", () => {
+  const file = pw.grokConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "[cli]\nauto_update = true\n", "utf8");
+  const skip = pw.syncGrokModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    models: [{ id: "a/m1", displayName: "M1" }]
+  });
+  assert.equal(skip.skipped, true);
+
+  pw.applyGrok({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "a/m1",
+    models: [{ id: "a/m1", displayName: "M1" }]
+  });
+  const refreshed = pw.syncGrokModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "a/m1",
+    models: [{ id: "a/m1", displayName: "M1" }, { id: "b/m2", displayName: "M2" }]
+  });
+  assert.equal(refreshed.changed, true);
+  assert.equal(refreshed.modelCount, 2);
+  const text = fs.readFileSync(file, "utf8");
+  assert.match(text, /\[model\.sy-b--m2\]/);
+  assert.match(text, /default = "sy-a--m1"/);
+});

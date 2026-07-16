@@ -55,6 +55,7 @@ export function clientPrefix(clientId) {
     "claude-code": "/claude-code",
     hermes: "/hermes",
     opencode: "/opencode",
+    grok: "/grok",
     "generic-openai": ""
   };
   return map[clientId] ?? "";

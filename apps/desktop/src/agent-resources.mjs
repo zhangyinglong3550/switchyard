@@ -58,6 +58,15 @@ export function agentDefinitions() {
       sessionRoots: [],
       skillRoots: ["~/.config/opencode/skills", "~/.config/opencode/skill"],
       coreFiles: ["opencode.json", "AGENTS.md"]
+    },
+    {
+      id: "grok",
+      label: "Grok Build",
+      root: "~/.grok",
+      // 会话：~/.grok/sessions/<encoded-cwd>/<session-id>/summary.json
+      sessionRoots: ["~/.grok/sessions"],
+      skillRoots: ["~/.grok/skills"],
+      coreFiles: ["config.toml", "AGENTS.md"]
     }
   ].map((agent) => ({
     ...agent,
@@ -251,6 +260,34 @@ function summarizeSession(agent, root, file) {
   const stat = safeStat(file);
   if (!stat?.isFile()) return null;
   const relativePath = path.relative(root, file);
+
+  // Grok：每个会话目录下的 summary.json
+  if (agent.id === "grok" && path.basename(file) === "summary.json") {
+    const meta = (() => {
+      try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
+    })();
+    const info = meta?.info || {};
+    const sessionId = info.id || path.basename(path.dirname(file));
+    const title = meta?.session_summary || meta?.title || sessionId;
+    const mtime = meta?.updated_at || meta?.created_at || stat.mtime.toISOString();
+    return {
+      id: encodeResource(agent.id, root, file),
+      agentId: agent.id,
+      agentLabel: agent.label,
+      name: title,
+      relativePath,
+      path: file,
+      root,
+      source: "grok-summary",
+      sessionId,
+      model: meta?.current_model_id || meta?.model || "",
+      directory: info.cwd || "",
+      size: Number(meta?.num_messages || meta?.num_chat_messages || stat.size || 0),
+      messageCount: Number(meta?.num_messages || meta?.num_chat_messages || 0),
+      mtime: typeof mtime === "string" ? mtime : stat.mtime.toISOString()
+    };
+  }
+
   return {
     id: encodeResource(agent.id, root, file),
     agentId: agent.id,
@@ -271,8 +308,11 @@ export function listAgentSessions({ agentId = "", source = "", includeAllSources
   for (const agent of agents) {
     for (const root of agent.sessionRoots) {
       const files = walkFiles(root, {
-        maxDepth: agent.id === "claude-code" ? 3 : 2,
-        include: (file) => SESSION_EXTENSIONS.has(path.extname(file).toLowerCase())
+        maxDepth: agent.id === "claude-code" ? 3 : agent.id === "grok" ? 4 : 2,
+        include: (file) => {
+          if (agent.id === "grok") return path.basename(file) === "summary.json";
+          return SESSION_EXTENSIONS.has(path.extname(file).toLowerCase());
+        }
       });
       for (const file of files) {
         const row = summarizeSession(agent, root, file);
@@ -567,8 +607,122 @@ export function readAgentSession(id) {
   if (decoded.source === "hermes-state-db") return readHermesDbSession(id);
   if (decoded.source === "opencode-storage") return readOpenCodeSession(id);
   const resource = resolveAgentResource(id, "session");
+  if (resource.agent.id === "grok" && path.basename(resource.target) === "summary.json") {
+    return readGrokSession(resource);
+  }
   const read = readTextFile(resource.target, 256 * 1024);
   return { ...resource, ...read, conversation: parseSessionConversation(read.text, resource.agent.id) };
+}
+
+function parseGrokUpdatesConversation(text) {
+  const messages = [];
+  const pending = new Map(); // toolCallId -> { title, input }
+  for (const line of linesOf(text)) {
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    const update = record?.params?.update || record?.update || {};
+    const kind = String(update.sessionUpdate || update.type || "");
+    const ts = record.timestamp != null
+      ? (Number(record.timestamp) > 1e12
+        ? new Date(Number(record.timestamp)).toISOString()
+        : isoFromUnixSeconds(record.timestamp))
+      : null;
+
+    if (kind === "user_message_chunk") {
+      const chunk = contentText(update.content);
+      if (chunk) pushMessage(messages, { role: "user", text: chunk, timestamp: ts, kind });
+      continue;
+    }
+    if (kind === "agent_message_chunk") {
+      const chunk = contentText(update.content);
+      if (chunk) pushMessage(messages, { role: "assistant", text: chunk, timestamp: ts, kind });
+      continue;
+    }
+    if (kind === "tool_call") {
+      const toolId = update.toolCallId || update.id || "";
+      const title = update.title || update._meta?.["x.ai/tool"]?.name || "tool";
+      const input = update.rawInput || update.input || null;
+      pending.set(toolId, { title, input });
+      pushMessage(messages, {
+        role: "tool",
+        text: `[工具调用] ${title}${input ? `\n${typeof input === "string" ? input : JSON.stringify(input)}` : ""}`,
+        timestamp: ts,
+        kind
+      });
+      continue;
+    }
+    if (kind === "tool_call_update") {
+      const toolId = update.toolCallId || "";
+      const status = update.status || update._meta?.updateParams?.status || "";
+      if (status && String(status).toLowerCase() === "completed") {
+        const title = pending.get(toolId)?.title || update.title || "tool";
+        let outText = "";
+        const content = update.content || update.rawOutput;
+        if (Array.isArray(content)) {
+          outText = content.map((item) => contentText(item?.content || item)).filter(Boolean).join("\n");
+        } else if (content) {
+          outText = contentText(content);
+        }
+        if (outText) {
+          pushMessage(messages, {
+            role: "tool",
+            text: `[工具结果] ${title}\n${outText}`,
+            timestamp: ts,
+            kind
+          });
+        }
+      }
+      continue;
+    }
+  }
+  // 合并相邻同 role 的 chunk（Grok 流式碎片）
+  const merged = [];
+  for (const msg of messages) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === msg.role && (msg.kind || "").includes("chunk") && (prev.kind || "").includes("chunk")) {
+      prev.text = compactText(`${prev.text}${msg.text}`);
+      prev.timestamp = msg.timestamp || prev.timestamp;
+      continue;
+    }
+    merged.push(msg);
+  }
+  return merged;
+}
+
+function readGrokSession(resource) {
+  const dir = path.dirname(resource.target);
+  const summary = readJsonFileMaybe(resource.target) || {};
+  const updatesPath = path.join(dir, "updates.jsonl");
+  const chatPath = path.join(dir, "chat_history.jsonl");
+  let conversationMessages = [];
+  let format = "grok-summary";
+  let text = "";
+  if (safeStat(updatesPath)?.isFile()) {
+    const read = readTextFile(updatesPath, 512 * 1024);
+    conversationMessages = parseGrokUpdatesConversation(read.text);
+    format = "grok-updates";
+    text = read.text;
+  } else if (safeStat(chatPath)?.isFile()) {
+    const read = readTextFile(chatPath, 256 * 1024);
+    conversationMessages = parseSessionConversation(read.text, "grok");
+    format = "grok-chat-history";
+    text = read.text;
+  } else {
+    text = JSON.stringify(summary, null, 2);
+  }
+  return {
+    ...resource,
+    text: text || JSON.stringify(summary, null, 2),
+    truncated: conversationMessages.length > MAX_CONVERSATION_MESSAGES,
+    size: text.length || 0,
+    mtime: summary.updated_at || resource.mtime || null,
+    conversation: {
+      format,
+      count: conversationMessages.length,
+      truncated: conversationMessages.length > MAX_CONVERSATION_MESSAGES,
+      messages: conversationMessages.slice(-MAX_CONVERSATION_MESSAGES)
+    }
+  };
 }
 
 function linesOf(text) {

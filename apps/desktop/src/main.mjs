@@ -53,7 +53,7 @@ import { listProviderPresets, providerPresetFor, presetModelHints } from "../../
 import {
   applyProfile, restoreProfile, restoreProfileBackup,
   profileTargets, listBackups,
-  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile, previewOpenCodeProfile,
+  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile, previewOpenCodeProfile, previewGrokProfile,
   syncClientModelArtifacts,
   CODEX_ACCESS_MODES
 } from "../../../packages/core/src/profile-writer.mjs";
@@ -586,6 +586,7 @@ function syncCodexArtifacts(reason = "manual") {
     const codexModels = listModelsForClient(cfg, "codex");
     const claudeCodeModels = listModelsForClient(cfg, "claude-code");
     const openCodeModels = listModelsForClient(cfg, "opencode");
+    const grokModels = listModelsForClient(cfg, "grok");
     const status = statusFromServer();
     const host = status.running ? status.host : cfg.host;
     const port = status.running ? status.port : cfg.port;
@@ -596,11 +597,14 @@ function syncCodexArtifacts(reason = "manual") {
       codexModels: modelsForProfile(cfg, codexModels),
       claudeCodeModels: modelsForProfile(cfg, claudeCodeModels),
       openCodeModels: modelsForProfile(cfg, openCodeModels),
-      openCodeDefaultModel: clientDefaultModel(cfg, "opencode", openCodeModels)
+      openCodeDefaultModel: clientDefaultModel(cfg, "opencode", openCodeModels),
+      grokModels: modelsForProfile(cfg, grokModels),
+      grokDefaultModel: clientDefaultModel(cfg, "grok", grokModels)
     });
     const codexChanged = result.codex?.ok && (result.codex.catalogChanged || result.codex.cacheChanged);
     const claudeChanged = result.claudeCode?.ok && result.claudeCode.cacheChanged;
     const openCodeChanged = result.openCode?.ok && result.openCode.changed;
+    const grokChanged = result.grok?.ok && result.grok.changed;
 
     // Auto-sync settings.json for Claude Code so env vars stay current
     // (Claude Code reads these on next startup)
@@ -614,10 +618,9 @@ function syncCodexArtifacts(reason = "manual") {
       });
     } catch (_e) { /* non-fatal */ }
 
-    // OpenCode：仅当 opencode.json 已由 Switchyard 托管时刷新 models（新增/改模型自动可见）
-    // syncClientModelArtifacts 内的 syncOpenCodeModelArtifacts 已处理；此处无需 force 写入
+    // OpenCode / Grok：仅当配置已由 Switchyard 托管时刷新 models（新增/改模型自动可见）
 
-    if (codexChanged || claudeChanged || openCodeChanged) {
+    if (codexChanged || claudeChanged || openCodeChanged || grokChanged) {
       appendLog({
         level: "info",
         msg: "client model artifacts synced",
@@ -626,10 +629,13 @@ function syncCodexArtifacts(reason = "manual") {
         claudeCodeModelCount: result.claudeCode?.modelCount || 0,
         openCodeModelCount: result.openCode?.modelCount || 0,
         openCodeSkipped: Boolean(result.openCode?.skipped),
+        grokModelCount: result.grok?.modelCount || 0,
+        grokSkipped: Boolean(result.grok?.skipped),
         codexCacheChanged: Boolean(result.codex?.cacheChanged),
         codexCatalogChanged: Boolean(result.codex?.catalogChanged),
         claudeCodeCacheChanged: Boolean(result.claudeCode?.cacheChanged),
-        openCodeChanged: Boolean(openCodeChanged)
+        openCodeChanged: Boolean(openCodeChanged),
+        grokChanged: Boolean(grokChanged)
       });
     }
     return result;
@@ -1403,7 +1409,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
     port: status.running ? status.port : cfg.port,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code", "opencode"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode", "grok"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -1419,6 +1425,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
   const result = applyProfile(clientId, opts);
   if (clientId === "codex" && profileMode === CODEX_ACCESS_MODES.SWITCHYARD_PROXY) syncCodexArtifacts("profile-apply");
   if (clientId === "opencode") syncCodexArtifacts("opencode-profile-apply");
+  if (clientId === "grok") syncCodexArtifacts("grok-profile-apply");
   appendLog({
     level: "info",
     msg: `profile applied: ${clientId}`,
@@ -1474,7 +1481,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
     port: status.running ? status.port : 17888,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code", "opencode"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode", "grok"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -1492,6 +1499,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
   if (clientId === "claude-code") return { text: previewClaudeCodeProfile(opts), path: profileTargets()["claude-code"] };
   if (clientId === "hermes") return { text: previewHermesProfile(opts), path: profileTargets().hermes };
   if (clientId === "opencode") return { text: previewOpenCodeProfile(opts), path: profileTargets().opencode };
+  if (clientId === "grok") return { text: previewGrokProfile(opts), path: profileTargets().grok };
   throw new Error(`Unknown client: ${clientId}`);
 });
 ipcMain.handle("test:chat", async (_e, { model, messages, stream, clientId = "generic-openai", protocol = "openai_chat", includeImage = false, temperature, maxTokens }) => {

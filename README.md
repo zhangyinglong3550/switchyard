@@ -1,6 +1,6 @@
 # Switchyard
 
-**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode 里统一选择。
+**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build 里统一选择。
 
 [![version](https://img.shields.io/badge/version-2.2.6-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
@@ -38,7 +38,7 @@
 |--|--------------|------------|
 | 主场景 | Claude Code 配置 / 渠道切换 | **本机网关 + 多客户端统一模型目录** |
 | 供应商 | 往往围绕 Claude 链路 | OpenAI / Anthropic / 中转 / 公司网关 / 账号池… **可并行多条** |
-| 在 Agent 里 | 多为「当前启用的那一家」 | 在 **Claude Code、Codex、Hermes、OpenCode** 的模型列表里 **一起出现**，按需切换 |
+| 在 Agent 里 | 多为「当前启用的那一家」 | 在 **Claude Code、Codex、Hermes、OpenCode、Grok Build** 的模型列表里 **一起出现**，按需切换 |
 
 **你在面板里接入的所有模型，会打平成客户端可选列表**——不必为每个 Agent、每个供应商各配一套；DeepSeek、Kimi、GLM、公司 OpenAI 兼容网关、官方 Claude/GPT 等，都可以在同一套 Codex / Claude Code 里选。
 
@@ -106,14 +106,33 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 
 ---
 
+### 6. OpenCode / Grok Build 接三方模型
+
+不只是 Codex / Claude Code——**OpenCode** 与 **Grok Build** 也能走同一张模型表。
+
+| 客户端 | 网关入口 | 一键写入 | 说明 |
+|--------|----------|----------|------|
+| OpenCode | `/opencode/v1` | `~/.config/opencode/opencode.json` → `provider.switchyard` | 首次写入后增/改/启模型自动刷新 models |
+| Grok Build | `/grok/v1` | `~/.grok/config.toml` 托管块 `[model.sy-*]` | 保留用户原有 model；`/model` 或 Ctrl+M 选 `sy-…` |
+
+**Grok Build 两条线不要混：**
+
+- **账号池**：官方 xAI 多号（供应商页）  
+- **客户端托管**：经 Switchyard 用任意供应商（客户端页 / 偏好设置 → Grok Build 三方模型）
+
+详细版里还可浏览 OpenCode / Grok 的 **Skills、会话、调用可视化**；偏好设置可编辑核心文件并查看 Grok 托管状态。
+
+---
+
 ## 为什么用 Switchyard
 
 | 你要什么 | Switchyard 怎么给 |
 |----------|-------------------|
-| 多家供应商进同一个 Agent | **打平模型目录**，Claude Code / Codex 里一起选 |
+| 多家供应商进同一个 Agent | **打平模型目录**，Claude Code / Codex / OpenCode / Grok Build 里一起选 |
 | 中转经常抖（如讯飞） | 网关重试，Agent 尽量无感 |
 | 便宜模型也要能看图 | 视觉兜底链路 |
 | 多 Codex / 多 Grok 号 | 内置账号池，少依赖 CLI2API |
+| Grok Build 也想用公司/中转模型 | 一键写入 `sy-*` 托管块，走 `/grok/v1` |
 
 **不是又一个公网转发站**，而是给 AI 编程 Agent 用的 **本机模型控制台**。
 
@@ -124,7 +143,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 1. 从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 安装并打开  
 2. **供应商** → 选模板或自定义 → 填 API Key  
 3. **模型** → 启用要用的模型  
-4. **客户端** → 同步 Codex / Claude Code / Hermes / OpenCode  
+4. **客户端** → 同步 Codex / Claude Code / Hermes / OpenCode / Grok Build  
 5. 在 Agent 里直接选模型  
 
 macOS 若提示「已损坏」：
@@ -141,10 +160,11 @@ xattr -cr /Applications/Switchyard.app
 
 | 能力 | 说明 | 示意 |
 |------|------|------|
-| 诊断中心 | 供应商 / 模型可用性与修复建议 | ![诊断](docs/assets/screenshots/06-diagnostics.png) |
-| 会话 | 跨 Agent 会话浏览 | ![会话](docs/assets/screenshots/07-sessions.png) |
+| 诊断中心 | 供应商 / 模型可用性与修复建议（含 OpenCode / Grok 是否指向网关） | ![诊断](docs/assets/screenshots/06-diagnostics.png) |
+| 会话 | 跨 Agent 会话浏览（Codex / Claude / Hermes / OpenCode / Grok） | ![会话](docs/assets/screenshots/07-sessions.png) |
 | 调用可视化 / 链路追踪 | 请求状态、延迟、重试与换号过程 | ![调用可视化](docs/assets/screenshots/08-traces.png) |
-| Skills | Skills 管理与安装 | ![Skills](docs/assets/screenshots/09-skills.png) |
+| Skills | Skills 管理与安装（含 Grok / OpenCode 目录） | ![Skills](docs/assets/screenshots/09-skills.png) |
+| 偏好设置 | 核心文件编辑；Grok Build 托管状态与一键写入 | — |
 | 官方直连 vs 网关 | Codex 可仅写元数据、不转发 | ![接入模式](docs/assets/screenshots/12-official-direct.png) |
 
 更多设计：[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md) · [CHANGELOG](CHANGELOG.md)
@@ -156,7 +176,7 @@ xattr -cr /Applications/Switchyard.app
 ![架构](docs/assets/screenshots/11-architecture.png)
 
 ```
-Codex / Claude Code / Hermes / OpenCode / 兼容客户端
+Codex / Claude Code / Hermes / OpenCode / Grok Build / 兼容客户端
               │
               ▼
      Switchyard Gateway（本机）
@@ -169,6 +189,9 @@ Codex / Claude Code / Hermes / OpenCode / 兼容客户端
  api.x.ai   Codex 官方   三方 / 公司 OpenAI 兼容 API
  (Grok 池)  (Codex 池)   (Key / 中转)
 ```
+
+> **Grok Build 三方模型**：一键写入 `~/.grok/config.toml` 托管块 `[model.sy-*]`，网关入口 `/grok/v1`。  
+> 官方 xAI 账号池与「经 Switchyard 使用任意供应商模型」是两条线：池管订阅号，客户端页 / 偏好设置管 Grok Build 接三方。
 
 ---
 

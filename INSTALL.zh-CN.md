@@ -1,23 +1,25 @@
 # Switchyard 安装与使用手册
 
-> 版本：V0.5（团队可用版）
-> 更新：2026-06-23
+> 版本：2.2.6  
+> 更新：2026-07-16
 
 ## 简介
 
 Switchyard 是一个本机多客户端 AI 模型网关和桌面管理台。它让你：
 
-- 在统一的 UI 中管理多个 AI 供应商（OpenAI / Anthropic / DeepSeek / Kimi / GLM 等）
-- 同时为 Codex、Claude Code、Hermes、OpenCode 提供兼容协议入口
+- 在统一的 UI 中管理多个 AI 供应商（OpenAI / Anthropic / DeepSeek / Kimi / GLM / KE 等）
+- 同时为 Codex、Claude Code、Hermes、OpenCode、Grok Build 提供兼容协议入口
 - 一键导入 cc-switch 现有配置
-- 一键写入 Codex / Claude Code / Hermes 客户端配置文件
+- 一键写入 Codex / Claude Code / Hermes / OpenCode / Grok Build 客户端配置文件
 - 在测试台直接验证模型是否可用
+- 详细版：诊断、用量、会话、Skills、调用可视化；偏好设置可编辑 Agent 核心文件与 Grok 托管状态
 
 **核心原则**：所有的密钥都通过环境变量加载，不进配置文件、不进日志、不进备份包。
 
 ## 系统要求
 
-- macOS 14.0+（Sonoma / Sequoia，Apple Silicon）
+- macOS 14.0+（Sonoma / Sequoia；Apple Silicon 与 Intel 均有安装包）
+- Windows 10/11 x64（可选）
 - 网络可访问上游 AI 供应商 API
 - 已使用 cc-switch（可选；首次启动会自动检测并提示导入）
 
@@ -99,8 +101,16 @@ export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
 | Claude Code | `~/.claude/settings.json` |
 | Hermes | `~/.hermes/config.yaml` |
 | OpenCode | `~/.config/opencode/opencode.json` |
+| Grok Build | `~/.grok/config.toml`（托管块 `[model.sy-*]`） |
 
-写入后，重启对应客户端即可看到 Switchyard provider。
+写入后，重启对应客户端即可看到 Switchyard provider / 模型。
+
+**Grok Build 说明**：
+- 网关入口：`http://127.0.0.1:<端口>/grok/v1`（OpenAI Chat Completions）
+- 一键写入会在 `config.toml` 插入 `switchyard-managed-models` 托管块，每个启用模型对应 `[model.sy-…]`
+- 保留你原有的 `[model.*]`、`[cli]` 等；仅当当前默认已是 `sy-*` 时才改 `[models].default`
+- 首次写入后，在 Switchyard 增/改/启模型会**自动刷新**托管块
+- 在 Grok 里用 `/model` 或 `Ctrl+M` 切换到 `sy-…` 短 id
 
 ### Step 5 · 在测试台验证
 
@@ -113,7 +123,7 @@ export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
 
 ## 接入其它工具
 
-Switchyard 同时提供 4 个客户端入口路径：
+Switchyard 同时提供多个客户端入口路径：
 
 | 客户端类型 | 入口路径示例 | 协议 |
 |-----------|--------------|------|
@@ -121,6 +131,7 @@ Switchyard 同时提供 4 个客户端入口路径：
 | Claude Code | `http://127.0.0.1:<端口>/claude-code` | Anthropic Messages |
 | Hermes | `http://127.0.0.1:<端口>/hermes/v1` | OpenAI Chat |
 | OpenCode | `http://127.0.0.1:<端口>/opencode/v1` | OpenAI Chat |
+| Grok Build | `http://127.0.0.1:<端口>/grok/v1` | OpenAI Chat |
 | 通用 OpenAI 兼容 | `http://127.0.0.1:<端口>/v1` | OpenAI Chat |
 
 端口在「总览」tab 看到。
@@ -162,6 +173,18 @@ A: 在客户端 tab 对 Codex 点「一键写入」→ 然后**重启** Codex De
 
 A: 检查 Switchyard 是否在运行（总览页服务状态）。如果停了，点「启动」。
 
+### Q: Grok Build 里看不到 sy-* 模型
+
+A:
+1. 客户端 tab 对 **Grok Build** 点「一键写入」（或偏好设置 → Grok Build 三方模型）
+2. 确认托管状态为「正常」、入口为 `http://127.0.0.1:<端口>/grok/v1`
+3. 在 Grok 里用 `/model` 或 `Ctrl+M` 选择 `sy-…` 短 id
+4. 若仍无，重启 Grok Build
+
+### Q: OpenCode 里没有 Switchyard 模型
+
+A: 客户端 tab 对 OpenCode 点「一键写入」→ 重启 OpenCode 或重新拉 `/models`。首次托管后，Switchyard 增/改模型会自动刷新 `opencode.json` 里的 models 列表。
+
 ### Q: 我有新的 provider 想加，但不在 cc-switch 里
 
 A: 直接在供应商 tab 「+ 新增供应商」即可，不必经过 cc-switch。
@@ -169,6 +192,14 @@ A: 直接在供应商 tab 「+ 新增供应商」即可，不必经过 cc-switch
 ### Q: 我手动改了 ~/.switchyard/config.json，Switchyard 不更新
 
 A: 点总览页的「重载配置」按钮，或者 UI 操作任何 provider/model 也会触发自动重载。
+
+### Q: macOS 提示应用已损坏
+
+A:
+
+```bash
+xattr -cr /Applications/Switchyard.app
+```
 
 ### Q: 想恢复到没装 Switchyard 之前的 Codex / Claude Code 配置
 

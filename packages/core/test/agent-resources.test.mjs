@@ -252,4 +252,74 @@ test("agent resources · lists sessions and manages skills inside agent roots", 
   const linkedToOc = mod.linkAgentSkill(skills[0].id, { targetAgentId: "opencode", skillName: "from-codex" });
   assert.equal(linkedToOc.ok, true);
   assert.equal(fs.lstatSync(path.join(tmp, ".config", "opencode", "skills", "from-codex")).isSymbolicLink(), true);
+
+  // Grok Build: skills + sessions under ~/.grok
+  const grokSkill = path.join(tmp, ".grok", "skills", "grok-demo");
+  fs.mkdirSync(grokSkill, { recursive: true });
+  fs.writeFileSync(path.join(grokSkill, "SKILL.md"), "---\nname: grok-demo\n---\nGrok skill\n", "utf8");
+  fs.writeFileSync(path.join(tmp, ".grok", "config.toml"), "[cli]\nauto_update = true\n", "utf8");
+  const grokSessionDir = path.join(tmp, ".grok", "sessions", "%2Ftmp%2Fdemo", "019f-test-session");
+  fs.mkdirSync(grokSessionDir, { recursive: true });
+  fs.writeFileSync(path.join(grokSessionDir, "summary.json"), JSON.stringify({
+    info: { id: "019f-test-session", cwd: "/tmp/demo" },
+    session_summary: "Grok 测试会话",
+    created_at: "2026-07-16T00:00:00.000Z",
+    updated_at: "2026-07-16T00:01:00.000Z",
+    num_messages: 4,
+    current_model_id: "sy-a--m1"
+  }), "utf8");
+  fs.writeFileSync(path.join(grokSessionDir, "updates.jsonl"), [
+    JSON.stringify({
+      timestamp: 1782230001000,
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "Grok 你好" }
+        }
+      }
+    }),
+    JSON.stringify({
+      timestamp: 1782230002000,
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "你好，我是 Grok。" }
+        }
+      }
+    }),
+    JSON.stringify({
+      timestamp: 1782230003000,
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-1",
+          title: "read_file",
+          rawInput: { target_file: "/tmp/a.txt" }
+        }
+      }
+    })
+  ].join("\n") + "\n", "utf8");
+
+  const grokSkills = mod.listAgentSkills({ agentId: "grok" });
+  assert.equal(grokSkills.length, 1);
+  assert.equal(grokSkills[0].name, "grok-demo");
+  assert.match(mod.readAgentSkill(grokSkills[0].id).text, /Grok skill/);
+
+  const grokSessions = mod.listAgentSessions({ agentId: "grok" });
+  assert.equal(grokSessions.length, 1);
+  assert.equal(grokSessions[0].name, "Grok 测试会话");
+  assert.equal(grokSessions[0].source, "grok-summary");
+  const grokRead = mod.readAgentSession(grokSessions[0].id);
+  assert.equal(grokRead.conversation.format, "grok-updates");
+  assert.equal(grokRead.conversation.messages[0].role, "user");
+  assert.equal(grokRead.conversation.messages[0].text, "Grok 你好");
+  assert.match(grokRead.conversation.messages[1].text, /Grok/);
+  assert.equal(grokRead.conversation.messages.some((m) => m.role === "tool" && /read_file/.test(m.text)), true);
+
+  const linkedToGrok = mod.linkAgentSkill(skills[0].id, { targetAgentId: "grok", skillName: "from-codex-grok" });
+  assert.equal(linkedToGrok.ok, true);
+  assert.equal(fs.lstatSync(path.join(tmp, ".grok", "skills", "from-codex-grok")).isSymbolicLink(), true);
 });

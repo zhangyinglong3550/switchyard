@@ -12,6 +12,13 @@
   - 会话：读取 `~/.local/share/opencode/storage/session`（JSON 元数据 + message/part），可在「会话」页浏览与删除（移入废纸篓）。
   - 调用可视化：筛选 OpenCode 时展示会话时间线（用户/助手正文、工具调用）；网关请求日志仍按 `client_id=opencode` 归类。
   - 核心文件：可编辑 `opencode.json` / `AGENTS.md`。
+- **Grok Build 客户端**（三方模型）：
+  - 网关入口 `/grok/v1`（OpenAI Chat Completions）。
+  - 一键写入 `~/.grok/config.toml` 托管块：`[model.sy-*]`（`model`=Switchyard 模型 id，`base_url` 指向网关，`api_key=switchyard-local`）。
+  - 保留用户原有 `[model.*]` / `[cli]` 等配置；仅当默认已是 `sy-*` 时才改 `[models].default`。
+  - 首次写入后，增/改/启模型自动刷新托管块。
+  - Skills：`~/.grok/skills`；会话：`~/.grok/sessions/**/summary.json` + `updates.jsonl` 时间线；诊断可检测是否指向 Switchyard。
+  - **偏好设置**：Grok Build 托管状态卡（状态 / 入口 / 路径 + 一键写入 / 跳转客户端 / 打开诊断）。
 
 ## 2.2.5 — 2026-07-16
 

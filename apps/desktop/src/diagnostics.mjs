@@ -80,7 +80,8 @@ function targetUrls({ host = "127.0.0.1", port = 17888 } = {}) {
     codex: `${origin}/codex/v1`,
     claudeCode: `${origin}/claude-code`,
     hermes: `${origin}/hermes/v1`,
-    opencode: `${origin}/opencode/v1`
+    opencode: `${origin}/opencode/v1`,
+    grok: `${origin}/grok/v1`
   };
 }
 
@@ -337,13 +338,31 @@ function detectOpenCodeConfig(settings, urls) {
   return statusResult("drifted", "OpenCode 配置未指向 Switchyard", { expected: urls.opencode });
 }
 
+function detectGrokConfig(tomlText, urls) {
+  if (tomlText == null) return statusResult("missing", "未找到 Grok Build 配置", { expected: urls.grok });
+  const text = asText(tomlText);
+  const hasBase =
+    text.includes(urls.grok)
+    || text.includes(`${urls.origin}/grok`)
+    || /base_url\s*=\s*["']http:\/\/127\.0\.0\.1:\d+\/grok\/v1\/?["']/.test(text);
+  const hasManaged =
+    text.includes("switchyard-managed-models")
+    || text.includes("managed-by-switchyard")
+    || /\[model\.sy-/.test(text);
+  if (hasBase && hasManaged) {
+    return statusResult("ok", "Grok Build 已指向 Switchyard", { expected: urls.grok });
+  }
+  return statusResult("drifted", "Grok Build 配置未指向 Switchyard", { expected: urls.grok });
+}
+
 export function doctorClientConfigContents(options = {}) {
   const urls = targetUrls(options);
   return {
     codex: detectCodexConfig(options.codexText, urls),
     "claude-code": detectClaudeCodeConfig(options.claudeSettings, urls),
     hermes: detectHermesConfig(options.hermesYamlText, urls),
-    opencode: detectOpenCodeConfig(options.openCodeSettings, urls)
+    opencode: detectOpenCodeConfig(options.openCodeSettings, urls),
+    grok: detectGrokConfig(options.grokTomlText, urls)
   };
 }
 
@@ -377,10 +396,15 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     "opencode",
     "opencode.json"
   );
+  const grokHome = process.env.GROK_HOME && String(process.env.GROK_HOME).trim()
+    ? String(process.env.GROK_HOME).trim()
+    : path.join(home, ".grok");
+  const grokPath = path.join(grokHome, "config.toml");
   const codexText = readTextMaybe(codexPath);
   const claudeSettings = readJsonMaybe(claudePath);
   const hermesYamlText = readTextMaybe(hermesYamlPath);
   const openCodeSettings = readJsonMaybe(openCodePath);
+  const grokTomlText = readTextMaybe(grokPath);
 
   const contents = doctorClientConfigContents({
     host,
@@ -388,7 +412,8 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     codexText: typeof codexText === "string" ? codexText : null,
     claudeSettings: claudeSettings && !claudeSettings.unreadable ? claudeSettings : null,
     hermesYamlText: typeof hermesYamlText === "string" ? hermesYamlText : null,
-    openCodeSettings: openCodeSettings && !openCodeSettings.unreadable ? openCodeSettings : null
+    openCodeSettings: openCodeSettings && !openCodeSettings.unreadable ? openCodeSettings : null,
+    grokTomlText: typeof grokTomlText === "string" ? grokTomlText : null
   });
 
   return {
@@ -397,13 +422,15 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
       codex: codexPath,
       "claude-code": claudePath,
       hermes: hermesYamlPath,
-      opencode: openCodePath
+      opencode: openCodePath,
+      grok: grokPath
     },
     errors: [
       codexText?.unreadable && { client: "codex", ...codexText },
       claudeSettings?.unreadable && { client: "claude-code", ...claudeSettings },
       hermesYamlText?.unreadable && { client: "hermes", ...hermesYamlText },
-      openCodeSettings?.unreadable && { client: "opencode", ...openCodeSettings }
+      openCodeSettings?.unreadable && { client: "opencode", ...openCodeSettings },
+      grokTomlText?.unreadable && { client: "grok", ...grokTomlText }
     ].filter(Boolean)
   };
 }

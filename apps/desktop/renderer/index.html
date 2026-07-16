@@ -221,6 +221,7 @@
                   <option value="claude-code">Claude Code</option>
                   <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
 </select>
               </label>
               <label>协议
@@ -278,6 +279,7 @@
           <option value="claude-code">Claude Code</option>
           <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+<option value="grok">Grok Build</option>
 <option value="generic-openai">通用 OpenAI</option>
           <option value="model-test">模型测试</option>
         </select>
@@ -364,6 +366,7 @@
           <option value="claude-code">Claude Code</option>
           <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
 </select>
         <button class="btn" id="btn-sessions-refresh">刷新</button>
       </div>
@@ -394,6 +397,7 @@
           <option value="claude-code">Claude Code</option>
           <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+<option value="grok">Grok Build</option>
 <option value="generic-openai">通用 OpenAI</option>
         </select>
         <button class="btn" id="btn-traces-refresh">刷新</button>
@@ -427,6 +431,7 @@
           <option value="claude-code">Claude Code</option>
           <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
 </select>
         <button class="btn" id="btn-skills-refresh">刷新</button>
       </div>
@@ -532,6 +537,32 @@
             </dl>
           </div>
         </div>
+        <div class="card" id="settings-grok-card">
+          <div class="hd">
+            <h3>Grok Build 三方模型</h3>
+            <span id="settings-grok-status-chip"></span>
+          </div>
+          <div class="bd">
+            <p class="client-help" style="margin-top:0;">
+              经 Switchyard 在 Grok Build 里使用任意供应商模型（KE / DeepSeek / 中转等）。
+              与侧栏「Grok / xAI 账号池」不同：账号池管官方多号，这里管 <span class="mono">sy-*</span> 托管模型。
+            </p>
+            <dl class="kv">
+              <dt>托管状态</dt><dd id="settings-grok-status-label">检测中…</dd>
+              <dt>网关入口</dt><dd class="mono" id="settings-grok-endpoint">-</dd>
+              <dt>配置文件</dt><dd class="mono" id="settings-grok-path">~/.grok/config.toml</dd>
+            </dl>
+            <div class="callout compact" id="settings-grok-hint">
+              首次「一键写入」后会在 config.toml 插入 switchyard-managed-models 托管块；之后增/改/启模型会自动刷新。
+              在 Grok 里用 /model 或 Ctrl+M 切换到 sy-… 短 id。
+            </div>
+            <div class="actions" style="margin-top:12px;">
+              <button class="btn primary" type="button" id="btn-settings-grok-apply">一键写入 Grok 配置</button>
+              <button class="btn" type="button" id="btn-settings-grok-goto-clients">打开客户端页</button>
+              <button class="btn" type="button" id="btn-settings-grok-diagnostics">打开诊断</button>
+            </div>
+          </div>
+        </div>
         <div class="card">
           <div class="hd">
             <h3>Agent 核心文件</h3>
@@ -545,6 +576,7 @@
                   <option value="claude-code">Claude Code</option>
                   <option value="hermes">Hermes</option>
           <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
 </select>
               </label>
               <label>文件
@@ -601,7 +633,8 @@
         <option value="codex">Codex</option>
         <option value="claude-code">Claude Code</option>
         <option value="hermes">Hermes</option>
-                  <option value="opencode">OpenCode</option>
+        <option value="opencode">OpenCode</option>
+        <option value="grok">Grok Build</option>
       </select>
     </label>
     <label>目标 Skill 名称 <input class="field" id="skill-link-name"></label>
@@ -652,7 +685,8 @@
         <option value="codex">Codex</option>
         <option value="claude-code">Claude Code</option>
         <option value="hermes">Hermes</option>
-                  <option value="opencode">OpenCode</option>
+        <option value="opencode">OpenCode</option>
+        <option value="grok">Grok Build</option>
       </select>
     </label>
     <label>Skill 名称 <input class="field" id="skillhub-install-name"></label>

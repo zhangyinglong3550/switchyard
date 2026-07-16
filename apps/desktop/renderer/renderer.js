@@ -431,6 +431,10 @@ function setActiveTab(tab) {
   if (tab === "logs") refreshLogTail().catch(() => {});
   if (tab === "traces") renderLiveLogs();
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
+  if (tab === "settings") {
+    renderSettings();
+    refreshSettingsGrokStatus().catch(() => {});
+  }
 }
 
 document.querySelectorAll(".nav a").forEach((a) => {
@@ -525,6 +529,7 @@ function renderOverview() {
     ["Claude Code", `${base}/claude-code`],
     ["Hermes", `${base}/hermes/v1`],
     ["OpenCode", `${base}/opencode/v1`],
+    ["Grok Build", `${base}/grok/v1`],
     ["通用 OpenAI", `${base}/v1`]
   ];
   for (const [label, url] of rows) {
@@ -1050,7 +1055,8 @@ const PROFILE_META = {
   codex: { label: "Codex", file: "~/.codex/config.toml", entry: "/codex/v1", note: "可选择官方直连或 Switchyard 三方代理。三方代理写入 model_provider = custom；官方直连会移除 Switchyard 管理块，认证交给 Codex App/CLI。" },
   "claude-code": { label: "Claude Code", file: "~/.claude/settings.json", entry: "/claude-code", note: "写入 env.ANTHROPIC_BASE_URL；ANTHROPIC_AUTH_TOKEN 读取 ${SWITCHYARD_KEY}" },
   hermes: { label: "Hermes", file: "~/.hermes/config.yaml", entry: "/hermes/v1", note: "写入 model.provider = switchyard 及 providers.switchyard（base_url + api_key + 模型清单）。Hermes 只读取 config.yaml。" },
-  opencode: { label: "OpenCode", file: "~/.config/opencode/opencode.json", entry: "/opencode/v1", note: "写入 provider.switchyard（OpenAI 兼容 + 模型清单）。新增/改模型后会自动刷新 models；OpenCode 需重启或重新 /models 才能看到。" }
+  opencode: { label: "OpenCode", file: "~/.config/opencode/opencode.json", entry: "/opencode/v1", note: "写入 provider.switchyard（OpenAI 兼容 + 模型清单）。新增/改模型后会自动刷新 models；OpenCode 需重启或重新 /models 才能看到。" },
+  grok: { label: "Grok Build", file: "~/.grok/config.toml", entry: "/grok/v1", note: "写入托管块 [model.sy-*]（OpenAI chat_completions + base_url）。首次一键写入后，增/改/启模型会自动刷新；Grok 用 /model 或 Ctrl+M 切换，短 id 为 sy-…。" }
 };
 
 const CLAUDE_CODE_MAPPING_SLOTS = [
@@ -1260,6 +1266,8 @@ async function refreshDiagnostics() {
   const result = await invoke("diagnostics:run");
   state.diagnostics = result;
   renderDiagnostics();
+  // 偏好设置里的 Grok 托管状态与诊断同源
+  try { renderSettingsGrokStatus(result?.clients?.grok || null); } catch {}
   if (canWriteOutput) {
     output.textContent = "诊断完成。选择模型后点击“运行探针”，结果会在这里展开显示。";
   }
@@ -1274,7 +1282,8 @@ function renderDiagnostics() {
       ["codex", "Codex"],
       ["claude-code", "Claude Code"],
       ["hermes", "Hermes"],
-      ["opencode", "OpenCode"]
+      ["opencode", "OpenCode"],
+      ["grok", "Grok Build"]
     ];
     clientGrid.innerHTML = clients.map(([id, label]) => {
       const row = data.clients?.[id] || {};
@@ -1787,9 +1796,96 @@ async function restoreSelectedProfileBackup() {
   }
 }
 
-function renderSettings() {
-  document.getElementById("settings-config-path").textContent = state.configPath || "-";
+function settingsGrokEndpoint() {
+  const host = state.status?.host || state.config?.host || "127.0.0.1";
+  const port = state.status?.port || state.config?.port || 17888;
+  return `http://${host}:${port}/grok/v1`;
 }
+
+function settingsGrokConfigPath() {
+  // diagnostics:run 把 doctorClientConfigs 整包放在 clients 下，paths 与各客户端状态同级
+  return state.diagnostics?.clients?.paths?.grok || "~/.grok/config.toml";
+}
+
+function renderSettingsGrokStatus(row = null) {
+  const chipEl = document.getElementById("settings-grok-status-chip");
+  const labelEl = document.getElementById("settings-grok-status-label");
+  const endpointEl = document.getElementById("settings-grok-endpoint");
+  const pathEl = document.getElementById("settings-grok-path");
+  const hintEl = document.getElementById("settings-grok-hint");
+  if (endpointEl) endpointEl.textContent = row?.expected || settingsGrokEndpoint();
+  if (pathEl) pathEl.textContent = settingsGrokConfigPath();
+  if (!row) {
+    if (chipEl) chipEl.innerHTML = '<span class="chip">未检测</span>';
+    if (labelEl) labelEl.textContent = "打开本页后会自动检测是否已托管";
+    return;
+  }
+  if (chipEl) chipEl.innerHTML = statusChip(row.status);
+  if (labelEl) labelEl.textContent = row.label || "-";
+  if (hintEl) {
+    if (row.status === "ok") {
+      hintEl.textContent = "已托管：模型列表会随 Switchyard 增/改/启自动刷新。在 Grok 用 /model 或 Ctrl+M 选 sy-… 即可。";
+    } else if (row.status === "missing") {
+      hintEl.textContent = "尚未找到 ~/.grok/config.toml。点「一键写入 Grok 配置」创建托管块，或先安装并启动 Grok Build。";
+    } else if (row.status === "drifted") {
+      hintEl.textContent = "配置存在但未指向 Switchyard。点「一键写入」会合并托管块，保留你原有的 [model.*] / [cli] 等。";
+    } else if (row.status === "unreadable") {
+      hintEl.textContent = "配置文件无法读取，请检查权限或路径。";
+    }
+  }
+}
+
+async function refreshSettingsGrokStatus({ force = false } = {}) {
+  try {
+    if (force || !state.diagnostics?.clients?.grok) {
+      const result = await invoke("diagnostics:run");
+      state.diagnostics = result;
+      // 同步诊断页 UI（若已打开）
+      try { renderDiagnostics(); } catch {}
+    }
+    renderSettingsGrokStatus(state.diagnostics?.clients?.grok || null);
+  } catch (err) {
+    renderSettingsGrokStatus({
+      status: "unreadable",
+      label: err?.message || "检测失败",
+      expected: settingsGrokEndpoint()
+    });
+  }
+}
+
+function renderSettings() {
+  const pathEl = document.getElementById("settings-config-path");
+  if (pathEl) pathEl.textContent = state.configPath || "-";
+  renderSettingsGrokStatus(state.diagnostics?.clients?.grok || null);
+}
+
+document.getElementById("btn-settings-grok-apply")?.addEventListener("click", async () => {
+  try {
+    await profileApply("grok");
+    await refreshSettingsGrokStatus({ force: true });
+  } catch (err) {
+    toast(`写入失败：${err?.message || err}`);
+  }
+});
+
+document.getElementById("btn-settings-grok-goto-clients")?.addEventListener("click", () => {
+  setActiveTab("clients");
+  requestAnimationFrame(() => {
+    const card = document.querySelector('#clients-grid .card[data-client-id="grok"]');
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("pulse-highlight");
+      setTimeout(() => card.classList.remove("pulse-highlight"), 1600);
+    }
+  });
+});
+
+document.getElementById("btn-settings-grok-diagnostics")?.addEventListener("click", async () => {
+  setActiveTab("diagnostics");
+  try {
+    await refreshDiagnostics();
+  } catch {}
+});
 
 function resetProviderDiscovery() {
   state.providerDiscovery = [];
@@ -3526,6 +3622,7 @@ function agentLabel(clientId) {
     "claude-code": "Claude Code",
     hermes: "Hermes",
     opencode: "OpenCode",
+    grok: "Grok Build",
     "generic-openai": "通用 OpenAI",
     "model-test": "模型测试"
   };
@@ -4476,6 +4573,7 @@ function logEntryAgent(entry) {
   if (text.includes("codex")) return "codex";
   if (text.includes("hermes")) return "hermes";
   if (text.includes("opencode") || text.includes("open code")) return "opencode";
+  if (text.includes("grok") || text.includes("xai")) return "grok";
   if (text.includes("model-test")) return "model-test";
   if (text.includes("generic-openai") || text.includes("openai")) return "generic-openai";
   return "";

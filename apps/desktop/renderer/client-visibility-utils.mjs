@@ -3,6 +3,7 @@ export const CLIENT_SCOPE_OPTIONS = [
   ["claude-code", "Claude Code"],
   ["hermes", "Hermes"],
   ["opencode", "OpenCode"],
+  ["grok", "Grok Build"],
   ["generic-openai", "通用 OpenAI"]
 ];
 
