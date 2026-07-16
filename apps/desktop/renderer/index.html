@@ -537,32 +537,6 @@
             </dl>
           </div>
         </div>
-        <div class="card" id="settings-grok-card">
-          <div class="hd">
-            <h3>Grok Build 三方模型</h3>
-            <span id="settings-grok-status-chip"></span>
-          </div>
-          <div class="bd">
-            <p class="client-help" style="margin-top:0;">
-              经 Switchyard 在 Grok Build 里使用任意供应商模型（KE / DeepSeek / 中转等）。
-              与侧栏「Grok / xAI 账号池」不同：账号池管官方多号，这里管 <span class="mono">sy-*</span> 托管模型。
-            </p>
-            <dl class="kv">
-              <dt>托管状态</dt><dd id="settings-grok-status-label">检测中…</dd>
-              <dt>网关入口</dt><dd class="mono" id="settings-grok-endpoint">-</dd>
-              <dt>配置文件</dt><dd class="mono" id="settings-grok-path">~/.grok/config.toml</dd>
-            </dl>
-            <div class="callout compact" id="settings-grok-hint">
-              首次「一键写入」后会在 config.toml 插入 switchyard-managed-models 托管块；之后增/改/启模型会自动刷新。
-              在 Grok 里用 /model 或 Ctrl+M 切换到 sy-… 短 id。
-            </div>
-            <div class="actions" style="margin-top:12px;">
-              <button class="btn primary" type="button" id="btn-settings-grok-apply">一键写入 Grok 配置</button>
-              <button class="btn" type="button" id="btn-settings-grok-goto-clients">打开客户端页</button>
-              <button class="btn" type="button" id="btn-settings-grok-diagnostics">打开诊断</button>
-            </div>
-          </div>
-        </div>
         <div class="card">
           <div class="hd">
             <h3>Agent 核心文件</h3>

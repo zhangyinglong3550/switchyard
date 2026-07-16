@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.8 — 2026-07-16
+
+### Fix
+
+- **Grok 自定义模型 404 / 走官方代理**：`config.toml` 里含点号的模型 id（如 `GLM-5.2`）若写成裸表头 `[model.sy-ke--GLM-5.2]`，TOML 会解析成嵌套表，Grok 只看到截断名 `sy-ke--GLM-5` 且丢失 `base_url`，请求落到 `cli-chat-proxy.grok.com` 报 404。现改为始终写 `[model."sy-…"]` 引号表头；在客户端页重新「一键写入」后重启 Grok 即可。
+
+### UX
+
+- **偏好设置**：去掉 Grok Build 冗余状态卡（写入/诊断仍在「客户端」「诊断」页）。
+
 ## 2.2.7 — 2026-07-16
 
 ### Fix
@@ -24,11 +34,10 @@
   - 核心文件：可编辑 `opencode.json` / `AGENTS.md`。
 - **Grok Build 客户端**（三方模型）：
   - 网关入口 `/grok/v1`（OpenAI Chat Completions）。
-  - 一键写入 `~/.grok/config.toml` 托管块：`[model.sy-*]`（`model`=Switchyard 模型 id，`base_url` 指向网关，`api_key=switchyard-local`）。
+  - 一键写入 `~/.grok/config.toml` 托管块：`[model."sy-*"]`（`model`=Switchyard 模型 id，`base_url` 指向网关，`api_key=switchyard-local`；含点号 id 必须引号表头）。
   - 保留用户原有 `[model.*]` / `[cli]` 等配置；仅当默认已是 `sy-*` 时才改 `[models].default`。
   - 首次写入后，增/改/启模型自动刷新托管块。
   - Skills：`~/.grok/skills`；会话：`~/.grok/sessions/**/summary.json` + `updates.jsonl` 时间线；诊断可检测是否指向 Switchyard。
-  - **偏好设置**：Grok Build 托管状态卡（状态 / 入口 / 路径 + 一键写入 / 跳转客户端 / 打开诊断）。
 
 ## 2.2.5 — 2026-07-16
 

@@ -2,7 +2,7 @@
 
 **本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build 里统一选择。
 
-[![version](https://img.shields.io/badge/version-2.2.7-blue)]()
+[![version](https://img.shields.io/badge/version-2.2.8-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 

@@ -1042,12 +1042,24 @@ function grokApiBackend(model) {
   return "chat_completions";
 }
 
+/**
+ * TOML 表头：模型 id 常含 `.`（如 GLM-5.2），裸写 [model.sy-…GLM-5.2]
+ * 会被解析成嵌套表 model.sy-…GLM-5 = { "2" = {...} }，导致 Grok 丢 base_url、
+ * 回落到官方 cli-chat-proxy。必须写成 [model."sy-…GLM-5.2"]。
+ */
+export function grokModelTableHeader(alias) {
+  const name = String(alias || "").trim();
+  if (!name) return "[model.unknown]";
+  // 安全起见一律加引号（无点号也可）
+  return `[model.${tomlString(name)}]`;
+}
+
 export function renderGrokModelSection(model, { host, port } = {}) {
   const id = String(model?.id || "").trim();
   if (!id) return "";
   const alias = grokModelAlias(id);
   const lines = [
-    `[model.${alias}]`,
+    grokModelTableHeader(alias),
     `model = ${tomlString(id)}`,
     `base_url = ${tomlString(grokBaseUrl({ host, port }))}`,
     `name = ${tomlString(grokModelLabel(model))}`,
@@ -1095,19 +1107,34 @@ function stripGrokManagedBlock(text) {
   return (src.slice(0, begin) + after).replace(/\n{3,}/g, "\n\n").trimEnd() + (src.endsWith("\n") || after ? "\n" : "");
 }
 
+/** 解析 [model.xxx] / [model."xxx"] 表头里的模型名 */
+function parseGrokModelTableName(headerLine) {
+  const line = String(headerLine || "").trim();
+  const quoted = line.match(/^\[model\.(["'])((?:\\.|(?!\1).)*)\1\]$/);
+  if (quoted) return quoted[2].replace(/\\(.)/g, "$1");
+  const bare = line.match(/^\[model\.([^\]]+)\]$/);
+  if (!bare) return "";
+  // 裸表头可能是嵌套路径 sy-ke--GLM-5.2 → 取最外层仍以 sy- 开头的前缀判断
+  return bare[1];
+}
+
 function stripLooseGrokManagedSections(text) {
   const lines = String(text || "").split(/\r?\n/);
   const out = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const header = line.trim().match(/^\[model\.([^\]]+)\]$/);
-    if (!header) {
+    const name = parseGrokModelTableName(line);
+    if (!name && !/^\s*\[model\./.test(line.trim())) {
       out.push(line);
       i += 1;
       continue;
     }
-    const name = header[1];
+    if (!name) {
+      out.push(line);
+      i += 1;
+      continue;
+    }
     const body = [];
     i += 1;
     while (i < lines.length && !/^\[[^\]]+\]\s*$/.test(lines[i].trim())) {
@@ -1115,7 +1142,9 @@ function stripLooseGrokManagedSections(text) {
       i += 1;
     }
     const bodyText = body.join("\n");
+    // 兼容旧坏表头：sy-foo--GLM-5.2 被 TOML 拆成 sy-foo--GLM-5（仍以 sy- 开头）
     const managed = name.startsWith(GROK_MODEL_PREFIX)
+      || name.includes(GROK_MODEL_PREFIX)
       || bodyText.includes(MARKER)
       || /base_url\s*=\s*["'][^"']*\/grok\/v1\/?["']/.test(bodyText);
     if (managed) continue;
@@ -1199,6 +1228,7 @@ export function isGrokConfigManaged(text) {
   return src.includes(GROK_MANAGED_BEGIN)
     || src.includes(MARKER)
     || /\[model\.sy-/.test(src)
+    || /\[model\."sy-/.test(src)
     || /base_url\s*=\s*["'][^"']*\/grok\/v1\/?["']/.test(src);
 }
 

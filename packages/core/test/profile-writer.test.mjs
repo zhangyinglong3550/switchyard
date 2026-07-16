@@ -830,13 +830,26 @@ test("grok profile · writes managed model blocks and preserves user config", ()
   assert.match(text, /auto_update = true/);
   assert.match(text, /\[model\.my-custom\]/);
   assert.match(text, /switchyard-managed-models begin/);
-  assert.match(text, /\[model\.sy-coding-plan--GLM-5\.2\]/);
+  // 含点号的模型 id 必须用引号表头，否则 TOML 会嵌套拆坏
+  assert.match(text, /\[model\."sy-coding-plan--GLM-5\.2"\]/);
   assert.match(text, /model = "coding-plan\/GLM-5\.2"/);
   assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:17888\/grok\/v1"/);
   assert.match(text, /api_backend = "chat_completions"/);
   assert.match(text, /api_key = "switchyard-local"/);
   // 用户默认是官方 grok-4.5，不应被强制改掉
   assert.match(text, /default = "grok-4\.5"/);
+});
+
+test("grok profile · quoted table header parses as flat model key", () => {
+  const alias = pw.grokModelAlias("ke/GLM-5.2");
+  assert.equal(alias, "sy-ke--GLM-5.2");
+  assert.equal(pw.grokModelTableHeader(alias), '[model."sy-ke--GLM-5.2"]');
+  const section = pw.renderGrokModelSection(
+    { id: "ke/GLM-5.2", displayName: "GLM-5.2", providerName: "KE" },
+    { host: "127.0.0.1", port: 17888 }
+  );
+  assert.match(section, /\[model\."sy-ke--GLM-5\.2"\]/);
+  assert.doesNotMatch(section, /^\[model\.sy-ke--GLM-5\.2\]$/m);
 });
 
 test("grok profile · auto-refresh when managed; skip when not", () => {
@@ -865,6 +878,6 @@ test("grok profile · auto-refresh when managed; skip when not", () => {
   assert.equal(refreshed.changed, true);
   assert.equal(refreshed.modelCount, 2);
   const text = fs.readFileSync(file, "utf8");
-  assert.match(text, /\[model\.sy-b--m2\]/);
+  assert.match(text, /\[model\."sy-b--m2"\]/);
   assert.match(text, /default = "sy-a--m1"/);
 });

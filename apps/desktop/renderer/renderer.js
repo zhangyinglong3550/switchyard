@@ -433,7 +433,6 @@ function setActiveTab(tab) {
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
   if (tab === "settings") {
     renderSettings();
-    refreshSettingsGrokStatus().catch(() => {});
   }
 }
 
@@ -1266,8 +1265,6 @@ async function refreshDiagnostics() {
   const result = await invoke("diagnostics:run");
   state.diagnostics = result;
   renderDiagnostics();
-  // 偏好设置里的 Grok 托管状态与诊断同源
-  try { renderSettingsGrokStatus(result?.clients?.grok || null); } catch {}
   if (canWriteOutput) {
     output.textContent = "诊断完成。选择模型后点击“运行探针”，结果会在这里展开显示。";
   }
@@ -1796,96 +1793,10 @@ async function restoreSelectedProfileBackup() {
   }
 }
 
-function settingsGrokEndpoint() {
-  const host = state.status?.host || state.config?.host || "127.0.0.1";
-  const port = state.status?.port || state.config?.port || 17888;
-  return `http://${host}:${port}/grok/v1`;
-}
-
-function settingsGrokConfigPath() {
-  // diagnostics:run 把 doctorClientConfigs 整包放在 clients 下，paths 与各客户端状态同级
-  return state.diagnostics?.clients?.paths?.grok || "~/.grok/config.toml";
-}
-
-function renderSettingsGrokStatus(row = null) {
-  const chipEl = document.getElementById("settings-grok-status-chip");
-  const labelEl = document.getElementById("settings-grok-status-label");
-  const endpointEl = document.getElementById("settings-grok-endpoint");
-  const pathEl = document.getElementById("settings-grok-path");
-  const hintEl = document.getElementById("settings-grok-hint");
-  if (endpointEl) endpointEl.textContent = row?.expected || settingsGrokEndpoint();
-  if (pathEl) pathEl.textContent = settingsGrokConfigPath();
-  if (!row) {
-    if (chipEl) chipEl.innerHTML = '<span class="chip">未检测</span>';
-    if (labelEl) labelEl.textContent = "打开本页后会自动检测是否已托管";
-    return;
-  }
-  if (chipEl) chipEl.innerHTML = statusChip(row.status);
-  if (labelEl) labelEl.textContent = row.label || "-";
-  if (hintEl) {
-    if (row.status === "ok") {
-      hintEl.textContent = "已托管：模型列表会随 Switchyard 增/改/启自动刷新。在 Grok 用 /model 或 Ctrl+M 选 sy-… 即可。";
-    } else if (row.status === "missing") {
-      hintEl.textContent = "尚未找到 ~/.grok/config.toml。点「一键写入 Grok 配置」创建托管块，或先安装并启动 Grok Build。";
-    } else if (row.status === "drifted") {
-      hintEl.textContent = "配置存在但未指向 Switchyard。点「一键写入」会合并托管块，保留你原有的 [model.*] / [cli] 等。";
-    } else if (row.status === "unreadable") {
-      hintEl.textContent = "配置文件无法读取，请检查权限或路径。";
-    }
-  }
-}
-
-async function refreshSettingsGrokStatus({ force = false } = {}) {
-  try {
-    if (force || !state.diagnostics?.clients?.grok) {
-      const result = await invoke("diagnostics:run");
-      state.diagnostics = result;
-      // 同步诊断页 UI（若已打开）
-      try { renderDiagnostics(); } catch {}
-    }
-    renderSettingsGrokStatus(state.diagnostics?.clients?.grok || null);
-  } catch (err) {
-    renderSettingsGrokStatus({
-      status: "unreadable",
-      label: err?.message || "检测失败",
-      expected: settingsGrokEndpoint()
-    });
-  }
-}
-
 function renderSettings() {
   const pathEl = document.getElementById("settings-config-path");
   if (pathEl) pathEl.textContent = state.configPath || "-";
-  renderSettingsGrokStatus(state.diagnostics?.clients?.grok || null);
 }
-
-document.getElementById("btn-settings-grok-apply")?.addEventListener("click", async () => {
-  try {
-    await profileApply("grok");
-    await refreshSettingsGrokStatus({ force: true });
-  } catch (err) {
-    toast(`写入失败：${err?.message || err}`);
-  }
-});
-
-document.getElementById("btn-settings-grok-goto-clients")?.addEventListener("click", () => {
-  setActiveTab("clients");
-  requestAnimationFrame(() => {
-    const card = document.querySelector('#clients-grid .card[data-client-id="grok"]');
-    if (card) {
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      card.classList.add("pulse-highlight");
-      setTimeout(() => card.classList.remove("pulse-highlight"), 1600);
-    }
-  });
-});
-
-document.getElementById("btn-settings-grok-diagnostics")?.addEventListener("click", async () => {
-  setActiveTab("diagnostics");
-  try {
-    await refreshDiagnostics();
-  } catch {}
-});
 
 function resetProviderDiscovery() {
   state.providerDiscovery = [];
