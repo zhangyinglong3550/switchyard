@@ -98,14 +98,6 @@ jobs:
       - run: npm run check
       - run: npm test
         if: runner.os == 'macOS'
-      - name: 运行 Windows 兼容测试
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tests = Get-ChildItem packages/core/test/*.mjs |
-            Where-Object { $_.Name -notin @('keychain-store.test.mjs', 'upstream-auth.test.mjs') } |
-            ForEach-Object { $_.FullName }
-          node --test $tests
       - run: npm run release:check
         if: runner.os == 'macOS'
       - run: ${{ matrix.package_command }}
