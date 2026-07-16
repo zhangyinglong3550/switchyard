@@ -7,6 +7,6 @@
     "start": "electron src/main.mjs"
   },
   "dependencies": {
-    "@switchyard/core": "0.2.0"
+    "@switchyard/core": "0.2.1"
   }
 }

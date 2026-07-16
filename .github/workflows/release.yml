@@ -1,0 +1,133 @@
+name: Build and release desktop app
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 要重新构建并发布的正式版本 Tag（例如 v2.2.10）
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.release_tag || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  validate-release:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.version.outputs.source_ref }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+
+      - id: version
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "只允许正式版本 Tag：vX.Y.Z；实际为 ${TAG_NAME}" >&2
+            exit 1
+          fi
+
+          package_version="$(node --input-type=module -e 'import pkg from "./package.json" with { type: "json" }; console.log(pkg.version)')"
+          tag_version="${TAG_NAME#v}"
+          if [[ "${tag_version}" != "${package_version}" ]]; then
+            echo "Tag 版本 ${tag_version} 与 package.json 版本 ${package_version} 不一致" >&2
+            exit 1
+          fi
+
+          echo "source_ref=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: validate-release
+    if: always() && (github.ref_type == 'branch' || needs.validate-release.result == 'success')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: switchyard-macos
+            package_command: npm run desktop:dmg
+            artifact_path: dist/*.dmg
+          - os: windows-latest
+            artifact_name: switchyard-windows
+            package_command: npm run desktop:win
+            artifact_path: |
+              dist/*.exe
+              dist/*.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.source_ref || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run release:check
+      - run: ${{ matrix.package_command }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: always() && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && needs.validate-release.result == 'success' && needs.build.result == 'success'
+    needs:
+      - validate-release
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 确认四类发布安装包齐全
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          macos_packages=(release-assets/*.dmg)
+          windows_installers=(release-assets/*.exe)
+          windows_archives=(release-assets/*.zip)
+
+          [[ ${#macos_packages[@]} -eq 2 ]] || { echo "期望 2 个 macOS DMG，实际为 ${#macos_packages[@]}" >&2; exit 1; }
+          [[ ${#windows_installers[@]} -eq 1 ]] || { echo "期望 1 个 Windows NSIS EXE，实际为 ${#windows_installers[@]}" >&2; exit 1; }
+          [[ ${#windows_archives[@]} -eq 1 ]] || { echo "期望 1 个 Windows ZIP，实际为 ${#windows_archives[@]}" >&2; exit 1; }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-release.outputs.tag }}
+          name: Switchyard ${{ needs.validate-release.outputs.version }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            release-assets/*.dmg
+            release-assets/*.exe
+            release-assets/*.zip
