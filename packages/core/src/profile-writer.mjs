@@ -867,6 +867,11 @@ function openCodeModelLabel(model) {
   return name || String(model?.id || "model");
 }
 
+/** OpenCode 校验要求 limit 同时有 context + output；缺省时用保守默认 */
+const OPENCODE_DEFAULT_CONTEXT = 128000;
+const OPENCODE_DEFAULT_OUTPUT = 8192;
+const OPENCODE_MAX_DEFAULT_OUTPUT = 128000;
+
 function openCodeContextLimit(model) {
   const n = Number(model?.contextWindow || model?.context_window || model?.maxContext || 0);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
@@ -877,6 +882,19 @@ function openCodeOutputLimit(model) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
+/**
+ * 从 context 推算默认 output（约 1/4，夹在 [DEFAULT, MAX]）。
+ * OpenCode schema：只要有 limit 就必须同时有 context 与 output。
+ */
+function openCodeDefaultOutputFromContext(context) {
+  const ctx = Number(context) || OPENCODE_DEFAULT_CONTEXT;
+  const derived = Math.floor(ctx / 4);
+  return Math.min(
+    OPENCODE_MAX_DEFAULT_OUTPUT,
+    Math.max(OPENCODE_DEFAULT_OUTPUT, derived || OPENCODE_DEFAULT_OUTPUT)
+  );
+}
+
 /** 生成 OpenCode provider.switchyard.models map（key 为 Switchyard 模型 id，可含 /） */
 export function buildOpenCodeModelsMap(models = []) {
   const out = {};
@@ -884,13 +902,10 @@ export function buildOpenCodeModelsMap(models = []) {
     const id = String(model?.id || "").trim();
     if (!id) continue;
     const entry = { name: openCodeModelLabel(model) };
-    const context = openCodeContextLimit(model);
-    const output = openCodeOutputLimit(model);
-    if (context || output) {
-      entry.limit = {};
-      if (context) entry.limit.context = context;
-      if (output) entry.limit.output = output;
-    }
+    const context = openCodeContextLimit(model) || OPENCODE_DEFAULT_CONTEXT;
+    const output = openCodeOutputLimit(model) || openCodeDefaultOutputFromContext(context);
+    // OpenCode 要求 limit.context + limit.output 成对出现，缺一即配置无效
+    entry.limit = { context, output };
     out[id] = entry;
   }
   return out;

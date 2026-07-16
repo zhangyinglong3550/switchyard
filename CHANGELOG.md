@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.10 — 2026-07-16
+
+### Fix
+
+- **OpenCode 配置无效 `Missing key …limit.output`**：写入 `provider.switchyard.models` 时，若模型未配置 `maxOutputTokens` 只会写 `limit.context` 或完全不写 limit。OpenCode 要求 `limit.context` 与 `limit.output` 成对。现始终补齐二者（有 maxOutput 用配置值，否则按 context 的约 1/4 推算，默认 context=128k / output 夹在 8k–128k）。
+
 ## 2.2.9 — 2026-07-16
 
 ### Fix

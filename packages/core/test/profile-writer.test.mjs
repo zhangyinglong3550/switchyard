@@ -732,9 +732,26 @@ test("opencode profile · merges provider.switchyard and preserves other provide
   assert.equal(cfg.provider.switchyard["managed-by-switchyard"], true);
   assert.equal(cfg.provider.switchyard.models["coding-plan/GLM-5.2"].name, "GLM-5.2");
   assert.equal(cfg.provider.switchyard.models["coding-plan/GLM-5.2"].limit.context, 1000000);
+  assert.equal(cfg.provider.switchyard.models["coding-plan/GLM-5.2"].limit.output, 8192);
   assert.equal(cfg.provider.switchyard.models["grok-pool/grok-4.5"].name, "Grok 4.5");
+  // 无 context/output 时也要写全 limit，避免 OpenCode Missing key limit.output
+  assert.equal(cfg.provider.switchyard.models["grok-pool/grok-4.5"].limit.context, 128000);
+  assert.equal(cfg.provider.switchyard.models["grok-pool/grok-4.5"].limit.output, 32000);
   // 用户默认仍是 anthropic 时不要强行改掉
   assert.equal(cfg.model, "anthropic/claude-sonnet-4-5");
+});
+
+test("opencode profile · always writes limit.context + limit.output", () => {
+  const map = pw.buildOpenCodeModelsMap([
+    { id: "a/only-ctx", displayName: "A", contextWindow: 1000000 },
+    { id: "b/only-out", displayName: "B", maxOutputTokens: 4096 },
+    { id: "c/none", displayName: "C" },
+    { id: "d/both", displayName: "D", contextWindow: 200000, maxOutputTokens: 16000 }
+  ]);
+  assert.deepEqual(map["a/only-ctx"].limit, { context: 1000000, output: 128000 });
+  assert.deepEqual(map["b/only-out"].limit, { context: 128000, output: 4096 });
+  assert.deepEqual(map["c/none"].limit, { context: 128000, output: 32000 });
+  assert.deepEqual(map["d/both"].limit, { context: 200000, output: 16000 });
 });
 
 test("opencode profile · auto-refresh models when already managed", () => {
