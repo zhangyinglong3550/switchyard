@@ -1,7 +1,6 @@
 # Switchyard
 
-> 打破 AI 代理的模型孤岛。一份配置，所有模型，所有代理，无缝协作。  
-> **2.2**：网关 **可恢复失败自动重试**（默认 3 次，0/429/5xx）· **2.1** 自动更新 / Anthropic OAuth / 账号池 · Claude Paper Light UI。
+**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes 里统一选择。
 
 [![version](https://img.shields.io/badge/version-2.2.5-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
@@ -9,175 +8,182 @@
 
 ---
 
-## 你遇到了这些问题吗？
+## 简化版 · 详细版
 
-- 在 **Codex** 里只能用官方模型，DeepSeek / Kimi / GLM 的性价比用不上
-- 换成 **Claude Code**，又要重新配置一遍 Key，两边模型列表永不统一
-- 有一批 **Grok / ChatGPT 订阅号**，却要靠 Sub2API / CLIProxyAPI 另起进程
-- 多号时不知道谁还有额度、谁挂了，只能盲猜或一条条 curl
-- 想看某个代理发了什么 prompt、为什么失败——日志散落各处
+侧栏默认是 **简化版**——只保留四个入口，避免一上来功能过载：
 
-**Switchyard 一次性解决。** 本机桌面应用：左边配模型与账号池，右边 Codex / Claude Code / Hermes 自动生效。
+| 总览 | 供应商 | 模型 | 客户端 |
+|------|--------|------|--------|
 
----
+**日常路径**：加供应商 → 填 API Key → 同步客户端 → 在 Agent 里选模型。
 
-![Switchyard 总览](docs/assets/screenshots/01-overview.png)
+需要诊断、用量、会话、Skills、调用可视化时，打开侧栏 **详细** 开关即可。  
+进阶能力都在，但不会挡住只想接模型的人。
 
-## 演示视频
+![总览（简化路径下的本机控制台）](docs/assets/screenshots/01-overview.png)
 
-- [下载/观看产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
+![供应商模板（多厂商一键接入）](docs/assets/screenshots/04-providers.png)
 
-> 若 GitHub 无法内嵌预览，请下载后本地观看。
+![模型列表（多供应商打平）](docs/assets/screenshots/05-models.png)
 
 ---
 
-## 2.0 核心：账号池（多账号 OAuth）
+## 核心能力
 
-**不用 Sub2API，也能在本机跑多 Codex / 多 Grok 号。**
+### 1. 多供应商打平：在 Claude Code / Codex 里选「全部模型」
 
-凭证只在 `~/.switchyard/pools/`，**不写进 config.json / 不进 Git**。  
-请求路径：选号 → 刷新 token → 上游调用 → 失败自动换号。
+相对 **CC Switch** 一类「主要帮 Claude Code 切渠道 / 换 Key」的工具，Switchyard 的重心是 **把多家供应商收成一张模型表**，再挂到各个 Agent 上。
 
-### Codex 订阅池
+| | CC Switch 类 | Switchyard |
+|--|--------------|------------|
+| 主场景 | Claude Code 配置 / 渠道切换 | **本机网关 + 多客户端统一模型目录** |
+| 供应商 | 往往围绕 Claude 链路 | OpenAI / Anthropic / 中转 / 公司网关 / 账号池… **可并行多条** |
+| 在 Agent 里 | 多为「当前启用的那一家」 | 在 **Claude Code、Codex、Hermes** 的模型列表里 **一起出现**，按需切换 |
 
-- 直连官方 Responses
-- **多选 JSON / 文件夹** 批量导入（CPA `type:codex` 等）
-- 无 `refresh_token` 时可用 `session_token` 续 access
-- **单号额度**：5 小时窗口 + 周窗口剩余百分比
+**你在面板里接入的所有模型，会打平成客户端可选列表**——不必为每个 Agent、每个供应商各配一套；DeepSeek、Kimi、GLM、公司 OpenAI 兼容网关、官方 Claude/GPT 等，都可以在同一套 Codex / Claude Code 里选。
+
+![新增供应商：内置多厂商模板](docs/assets/screenshots/04-providers.png)
+
+![模型列表（多供应商打平后）](docs/assets/screenshots/05-models.png)
+
+---
+
+### 2. 网关自动重试（Agent 无感知）
+
+上游偶发失败时，Switchyard 在网关内有限重试（默认最多 3 次：网络失败 / 429 / 5xx），**成功后再回给 Agent**。
+
+像 **讯飞** 等不稳定中转，中间失败不会立刻砸到 Codex / Claude Code——客户端仍像完成了一次正常调用。
+
+| 规则 | 说明 |
+|------|------|
+| 会重试 | `0`（网络）、`429`、`5xx` |
+| 不重试 | `400` / `401` / `403` 等明确错误 |
+| 流式 | 仅在尚未向客户端写出内容前重试 |
+| 可配 | 供应商 / 模型可关、可改最大次数 |
+
+---
+
+### 3. 非视觉模型的图片识别兜底
+
+目标模型不看图时，可配置 **视觉兜底模型**：
+
+```
+贴图 → 视觉模型描述图片 → 注入 prompt → 非视觉模型继续推理
+```
+
+DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主模型。
+
+![视觉兜底](docs/assets/screenshots/10-vision-fallback.png)
+
+---
+
+### 4. Codex 账号池（内置 CLI2API 能力）
+
+本机 **多 Codex / ChatGPT 订阅号** 轮询，**不必再单独跑 CLI2API / Sub2API 进程**。
+
+- 直连官方 Responses  
+- 批量导入账号 JSON / 文件夹  
+- 失败自动换号  
+- 单号额度：5 小时窗口 + 周窗口剩余  
+- 凭证只在本机 `~/.switchyard/pools/`，不进 Git  
 
 ![Codex 账号池](docs/assets/screenshots/02-codex-account-pool.png)
 
-### Grok / xAI 账号池
+---
 
-- 直连 `api.x.ai`（不经过 8317）
-- 粘贴 SSO/RT、CPA `xai-*.json`、多选文件
-- 加权轮询 / 最久未用 / 最低错误率
-- Access 自动续期（有 Refresh 时）
+### 5. Grok 账号池（内置 CLI2API 能力）
+
+本机 **多 Grok / xAI 订阅号** 同样内置池化，**等价于内置了一套 CLI2API 式多号转发**。
+
+- 直连 `api.x.ai`  
+- 支持 SSO / refresh、CPA `xai-*.json` 导入  
+- 加权轮询 / 最久未用 / 低错误率等策略  
+- Access 自动续期（有 refresh 时）  
 
 ![Grok 账号池](docs/assets/screenshots/03-grok-account-pool.png)
 
-| 池 | 上游 | 导入 | 额度 |
-|----|------|------|------|
-| **Codex** | chatgpt.com Codex | 多选 json / 文件夹 / 粘贴 / auth.json | **5h + 周剩余** |
-| **Grok** | api.x.ai | SSO/RT / CPA json | 官方无稳定公开剩余额度 API |
-
-详细设计：**[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md)** · **[CHANGELOG](CHANGELOG.md)**
+> **Codex 池 + Grok 池** ≈ 本机内置 CLI2API 类能力：多号、换号、续 token，统一在 Switchyard 里管，少开中间件。
 
 ---
 
-## 统一供应商与模型矩阵
+## 为什么用 Switchyard
 
-**一个地方配置，所有代理可用。**
+| 你要什么 | Switchyard 怎么给 |
+|----------|-------------------|
+| 多家供应商进同一个 Agent | **打平模型目录**，Claude Code / Codex 里一起选 |
+| 中转经常抖（如讯飞） | 网关重试，Agent 尽量无感 |
+| 便宜模型也要能看图 | 视觉兜底链路 |
+| 多 Codex / 多 Grok 号 | 内置账号池，少依赖 CLI2API |
 
-![供应商列表](docs/assets/screenshots/04-providers.png)
-
-![模型矩阵](docs/assets/screenshots/05-models.png)
-
-| 供应商 | 协议 | 说明 |
-|--------|------|------|
-| **Grok 账号池** | Chat + OAuth 池 | 多号轮询 |
-| **Codex 订阅池** | Responses + OAuth 池 | 多号 + 额度 |
-| OpenAI Codex（单号） | Responses OAuth | 官方 login |
-| DeepSeek / Kimi / GLM / MiniMax | Chat | 兼容补丁 |
-| Anthropic | Messages | 原生 |
-| OpenRouter / 硅基 / 火山等 | Chat | 通用适配 |
-
-配置完成后，**Codex、Claude Code、Hermes** 以及任意 OpenAI/Anthropic 兼容工具同时可见。
+**不是又一个公网转发站**，而是给 AI 编程 Agent 用的 **本机模型控制台**。
 
 ---
 
-## 诊断 · 会话 · 调用可视化
+## 30 秒上手（简化版）
 
-### 诊断中心
+1. 从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 安装并打开  
+2. **供应商** → 选模板或自定义 → 填 API Key  
+3. **模型** → 启用要用的模型  
+4. **客户端** → 同步 Codex / Claude Code / Hermes  
+5. 在 Agent 里直接选模型  
 
-全量供应商 / 模型可用性检测，错误分类与修复建议。
+macOS 若提示「已损坏」：
 
-![诊断中心](docs/assets/screenshots/06-diagnostics.png)
-
-### 会话历史
-
-跨 Codex / Claude Code / Hermes 统一浏览与格式化展示。
-
-![会话](docs/assets/screenshots/07-sessions.png)
-
-### 调用可视化
-
-实时请求状态、延迟、Token；可看到 **账号池选中了哪个号**、是否触发换号。
-
-![调用可视化](docs/assets/screenshots/08-traces.png)
+```bash
+xattr -cr /Applications/Switchyard.app
+```
 
 ---
 
-## Skills · 视觉 Fallback · 接入模式
+## 进阶能力（详细版）
 
-### Skills / Skill Hub
+侧栏打开 **详细** 后使用：
 
-统一管理 Codex 与 Claude Code Skills，支持 Skill Hub 搜索安装。
-
-![Skills](docs/assets/screenshots/09-skills.png)
-
-### 非视觉模型识图
-
-贴图 → 视觉模型描述 → 注入 prompt → 目标模型（如 DeepSeek）。
-
-![视觉 Fallback](docs/assets/screenshots/10-vision-fallback.png)
-
-### 架构一览
-
-![架构](docs/assets/screenshots/11-architecture.png)
-
-### Codex 官方直连 vs 网关
-
-| 方式 | 原理 | 风险 |
+| 能力 | 说明 | 示意 |
 |------|------|------|
-| **官方直连**（推荐） | Codex 直连 OpenAI，Switchyard 仅写元数据 | 低 |
-| **网关 / 账号池** | 经 Switchyard 转发，可多号轮询 | 可能被识别为代理，仅建议自有账号 |
+| 诊断中心 | 供应商 / 模型可用性与修复建议 | ![诊断](docs/assets/screenshots/06-diagnostics.png) |
+| 会话 | 跨 Agent 会话浏览 | ![会话](docs/assets/screenshots/07-sessions.png) |
+| 调用可视化 / 链路追踪 | 请求状态、延迟、重试与换号过程 | ![调用可视化](docs/assets/screenshots/08-traces.png) |
+| Skills | Skills 管理与安装 | ![Skills](docs/assets/screenshots/09-skills.png) |
+| 官方直连 vs 网关 | Codex 可仅写元数据、不转发 | ![接入模式](docs/assets/screenshots/12-official-direct.png) |
 
-![接入模式](docs/assets/screenshots/12-official-direct.png)
+更多设计：[账号池文档](docs/ACCOUNT-POOL-MVP.zh-CN.md) · [CHANGELOG](CHANGELOG.md)
 
 ---
 
 ## 架构
 
+![架构](docs/assets/screenshots/11-architecture.png)
+
 ```
-客户端 (Codex / Claude Code / Hermes / …)
-        │
-        ▼
- Switchyard Desktop + Gateway :17888
+Codex / Claude Code / Hermes / 兼容客户端
+              │
+              ▼
+     Switchyard Gateway（本机）
    · 协议适配 Chat ↔ Responses ↔ Messages
-   · 兼容补丁 / 视觉 Fallback
-   · 账号池：选号 → 刷新 → 失败换号
-        │
-        ├─► api.x.ai          (Grok 池)
-        ├─► chatgpt.com/codex (Codex 池)
-        └─► 三方 API Key 供应商
+   · 失败自动重试 · 视觉兜底
+   · Codex / Grok 账号池（选号 → 刷新 → 换号）
+              │
+    ┌─────────┼─────────┐
+    ▼         ▼         ▼
+ api.x.ai   Codex 官方   三方 / 公司 OpenAI 兼容 API
+ (Grok 池)  (Codex 池)   (Key / 中转)
 ```
 
 ---
 
-## 快速开始
-
-### 下载安装
-
-从 [Releases v2.2.5](https://github.com/zhangyinglong3550/switchyard/releases/tag/v2.2.5) 下载：
+## 下载
 
 | 平台 | 文件 |
 |------|------|
-| macOS (Apple Silicon) | `Switchyard-2.2.5-arm64.dmg` |
-| macOS (Intel / x64) | `Switchyard-2.2.5.dmg` |
-| Windows (x64) | `Switchyard Setup 2.2.5.exe` 或 `Switchyard-2.2.5-win.zip` |
+| macOS Apple Silicon | `Switchyard-*-arm64.dmg` |
+| macOS Intel | `Switchyard-*.dmg` |
+| Windows x64 | `Switchyard Setup *.exe` 或 `*-win.zip` |
 
-> 已安装 2.0+ 桌面版时，顶栏会提示更新；点击后可下载安装并重新打开。
+从 [GitHub Releases](https://github.com/zhangyinglong3550/switchyard/releases) 获取最新包。  
+已装 2.0+ 时，应用内可检测更新并安装重开。
 
-> ### ⚠️ macOS 用户必读
->
-> 无官方签名时可能提示「已损坏」。安装后执行：
->
-> ```bash
-> xattr -cr /Applications/Switchyard.app
-> ```
-
-### 从源码
+### 从源码运行
 
 ```bash
 git clone https://github.com/zhangyinglong3550/switchyard.git
@@ -186,22 +192,11 @@ npm install
 npm run desktop
 ```
 
-### 环境变量（示例）
-
-```bash
-export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
-export SWITCHYARD_KIMI_API_KEY="..."
-# 各供应商在 UI 中会显示对应变量名
-```
-
-> Antigravity 实验池如需 Google OAuth 刷新，请配置  
-> `SWITCHYARD_ANTIGRAVITY_CLIENT_ID` / `SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET`（仓库不硬编码）。
-
 ---
 
-## 截图说明
+## 演示
 
-本 README 配图为 **2.0 Claude Paper Light** 界面示意（产品 UI 高保真 mock，与当前主题一致），用于展示核心能力与账号池工作流。旧版 1.x 截图已备份至 `docs/assets/screenshots/_backup-1x/`。
+- [产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
 
 ---
 
