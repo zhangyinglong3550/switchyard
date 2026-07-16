@@ -72,10 +72,10 @@ jobs:
             artifact_name: switchyard-macos-arm64
             package_command: npm run desktop:dmg -- --arm64 --publish never
             artifact_path: dist/*-arm64.dmg
-          - os: macos-13
+          - os: macos-15-intel
             artifact_name: switchyard-macos-x64
             package_command: npm run desktop:dmg -- --x64 --publish never
-            artifact_path: dist/*-x64.dmg
+            artifact_path: dist/*.dmg
           - os: windows-latest
             artifact_name: switchyard-windows
             package_command: npm run desktop:win -- --publish never
