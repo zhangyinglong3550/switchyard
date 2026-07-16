@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.7 — 2026-07-16
+
+### Fix
+
+- **应用内更新下载损坏**：macOS 自动更新偶发 `hdiutil: 映像数据已损坏`。
+  - 优先用系统 `curl` 下载安装包，失败再回退 undici。
+  - 下载后校验体积；DMG 再跑 `hdiutil verify`，失败自动重试一次。
+  - 仍失败时打开浏览器下载链接，避免半截安装。
+  - 进度用 Transform 统计，避免 `data` 监听 + pipeline 竞态。
+
 ## 2.2.6 — 2026-07-16
 
 ### Features

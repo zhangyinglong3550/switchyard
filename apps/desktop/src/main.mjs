@@ -3,11 +3,12 @@ import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } f
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, createReadStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 
 const execFileAsync = promisify(execFile);
@@ -346,46 +347,194 @@ function startUpdateChecker() {
   updateCheckTimer.unref?.();
 }
 
-async function downloadUpdateAsset(asset, onProgress) {
+function updateDownloadDir() {
+  const destDir = path.join(app.getPath("temp"), "switchyard-updates");
+  fs.mkdirSync(destDir, { recursive: true });
+  return destDir;
+}
+
+function safeAssetBasename(name) {
+  const base = path.basename(String(name || "update.bin"));
+  // 防止路径穿越；只保留常见安装包字符
+  return base.replace(/[^\w.\-()+ ]+/g, "_") || "update.bin";
+}
+
+async function hashFileSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+/** 下载完成后校验体积；DMG 再跑 hdiutil verify，避免「映像数据已损坏」半路安装 */
+async function verifyDownloadedUpdate(filePath, { expectedSize = 0, name = "" } = {}) {
+  const st = fs.statSync(filePath);
+  if (!st.size) throw new Error("下载文件为空");
+  if (expectedSize > 0 && st.size !== expectedSize) {
+    throw new Error(`下载不完整：期望 ${expectedSize} 字节，实际 ${st.size} 字节`);
+  }
+  // 至少 1MB，防止拿到 HTML 错误页却写成 .dmg
+  if (st.size < 1024 * 1024) {
+    const head = fs.readFileSync(filePath, { encoding: "utf8", flag: "r" }).slice(0, 200);
+    if (/<!DOCTYPE|<html|Not Found|rate limit/i.test(head)) {
+      throw new Error("下载到的不是安装包（可能是网页错误页）");
+    }
+  }
+  const lower = String(name || filePath).toLowerCase();
+  if (process.platform === "darwin" && lower.endsWith(".dmg")) {
+    // UDIF 魔数：koly 在文件尾；开头常见 bzip2/zlib/raw UDIF
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const head = Buffer.alloc(8);
+      fs.readSync(fd, head, 0, 8, 0);
+      const headOk = head[0] === 0x42 && head[1] === 0x5a // BZ
+        || head[0] === 0x78 // zlib
+        || head.toString("ascii", 0, 4) === "koly";
+      if (!headOk) {
+        // 仍允许继续 verify；仅作提示性检查
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      await execFileAsync("hdiutil", ["verify", filePath], {
+        timeout: 180000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+    } catch (err) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || err).slice(0, 300);
+      throw new Error(`安装包校验失败（映像可能已损坏），请重试下载。${detail ? ` ${detail}` : ""}`);
+    }
+  }
+  return { size: st.size, sha256: await hashFileSha256(filePath) };
+}
+
+function createProgressTransform(onProgress, total) {
+  let received = 0;
+  let lastEmit = 0;
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      received += chunk.length;
+      const now = Date.now();
+      if (typeof onProgress === "function" && (now - lastEmit > 200 || (total > 0 && received >= total))) {
+        lastEmit = now;
+        onProgress({
+          phase: "downloading",
+          received,
+          total,
+          percent: total > 0 ? Math.min(99, Math.round((received / total) * 100)) : 0
+        });
+      }
+      cb(null, chunk);
+    },
+    flush(cb) {
+      this.received = received;
+      cb();
+    }
+  });
+}
+
+async function downloadWithUndici(url, dest, { expectedSize = 0, onProgress } = {}) {
   const { fetch } = await import("undici");
-  const res = await fetch(asset.url, {
-    headers: { "User-Agent": "Switchyard-Desktop", Accept: "application/octet-stream" },
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Switchyard-Desktop",
+      Accept: "application/octet-stream",
+      // 避免中间层错误协商压缩导致体积对但内容坏
+      "Accept-Encoding": "identity"
+    },
     signal: AbortSignal.timeout(30 * 60 * 1000),
     redirect: "follow"
   });
   if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
-  const total = Number(res.headers.get("content-length")) || asset.size || 0;
-  const destDir = path.join(app.getPath("temp"), "switchyard-updates");
-  fs.mkdirSync(destDir, { recursive: true });
-  const dest = path.join(destDir, path.basename(asset.name));
+  const total = Number(res.headers.get("content-length")) || expectedSize || 0;
+  const body = res.body;
+  if (!body) throw new Error("下载响应无 body");
   if (fs.existsSync(dest)) {
     try { fs.unlinkSync(dest); } catch {}
   }
   const fileStream = createWriteStream(dest);
-  let received = 0;
-  const body = res.body;
-  if (!body) throw new Error("下载响应无 body");
-  // undici body 是 Web ReadableStream；转 Node stream 便于 pipeline
+  const progress = createProgressTransform(onProgress, total);
   const nodeStream = Readable.fromWeb(body);
-  nodeStream.on("data", (chunk) => {
-    received += chunk.length;
-    if (typeof onProgress === "function") {
-      onProgress({
-        phase: "downloading",
-        received,
-        total,
-        percent: total > 0 ? Math.min(99, Math.round((received / total) * 100)) : 0
-      });
-    }
-  });
-  await pipeline(nodeStream, fileStream);
-  if (typeof onProgress === "function") {
-    onProgress({ phase: "downloaded", received, total: total || received, percent: 100, path: dest });
+  await pipeline(nodeStream, progress, fileStream);
+  const received = progress.received || fs.statSync(dest).size;
+  if (total > 0 && received !== total) {
+    throw new Error(`下载字节数不匹配：期望 ${total}，实际 ${received}`);
   }
-  return dest;
+  return { dest, received, total };
+}
+
+/** macOS 优先用系统 curl：对大文件更稳，且失败信息清晰；失败再回退 undici */
+async function downloadWithCurl(url, dest, { expectedSize = 0, onProgress } = {}) {
+  if (fs.existsSync(dest)) {
+    try { fs.unlinkSync(dest); } catch {}
+  }
+  // -L 跟随重定向；-f 失败码当错误；--retry 网络抖动
+  await execFileAsync("curl", [
+    "-fL",
+    "--retry", "3",
+    "--retry-delay", "2",
+    "--connect-timeout", "30",
+    "--max-time", "1800",
+    "-A", "Switchyard-Desktop",
+    "-H", "Accept: application/octet-stream",
+    "-H", "Accept-Encoding: identity",
+    "-o", dest,
+    url
+  ], { timeout: 31 * 60 * 1000, maxBuffer: 2 * 1024 * 1024 });
+  const size = fs.statSync(dest).size;
+  if (expectedSize > 0 && size !== expectedSize) {
+    throw new Error(`curl 下载体积不匹配：期望 ${expectedSize}，实际 ${size}`);
+  }
+  onProgress?.({ phase: "downloading", received: size, total: expectedSize || size, percent: 99 });
+  return { dest, received: size, total: expectedSize || size };
+}
+
+async function downloadUpdateAsset(asset, onProgress) {
+  const destDir = updateDownloadDir();
+  const dest = path.join(destDir, safeAssetBasename(asset.name));
+  const expectedSize = Number(asset.size) || 0;
+  let lastError = null;
+
+  // 1) macOS / 有 curl 时优先 curl（大 DMG 更稳）
+  if (process.platform === "darwin" || process.platform === "linux") {
+    try {
+      onProgress?.({ phase: "downloading", percent: 0, message: "正在下载（curl）…" });
+      const r = await downloadWithCurl(asset.url, dest, { expectedSize, onProgress });
+      const verified = await verifyDownloadedUpdate(dest, { expectedSize: r.total || expectedSize, name: asset.name });
+      onProgress?.({ phase: "downloaded", received: verified.size, total: verified.size, percent: 100, path: dest, sha256: verified.sha256 });
+      appendLog({ level: "info", msg: "update asset downloaded", via: "curl", name: asset.name, size: verified.size, sha256: verified.sha256 });
+      return dest;
+    } catch (err) {
+      lastError = err;
+      appendLog({ level: "warn", msg: "update download via curl failed, fallback undici", error: err?.message || String(err) });
+      try { fs.unlinkSync(dest); } catch {}
+    }
+  }
+
+  // 2) undici 流式下载
+  try {
+    onProgress?.({ phase: "downloading", percent: 0, message: "正在下载…" });
+    const r = await downloadWithUndici(asset.url, dest, { expectedSize, onProgress });
+    const verified = await verifyDownloadedUpdate(dest, { expectedSize: r.total || expectedSize, name: asset.name });
+    onProgress?.({ phase: "downloaded", received: verified.size, total: verified.size, percent: 100, path: dest, sha256: verified.sha256 });
+    appendLog({ level: "info", msg: "update asset downloaded", via: "undici", name: asset.name, size: verified.size, sha256: verified.sha256 });
+    return dest;
+  } catch (err) {
+    try { fs.unlinkSync(dest); } catch {}
+    const msg = err?.message || String(err);
+    const prev = lastError?.message ? `（curl：${lastError.message}）` : "";
+    throw new Error(`${msg}${prev}`);
+  }
 }
 
 async function installMacUpdate(dmgPath, onProgress) {
+  // 安装前再验一次，防止临时文件被并发写坏
+  onProgress?.({ phase: "installing", message: "正在校验安装包…", percent: 100 });
+  await verifyDownloadedUpdate(dmgPath, { name: path.basename(dmgPath) });
   onProgress?.({ phase: "installing", message: "正在挂载安装包…", percent: 100 });
   const mountRoot = path.join(app.getPath("temp"), `switchyard-mount-${Date.now()}`);
   fs.mkdirSync(mountRoot, { recursive: true });
@@ -484,7 +633,35 @@ async function downloadAndInstallUpdate(info = pendingUpdateInfo) {
   const report = (payload) => sendUpdateEvent("app:update-progress", payload);
   try {
     report({ phase: "starting", percent: 0, message: `开始下载 v${info.latest}…` });
-    const filePath = await downloadUpdateAsset(info.asset, report);
+    // 最多 2 次下载：校验失败时删缓存重下（修复偶发损坏的 DMG）
+    let filePath = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        if (attempt > 1) {
+          report({ phase: "downloading", percent: 0, message: `安装包校验失败，正在第 ${attempt} 次下载…` });
+        }
+        filePath = await downloadUpdateAsset(info.asset, report);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        appendLog({
+          level: "warn",
+          msg: "update download attempt failed",
+          attempt,
+          error: err?.message || String(err)
+        });
+      }
+    }
+    if (!filePath) {
+      const message = lastErr?.message || "下载失败";
+      // 自动打开浏览器，方便手动装（尤其是旧版客户端下载逻辑有问题时）
+      try {
+        await shell.openExternal(info.asset.url || info.url);
+      } catch {}
+      throw new Error(`${message}。已打开发布页下载链接，请手动安装后重开。`);
+    }
     let result;
     if (process.platform === "darwin") {
       result = await installMacUpdate(filePath, report);
