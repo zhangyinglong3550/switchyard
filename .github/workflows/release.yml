@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
 
       - id: version
         shell: bash
@@ -51,7 +51,13 @@ jobs:
             exit 1
           fi
 
-          echo "source_ref=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          source_ref="${GITHUB_REF_TYPE}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            source_ref="${TAG_NAME}"
+          else
+            source_ref="main"
+          fi
+          echo "source_ref=${source_ref}" >> "${GITHUB_OUTPUT}"
           echo "tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
           echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
 
