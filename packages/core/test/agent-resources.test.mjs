@@ -164,4 +164,92 @@ test("agent resources · lists sessions and manages skills inside agent roots", 
     assert.equal(archived.archived, true);
     assert.equal(mod.listAgentSessions({ agentId: "hermes" }).length, 0);
   }
+
+  // OpenCode: skills under ~/.config/opencode/{skills,skill}；会话在 ~/.local/share/opencode/storage
+  const ocSkillA = path.join(tmp, ".config", "opencode", "skills", "oc-skill-a");
+  const ocSkillB = path.join(tmp, ".config", "opencode", "skill", "oc-skill-b");
+  fs.mkdirSync(ocSkillA, { recursive: true });
+  fs.mkdirSync(ocSkillB, { recursive: true });
+  fs.writeFileSync(path.join(ocSkillA, "SKILL.md"), "---\nname: oc-a\n---\nOpenCode skill A\n", "utf8");
+  fs.writeFileSync(path.join(ocSkillB, "SKILL.md"), "---\nname: oc-b\n---\nOpenCode skill B\n", "utf8");
+  fs.writeFileSync(path.join(tmp, ".config", "opencode", "opencode.json"), "{}\n", "utf8");
+
+  const sessionId = "ses_test_switchyard_oc1";
+  const sessionFile = path.join(tmp, ".local", "share", "opencode", "storage", "session", "global", `${sessionId}.json`);
+  const msgUser = "msg_test_user_1";
+  const msgAsst = "msg_test_asst_1";
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  fs.writeFileSync(sessionFile, JSON.stringify({
+    id: sessionId,
+    title: "OpenCode 测试会话",
+    directory: "/tmp/demo",
+    projectID: "global",
+    time: { created: 1782230000000, updated: 1782230005000 }
+  }), "utf8");
+  fs.mkdirSync(path.join(tmp, ".local", "share", "opencode", "storage", "message", sessionId), { recursive: true });
+  fs.writeFileSync(path.join(tmp, ".local", "share", "opencode", "storage", "message", sessionId, `${msgUser}.json`), JSON.stringify({
+    id: msgUser,
+    sessionID: sessionId,
+    role: "user",
+    time: { created: 1782230001000 }
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, ".local", "share", "opencode", "storage", "message", sessionId, `${msgAsst}.json`), JSON.stringify({
+    id: msgAsst,
+    sessionID: sessionId,
+    role: "assistant",
+    time: { created: 1782230002000, completed: 1782230004000 },
+    modelID: "demo-model",
+    providerID: "switchyard"
+  }), "utf8");
+  fs.mkdirSync(path.join(tmp, ".local", "share", "opencode", "storage", "part", msgUser), { recursive: true });
+  fs.mkdirSync(path.join(tmp, ".local", "share", "opencode", "storage", "part", msgAsst), { recursive: true });
+  fs.writeFileSync(path.join(tmp, ".local", "share", "opencode", "storage", "part", msgUser, "prt_u1.json"), JSON.stringify({
+    id: "prt_u1",
+    sessionID: sessionId,
+    messageID: msgUser,
+    type: "text",
+    text: "OpenCode 你好"
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, ".local", "share", "opencode", "storage", "part", msgAsst, "prt_a1.json"), JSON.stringify({
+    id: "prt_a1",
+    sessionID: sessionId,
+    messageID: msgAsst,
+    type: "text",
+    text: "你好，我是 OpenCode。"
+  }), "utf8");
+  fs.writeFileSync(path.join(tmp, ".local", "share", "opencode", "storage", "part", msgAsst, "prt_a2.json"), JSON.stringify({
+    id: "prt_a2",
+    sessionID: sessionId,
+    messageID: msgAsst,
+    type: "tool",
+    tool: "read",
+    state: { status: "completed", input: { filePath: "/tmp/a.txt" }, output: "ok" }
+  }), "utf8");
+
+  const ocSkills = mod.listAgentSkills({ agentId: "opencode" });
+  assert.equal(ocSkills.length, 2);
+  assert.ok(ocSkills.some((item) => item.name === "oc-skill-a"));
+  assert.ok(ocSkills.some((item) => item.name === "oc-skill-b"));
+  const ocReadSkill = mod.readAgentSkill(ocSkills.find((item) => item.name === "oc-skill-a").id);
+  assert.match(ocReadSkill.text, /OpenCode skill A/);
+
+  const ocCore = mod.listAgentCoreFiles({ agentId: "opencode" });
+  assert.ok(ocCore.some((item) => item.relativePath === "opencode.json" && item.exists));
+
+  const ocSessions = mod.listAgentSessions({ agentId: "opencode" });
+  assert.equal(ocSessions.length, 1);
+  assert.equal(ocSessions[0].source, "opencode-storage");
+  assert.equal(ocSessions[0].name, "OpenCode 测试会话");
+  assert.equal(ocSessions[0].messageCount, 2);
+
+  const ocSession = mod.readAgentSession(ocSessions[0].id);
+  assert.equal(ocSession.conversation.format, "opencode-storage");
+  assert.equal(ocSession.conversation.messages[0].role, "user");
+  assert.equal(ocSession.conversation.messages[0].text, "OpenCode 你好");
+  assert.match(ocSession.conversation.messages[1].text, /OpenCode/);
+  assert.equal(ocSession.conversation.messages.some((m) => m.role === "tool" && /read/.test(m.text)), true);
+
+  const linkedToOc = mod.linkAgentSkill(skills[0].id, { targetAgentId: "opencode", skillName: "from-codex" });
+  assert.equal(linkedToOc.ok, true);
+  assert.equal(fs.lstatSync(path.join(tmp, ".config", "opencode", "skills", "from-codex")).isSymbolicLink(), true);
 });

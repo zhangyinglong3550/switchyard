@@ -7,6 +7,11 @@
 - **OpenCode 客户端**：网关入口 `/opencode/v1`（OpenAI 兼容）；一键写入 `~/.config/opencode/opencode.json` 的 `provider.switchyard`（模型清单 + baseURL）。
   - 首次在「客户端」页一键写入后，**新增 / 修改 / 启用模型会自动刷新** OpenCode 的 models 列表（仅托管已标记的 switchyard 段，不覆盖用户其它 provider）。
   - 诊断中心可检测 OpenCode 是否指向 Switchyard。
+- **OpenCode Skills / 会话 / 可视化**：
+  - Skills：读取 `~/.config/opencode/skills` 与 `skill`（兼容旧路径）；支持编辑、禁用、跨 Agent 复制、SkillHub 安装。
+  - 会话：读取 `~/.local/share/opencode/storage/session`（JSON 元数据 + message/part），可在「会话」页浏览与删除（移入废纸篓）。
+  - 调用可视化：筛选 OpenCode 时展示会话时间线（用户/助手正文、工具调用）；网关请求日志仍按 `client_id=opencode` 归类。
+  - 核心文件：可编辑 `opencode.json` / `AGENTS.md`。
 
 ## 2.2.5 — 2026-07-16
 

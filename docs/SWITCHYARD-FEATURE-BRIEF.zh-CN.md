@@ -34,9 +34,9 @@ Switchyard 要做的是把这些高频动作集中到一个桌面工作台里：
 | 兼容包机制 | 按 Provider / Model 定向处理 tool call、reasoning、JSON Schema、developer role、stream 等差异 | “这个模型有点怪”可以沉淀成可复用、可回归的规则 |
 | 测试台 | 支持文本、stream、tool call、图片、reasoning、多轮，展示原始 / 转换后请求响应 | 接模型时能直接看协议转换和上游返回，不靠猜 |
 | 诊断与监控 | 探针、Provider 健康监控、请求日志、用量统计、错误追踪 | 出问题能判断是模型、协议、网络、缓存还是客户端配置 |
-| Agent 会话管理 | 读取 Codex / Claude Code / Hermes 会话，Hermes 支持归档 | 排查“刚才那轮到底发生了什么”更直接 |
+| Agent 会话管理 | 读取 Codex / Claude Code / Hermes / OpenCode 会话，Hermes 支持归档 | 排查“刚才那轮到底发生了什么”更直接 |
 | Agent 核心文件 | 管理 Codex `AGENTS.md` / `config.toml`、Claude Code `CLAUDE.md` / `settings.json`、Hermes `AGENTS.md` / `SOUL.md` / memory 等 | 不用在多个隐藏目录里找配置文件 |
-| Skill 管理 | 列出、查看、编辑、启用 / 禁用、删除 Codex / Claude Code / Hermes Skills | Skill 成为可管理资产，不是散落的文件夹 |
+| Skill 管理 | 列出、查看、编辑、启用 / 禁用、删除 Codex / Claude Code / Hermes / OpenCode Skills | Skill 成为可管理资产，不是散落的文件夹 |
 | Skill 复制 / 软链接 | 将一个 Agent 的 Skill 复制到另一个 Agent，或用软链接复用同一份内容 | 一次维护，多 Agent 共享 |
 | SkillHub 快速安装 | 搜索 skillhub.cn，查看详情，下载 zip，直接安装到目标 Agent | 从“找到 Skill”到“装进 Agent”少走很多手工步骤 |
 | Claude Code 插件管理 | 管理插件源、读取 marketplace、展示已安装插件和可用插件 | 插件源和插件状态有统一视图 |
@@ -58,7 +58,7 @@ Switchyard 把这些资源放进桌面管理台：
 
 - Skill 可以按 Agent 过滤、编辑、禁用、删除。
 - 常用 Skill 可以通过软链接复制到另一个 Agent，避免多份内容漂移。
-- SkillHub 可以直接搜索、下载、安装到 Codex / Claude Code / Hermes。
+- SkillHub 可以直接搜索、下载、安装到 Codex / Claude Code / Hermes / OpenCode。
 - Claude Code 插件源可以添加、查看、移除，也能看到 marketplace 里的可用插件。
 - 核心文件可以直接读取和保存，适合团队内统一初始化或排障。
 

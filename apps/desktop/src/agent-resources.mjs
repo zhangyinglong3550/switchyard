@@ -49,11 +49,20 @@ export function agentDefinitions() {
         "hermes-agent/AGENTS.md",
         "hermes-office/AGENTS.md"
       ]
+    },
+    {
+      id: "opencode",
+      label: "OpenCode",
+      // 配置与 Skills：~/.config/opencode；会话在 XDG data：~/.local/share/opencode/storage
+      root: "~/.config/opencode",
+      sessionRoots: [],
+      skillRoots: ["~/.config/opencode/skills", "~/.config/opencode/skill"],
+      coreFiles: ["opencode.json", "AGENTS.md"]
     }
   ].map((agent) => ({
     ...agent,
     root: expandHome(agent.root),
-    sessionRoots: agent.sessionRoots.map(expandHome),
+    sessionRoots: (agent.sessionRoots || []).map(expandHome),
     skillRoots: agent.skillRoots.map(expandHome)
   }));
   for (const agent of agents) {
@@ -64,6 +73,23 @@ export function agentDefinitions() {
     ]);
   }
   return agents;
+}
+
+/** OpenCode 本机数据根（会话 / 消息 JSON），可随 SWITCHYARD_AGENT_HOME 重定向 */
+export function openCodeShareRoot() {
+  return path.join(homeDir(), ".local", "share", "opencode");
+}
+
+function openCodeSessionRoot() {
+  return path.join(openCodeShareRoot(), "storage", "session");
+}
+
+function openCodeMessageRoot() {
+  return path.join(openCodeShareRoot(), "storage", "message");
+}
+
+function openCodePartRoot() {
+  return path.join(openCodeShareRoot(), "storage", "part");
 }
 
 function uniqueRelativePaths(paths) {
@@ -146,6 +172,17 @@ function encodeHermesDbResource(root, sessionId) {
   })).toString("base64url");
 }
 
+function encodeOpenCodeSessionResource(sessionFile, sessionId) {
+  const shareRoot = openCodeShareRoot();
+  return Buffer.from(JSON.stringify({
+    agentId: "opencode",
+    root: path.resolve(shareRoot),
+    target: path.resolve(sessionFile),
+    source: "opencode-storage",
+    sessionId: String(sessionId || "")
+  })).toString("base64url");
+}
+
 function decodeResource(id) {
   try {
     const parsed = JSON.parse(Buffer.from(String(id || ""), "base64url").toString("utf8"));
@@ -196,6 +233,14 @@ export function resolveAgentResource(id, kind) {
     assertInsideRoot(decoded.root, decoded.target);
     return { ...decoded, agent };
   }
+  if (decoded.source === "opencode-storage") {
+    const shareRoot = openCodeShareRoot();
+    if (agent.id !== "opencode" || kind !== "session") throw new Error("资源类型不匹配");
+    if (path.resolve(decoded.root) !== path.resolve(shareRoot)) throw new Error("OpenCode 数据根不受管理");
+    assertInsideRoot(shareRoot, decoded.target);
+    if (!decoded.sessionId || !String(decoded.sessionId).startsWith("ses_")) throw new Error("OpenCode 会话 ID 无效");
+    return { ...decoded, agent };
+  }
   const roots = kind === "skill" ? agent.skillRoots : agent.sessionRoots;
   if (!roots.some((root) => path.resolve(root) === decoded.root)) throw new Error("资源根目录不受管理");
   assertInsideRoot(decoded.root, decoded.target);
@@ -240,6 +285,7 @@ export function listAgentSessions({ agentId = "", source = "", includeAllSources
       }
     }
     if (agent.id === "hermes") rows.push(...listHermesDbSessions());
+    if (agent.id === "opencode") rows.push(...listOpenCodeSessions({ source: sourceFilter, includeAllSources }));
   }
   rows.sort((a, b) => String(b.mtime).localeCompare(String(a.mtime)));
   return rows.slice(0, 500);
@@ -301,6 +347,201 @@ function listHermesDbSessions() {
   }));
 }
 
+function isoFromMs(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return new Date(n).toISOString();
+}
+
+function readJsonFileMaybe(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function listOpenCodeSessions({ source = "", includeAllSources = false } = {}) {
+  const shareRoot = openCodeShareRoot();
+  const sessionRoot = openCodeSessionRoot();
+  if (!safeStat(sessionRoot)?.isDirectory()) return [];
+  const sourceFilter = String(source || "").trim().toLowerCase();
+  const files = walkFiles(sessionRoot, {
+    maxDepth: 3,
+    include: (file) => path.extname(file).toLowerCase() === ".json" && path.basename(file).startsWith("ses_")
+  });
+  const rows = [];
+  for (const file of files) {
+    const meta = readJsonFileMaybe(file);
+    if (!meta?.id) continue;
+    const sessionId = String(meta.id);
+    if (meta.time_archived || meta.time?.archived) continue;
+    const messageDir = path.join(openCodeMessageRoot(), sessionId);
+    let messageCount = 0;
+    try {
+      messageCount = fs.readdirSync(messageDir).filter((name) => name.endsWith(".json")).length;
+    } catch {}
+    const mtime = isoFromMs(meta.time?.updated || meta.time?.created)
+      || safeStat(file)?.mtime?.toISOString?.()
+      || new Date(0).toISOString();
+    const model = meta.model
+      ? (typeof meta.model === "string" ? meta.model : [meta.model.providerID, meta.model.modelID].filter(Boolean).join("/"))
+      : "";
+    const row = {
+      id: encodeOpenCodeSessionResource(file, sessionId),
+      agentId: "opencode",
+      agentLabel: "OpenCode",
+      name: meta.title || sessionId,
+      relativePath: path.relative(shareRoot, file),
+      path: file,
+      root: shareRoot,
+      source: "opencode-storage",
+      sessionId,
+      model,
+      directory: meta.directory || "",
+      projectId: meta.projectID || meta.project_id || "",
+      size: messageCount,
+      messageCount,
+      mtime
+    };
+    if (!includeAllSources && sourceFilter && row.source !== sourceFilter) continue;
+    rows.push(row);
+  }
+  return rows;
+}
+
+function listOpenCodeMessageFiles(sessionId) {
+  const dir = path.join(openCodeMessageRoot(), sessionId);
+  if (!safeStat(dir)?.isDirectory()) return [];
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((name) => name.endsWith(".json")); } catch { return []; }
+  const items = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    const data = readJsonFileMaybe(file);
+    if (!data) continue;
+    items.push({ file, data });
+  }
+  items.sort((a, b) => {
+    const ta = Number(a.data.time?.created || 0);
+    const tb = Number(b.data.time?.created || 0);
+    if (ta !== tb) return ta - tb;
+    return String(a.data.id || "").localeCompare(String(b.data.id || ""));
+  });
+  return items;
+}
+
+function listOpenCodePartsForMessage(messageId) {
+  const dir = path.join(openCodePartRoot(), messageId);
+  if (!safeStat(dir)?.isDirectory()) return [];
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((name) => name.endsWith(".json")); } catch { return []; }
+  const parts = [];
+  for (const name of names) {
+    const data = readJsonFileMaybe(path.join(dir, name));
+    if (data) parts.push(data);
+  }
+  parts.sort((a, b) => {
+    const ta = Number(a.time?.start || a.time?.created || 0);
+    const tb = Number(b.time?.start || b.time?.created || 0);
+    if (ta !== tb) return ta - tb;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+  return parts;
+}
+
+function openCodePartText(part) {
+  if (!part || typeof part !== "object") return "";
+  const type = String(part.type || "");
+  if (type === "text" || type === "reasoning") return part.text || "";
+  if (type === "tool") {
+    const tool = part.tool || part.name || "tool";
+    const status = part.state?.status || "";
+    const input = part.state?.input != null ? JSON.stringify(part.state.input, null, 0) : "";
+    const output = part.state?.output != null
+      ? (typeof part.state.output === "string" ? part.state.output : JSON.stringify(part.state.output))
+      : "";
+    const header = `[工具调用] ${tool}${status ? ` (${status})` : ""}`;
+    const body = [input && `输入: ${input}`, output && `输出: ${output}`].filter(Boolean).join("\n");
+    return body ? `${header}\n${body}` : header;
+  }
+  if (type === "step-start") return "[步骤开始]";
+  if (type === "step-finish") return `[步骤结束] ${part.reason || ""}`.trim();
+  if (type === "patch") return `[补丁] ${part.path || part.file || ""}`.trim();
+  if (type === "file" || type === "image") return `[${type}] ${part.filename || part.path || ""}`.trim();
+  if (part.text) return part.text;
+  return "";
+}
+
+function parseOpenCodeConversation(messages) {
+  const out = [];
+  for (const item of messages) {
+    const msg = item.data || item;
+    const role = normalizeRole(msg.role);
+    const timestamp = isoFromMs(msg.time?.created || msg.time?.completed);
+    const parts = listOpenCodePartsForMessage(msg.id);
+    if (!parts.length) {
+      const fallback = msg.summary?.title || msg.error?.message || "";
+      if (fallback) pushMessage(out, { role, text: fallback, timestamp, kind: msg.role || "message" });
+      continue;
+    }
+    for (const part of parts) {
+      const type = String(part.type || "");
+      if (type === "step-start" || type === "step-finish") continue;
+      if (type === "reasoning") {
+        // 可视化时间线以工具/正文为主，推理默认跳过以控制噪音
+        continue;
+      }
+      const text = openCodePartText(part);
+      if (!text) continue;
+      const partRole = type === "tool" ? "tool" : role;
+      pushMessage(out, {
+        role: partRole,
+        text,
+        timestamp: isoFromMs(part.time?.start || part.time?.created) || timestamp,
+        kind: type || msg.role
+      });
+    }
+  }
+  return out;
+}
+
+function readOpenCodeSession(id) {
+  const resource = resolveAgentResource(id, "session");
+  const sessionId = resource.sessionId;
+  const meta = readJsonFileMaybe(resource.target) || { id: sessionId };
+  const messageItems = listOpenCodeMessageFiles(sessionId);
+  const conversationMessages = parseOpenCodeConversation(messageItems);
+  const text = JSON.stringify({
+    session: meta,
+    messageCount: messageItems.length,
+    messages: messageItems.map((item) => ({
+      id: item.data.id,
+      role: item.data.role,
+      time: item.data.time,
+      modelID: item.data.modelID || item.data.model?.modelID,
+      providerID: item.data.providerID || item.data.model?.providerID,
+      finish: item.data.finish
+    }))
+  }, null, 2);
+  const mtime = isoFromMs(meta.time?.updated || meta.time?.created)
+    || safeStat(resource.target)?.mtime?.toISOString?.()
+    || null;
+  return {
+    ...resource,
+    text,
+    truncated: conversationMessages.length > MAX_CONVERSATION_MESSAGES,
+    size: text.length,
+    mtime,
+    conversation: {
+      format: "opencode-storage",
+      count: conversationMessages.length,
+      truncated: conversationMessages.length > MAX_CONVERSATION_MESSAGES,
+      messages: conversationMessages.slice(-MAX_CONVERSATION_MESSAGES)
+    }
+  };
+}
+
 function readTextFile(file, maxBytes = TEXT_MAX_BYTES) {
   const stat = safeStat(file);
   if (!stat?.isFile()) throw new Error("文件不存在");
@@ -324,6 +565,7 @@ function readTextFile(file, maxBytes = TEXT_MAX_BYTES) {
 export function readAgentSession(id) {
   const decoded = decodeResource(id);
   if (decoded.source === "hermes-state-db") return readHermesDbSession(id);
+  if (decoded.source === "opencode-storage") return readOpenCodeSession(id);
   const resource = resolveAgentResource(id, "session");
   const read = readTextFile(resource.target, 256 * 1024);
   return { ...resource, ...read, conversation: parseSessionConversation(read.text, resource.agent.id) };

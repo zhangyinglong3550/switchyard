@@ -862,6 +862,25 @@ ipcMain.handle("agent:sessions:delete", async (_e, { id }) => {
     appendLog({ level: "info", msg: "hermes session archived", sessionId: resource.sessionId });
     return result;
   }
+  if (resource.source === "opencode-storage") {
+    const sessionId = resource.sessionId;
+    const shareRoot = resource.root;
+    const messageDir = path.join(shareRoot, "storage", "message", sessionId);
+    const diffFile = path.join(shareRoot, "storage", "session_diff", `${sessionId}.json`);
+    const trashed = [];
+    for (const target of [resource.target, messageDir, diffFile]) {
+      try {
+        if (fs.existsSync(target)) {
+          await shell.trashItem(target);
+          trashed.push(target);
+        }
+      } catch (err) {
+        appendLog({ level: "warn", msg: "opencode session trash partial", path: target, error: err?.message || String(err) });
+      }
+    }
+    appendLog({ level: "info", msg: "opencode session moved to trash", sessionId, paths: trashed });
+    return { ok: true, sessionId, paths: trashed };
+  }
   await shell.trashItem(resource.target);
   appendLog({ level: "info", msg: `session moved to trash: ${resource.agent.id}`, path: resource.target });
   return { ok: true, path: resource.target };
