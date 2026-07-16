@@ -194,11 +194,6 @@ npm run desktop
 
 ---
 
-## 演示
-
-- [产品演示视频（MP4）](docs/assets/videos/switchyard-promo.mp4)
-
----
 
 ## License
 
