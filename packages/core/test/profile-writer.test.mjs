@@ -702,6 +702,91 @@ test("profile dry-run · does not write to disk", () => {
   assert.match(r.preview, /10\.0\.0\.1:99999/);
 });
 
+test("opencode profile · merges provider.switchyard and preserves other providers", () => {
+  const file = pw.openCodeConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      anthropic: { options: { baseURL: "https://api.anthropic.com/v1" } }
+    },
+    model: "anthropic/claude-sonnet-4-5"
+  }, null, 2) + "\n", "utf8");
+
+  const r = pw.applyOpenCode({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "coding-plan/GLM-5.2",
+    models: [
+      { id: "coding-plan/GLM-5.2", displayName: "GLM-5.2", contextWindow: 1000000, maxOutputTokens: 8192 },
+      { id: "grok-pool/grok-4.5", displayName: "Grok 4.5" }
+    ]
+  });
+
+  assert.equal(r.modelCount, 2);
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.ok(cfg.provider.anthropic, "must keep user providers");
+  assert.equal(cfg.provider.switchyard.npm, "@ai-sdk/openai-compatible");
+  assert.equal(cfg.provider.switchyard.options.baseURL, "http://127.0.0.1:17888/opencode/v1");
+  assert.equal(cfg.provider.switchyard.options.apiKey, "switchyard-local");
+  assert.equal(cfg.provider.switchyard["managed-by-switchyard"], true);
+  assert.equal(cfg.provider.switchyard.models["coding-plan/GLM-5.2"].name, "GLM-5.2");
+  assert.equal(cfg.provider.switchyard.models["coding-plan/GLM-5.2"].limit.context, 1000000);
+  assert.equal(cfg.provider.switchyard.models["grok-pool/grok-4.5"].name, "Grok 4.5");
+  // 用户默认仍是 anthropic 时不要强行改掉
+  assert.equal(cfg.model, "anthropic/claude-sonnet-4-5");
+});
+
+test("opencode profile · auto-refresh models when already managed", () => {
+  const file = pw.openCodeConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // 干净起点：无其它默认 model，便于验证 switchyard 默认写入
+  fs.writeFileSync(file, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2) + "\n", "utf8");
+  pw.applyOpenCode({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "a/m1",
+    models: [{ id: "a/m1", displayName: "M1" }]
+  });
+
+  const refreshed = pw.syncOpenCodeModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    models: [{ id: "a/m1", displayName: "M1" }, { id: "b/m2", displayName: "M2" }],
+    defaultModel: "a/m1"
+  });
+  assert.equal(refreshed.skipped, undefined);
+  assert.equal(refreshed.changed, true);
+  assert.equal(refreshed.modelCount, 2);
+
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.ok(cfg.provider.switchyard.models["b/m2"]);
+  assert.equal(cfg.model, "switchyard/a/m1");
+
+  const noop = pw.syncOpenCodeModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    models: [{ id: "a/m1", displayName: "M1" }, { id: "b/m2", displayName: "M2" }],
+    defaultModel: "a/m1"
+  });
+  assert.equal(noop.changed, false);
+});
+
+test("opencode sync · skips when not managed", () => {
+  const file = pw.openCodeConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2) + "\n", "utf8");
+  const r = pw.syncOpenCodeModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    models: [{ id: "x/y", displayName: "Y" }]
+  });
+  assert.equal(r.skipped, true);
+  assert.equal(r.reason, "not-managed");
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(cfg.provider, undefined);
+});
+
 test("preview · returns plain text suitable for UI", () => {
   const codex = pw.previewCodexProfile({ host: "127.0.0.1", port: 17888 });
   assert.match(codex, /wire_api = "responses"/);

@@ -11,7 +11,7 @@ export const SUPPORTED_API_FORMATS = new Set([
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
-export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "claude-app", "hermes", "generic-openai"]);
+export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "claude-app", "hermes", "opencode", "generic-openai"]);
 
 export const DEFAULT_CONFIG = {
   host: "127.0.0.1",
@@ -23,6 +23,7 @@ export const DEFAULT_CONFIG = {
     codex: { enabled: true, allowedModels: ["*"], defaultModel: null },
     "claude-code": { enabled: true, allowedModels: ["*"], defaultModel: null, modelMapping: {} },
     hermes: { enabled: true, allowedModels: ["*"], defaultModel: null },
+    opencode: { enabled: true, allowedModels: ["*"], defaultModel: null },
     "generic-openai": { enabled: true, allowedModels: ["*"], defaultModel: null }
   }
 };

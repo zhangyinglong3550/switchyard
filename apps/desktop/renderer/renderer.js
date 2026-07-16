@@ -524,6 +524,7 @@ function renderOverview() {
     ["Codex", `${base}/codex/v1`],
     ["Claude Code", `${base}/claude-code`],
     ["Hermes", `${base}/hermes/v1`],
+    ["OpenCode", `${base}/opencode/v1`],
     ["通用 OpenAI", `${base}/v1`]
   ];
   for (const [label, url] of rows) {
@@ -1048,7 +1049,8 @@ const CODEX_PROFILE_MODES = {
 const PROFILE_META = {
   codex: { label: "Codex", file: "~/.codex/config.toml", entry: "/codex/v1", note: "可选择官方直连或 Switchyard 三方代理。三方代理写入 model_provider = custom；官方直连会移除 Switchyard 管理块，认证交给 Codex App/CLI。" },
   "claude-code": { label: "Claude Code", file: "~/.claude/settings.json", entry: "/claude-code", note: "写入 env.ANTHROPIC_BASE_URL；ANTHROPIC_AUTH_TOKEN 读取 ${SWITCHYARD_KEY}" },
-  hermes: { label: "Hermes", file: "~/.hermes/config.yaml", entry: "/hermes/v1", note: "写入 model.provider = switchyard 及 providers.switchyard（base_url + api_key + 模型清单）。Hermes 只读取 config.yaml。" }
+  hermes: { label: "Hermes", file: "~/.hermes/config.yaml", entry: "/hermes/v1", note: "写入 model.provider = switchyard 及 providers.switchyard（base_url + api_key + 模型清单）。Hermes 只读取 config.yaml。" },
+  opencode: { label: "OpenCode", file: "~/.config/opencode/opencode.json", entry: "/opencode/v1", note: "写入 provider.switchyard（OpenAI 兼容 + 模型清单）。新增/改模型后会自动刷新 models；OpenCode 需重启或重新 /models 才能看到。" }
 };
 
 const CLAUDE_CODE_MAPPING_SLOTS = [
@@ -1271,7 +1273,8 @@ function renderDiagnostics() {
     const clients = [
       ["codex", "Codex"],
       ["claude-code", "Claude Code"],
-      ["hermes", "Hermes"]
+      ["hermes", "Hermes"],
+      ["opencode", "OpenCode"]
     ];
     clientGrid.innerHTML = clients.map(([id, label]) => {
       const row = data.clients?.[id] || {};
@@ -3522,6 +3525,7 @@ function agentLabel(clientId) {
     codex: "Codex",
     "claude-code": "Claude Code",
     hermes: "Hermes",
+    opencode: "OpenCode",
     "generic-openai": "通用 OpenAI",
     "model-test": "模型测试"
   };
@@ -4471,6 +4475,7 @@ function logEntryAgent(entry) {
   if (text.includes("claude-code") || text.includes("claude code")) return "claude-code";
   if (text.includes("codex")) return "codex";
   if (text.includes("hermes")) return "hermes";
+  if (text.includes("opencode") || text.includes("open code")) return "opencode";
   if (text.includes("model-test")) return "model-test";
   if (text.includes("generic-openai") || text.includes("openai")) return "generic-openai";
   return "";

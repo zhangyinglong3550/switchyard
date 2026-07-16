@@ -2,6 +2,7 @@ export const CLIENT_SCOPE_OPTIONS = [
   ["codex", "Codex"],
   ["claude-code", "Claude Code"],
   ["hermes", "Hermes"],
+  ["opencode", "OpenCode"],
   ["generic-openai", "通用 OpenAI"]
 ];
 

@@ -53,7 +53,7 @@ import { listProviderPresets, providerPresetFor, presetModelHints } from "../../
 import {
   applyProfile, restoreProfile, restoreProfileBackup,
   profileTargets, listBackups,
-  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile,
+  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile, previewOpenCodeProfile,
   syncClientModelArtifacts,
   CODEX_ACCESS_MODES
 } from "../../../packages/core/src/profile-writer.mjs";
@@ -585,39 +585,51 @@ function syncCodexArtifacts(reason = "manual") {
     const cfg = readConfig();
     const codexModels = listModelsForClient(cfg, "codex");
     const claudeCodeModels = listModelsForClient(cfg, "claude-code");
+    const openCodeModels = listModelsForClient(cfg, "opencode");
     const status = statusFromServer();
+    const host = status.running ? status.host : cfg.host;
+    const port = status.running ? status.port : cfg.port;
     const result = syncClientModelArtifacts({
-      host: cfg.host,
-      port: cfg.port,
+      host,
+      port,
       codexDefaultModel: clientDefaultModel(cfg, "codex", codexModels),
       codexModels: modelsForProfile(cfg, codexModels),
-      claudeCodeModels: modelsForProfile(cfg, claudeCodeModels)
+      claudeCodeModels: modelsForProfile(cfg, claudeCodeModels),
+      openCodeModels: modelsForProfile(cfg, openCodeModels),
+      openCodeDefaultModel: clientDefaultModel(cfg, "opencode", openCodeModels)
     });
     const codexChanged = result.codex?.ok && (result.codex.catalogChanged || result.codex.cacheChanged);
     const claudeChanged = result.claudeCode?.ok && result.claudeCode.cacheChanged;
+    const openCodeChanged = result.openCode?.ok && result.openCode.changed;
 
     // Auto-sync settings.json for Claude Code so env vars stay current
     // (Claude Code reads these on next startup)
     try {
       applyProfile("claude-code", {
-        host: status.running ? status.host : cfg.host,
-        port: status.running ? status.port : cfg.port,
+        host,
+        port,
         defaultModel: clientDefaultModel(cfg, "claude-code", claudeCodeModels),
         models: modelsForProfile(cfg, claudeCodeModels),
         modelMapping: cfg.clients?.["claude-code"]?.modelMapping
       });
     } catch (_e) { /* non-fatal */ }
 
-    if (codexChanged || claudeChanged) {
+    // OpenCode：仅当 opencode.json 已由 Switchyard 托管时刷新 models（新增/改模型自动可见）
+    // syncClientModelArtifacts 内的 syncOpenCodeModelArtifacts 已处理；此处无需 force 写入
+
+    if (codexChanged || claudeChanged || openCodeChanged) {
       appendLog({
         level: "info",
         msg: "client model artifacts synced",
         reason,
         codexModelCount: result.codex?.modelCount || 0,
         claudeCodeModelCount: result.claudeCode?.modelCount || 0,
+        openCodeModelCount: result.openCode?.modelCount || 0,
+        openCodeSkipped: Boolean(result.openCode?.skipped),
         codexCacheChanged: Boolean(result.codex?.cacheChanged),
         codexCatalogChanged: Boolean(result.codex?.catalogChanged),
-        claudeCodeCacheChanged: Boolean(result.claudeCode?.cacheChanged)
+        claudeCodeCacheChanged: Boolean(result.claudeCode?.cacheChanged),
+        openCodeChanged: Boolean(openCodeChanged)
       });
     }
     return result;
@@ -1372,7 +1384,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
     port: status.running ? status.port : cfg.port,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -1387,6 +1399,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
   }
   const result = applyProfile(clientId, opts);
   if (clientId === "codex" && profileMode === CODEX_ACCESS_MODES.SWITCHYARD_PROXY) syncCodexArtifacts("profile-apply");
+  if (clientId === "opencode") syncCodexArtifacts("opencode-profile-apply");
   appendLog({
     level: "info",
     msg: `profile applied: ${clientId}`,
@@ -1442,7 +1455,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
     port: status.running ? status.port : 17888,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -1459,6 +1472,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
   if (clientId === "codex") return { text: previewCodexProfile(opts), path: profileTargets().codex };
   if (clientId === "claude-code") return { text: previewClaudeCodeProfile(opts), path: profileTargets()["claude-code"] };
   if (clientId === "hermes") return { text: previewHermesProfile(opts), path: profileTargets().hermes };
+  if (clientId === "opencode") return { text: previewOpenCodeProfile(opts), path: profileTargets().opencode };
   throw new Error(`Unknown client: ${clientId}`);
 });
 ipcMain.handle("test:chat", async (_e, { model, messages, stream, clientId = "generic-openai", protocol = "openai_chat", includeImage = false, temperature, maxTokens }) => {

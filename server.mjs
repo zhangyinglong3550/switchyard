@@ -25,6 +25,7 @@ const CLIENT_PREFIXES = [
   { prefix: "/codex", clientId: "codex" },
   { prefix: "/claude-code", clientId: "claude-code" },
   { prefix: "/hermes", clientId: "hermes" },
+  { prefix: "/opencode", clientId: "opencode" },
   { prefix: "/openai", clientId: "generic-openai" },
   { prefix: "/anthropic", clientId: "generic-openai" }
 ];

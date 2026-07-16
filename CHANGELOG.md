@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.6 — 2026-07-16
+
+### Features
+
+- **OpenCode 客户端**：网关入口 `/opencode/v1`（OpenAI 兼容）；一键写入 `~/.config/opencode/opencode.json` 的 `provider.switchyard`（模型清单 + baseURL）。
+  - 首次在「客户端」页一键写入后，**新增 / 修改 / 启用模型会自动刷新** OpenCode 的 models 列表（仅托管已标记的 switchyard 段，不覆盖用户其它 provider）。
+  - 诊断中心可检测 OpenCode 是否指向 Switchyard。
+
 ## 2.2.5 — 2026-07-16
 
 ### Fix

@@ -1,4 +1,4 @@
-// Writes/restores client profiles (Codex / Claude Code / Hermes).
+// Writes/restores client profiles (Codex / Claude Code / Hermes / OpenCode).
 // V0.3: real read/write with timestamped backups under ~/.switchyard/backups,
 // plus restore from latest backup.
 import fs from "node:fs";
@@ -28,6 +28,18 @@ export function hermesYamlConfigPath() {
   return path.join(os.homedir(), ".hermes", "config.yaml");
 }
 
+/** OpenCode 全局配置：~/.config/opencode/opencode.json（可用 XDG_CONFIG_HOME 覆盖） */
+export function openCodeConfigPath() {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && String(xdg).trim()
+    ? String(xdg).trim()
+    : path.join(os.homedir(), ".config");
+  return path.join(base, "opencode", "opencode.json");
+}
+
+export const OPENCODE_PROVIDER_ID = "switchyard";
+export const OPENCODE_LOCAL_API_KEY = "switchyard-local";
+
 export function codexModelCatalogPath() {
   return process.env.SWITCHYARD_CODEX_MODEL_CATALOG || path.join(DEFAULT_HOME, "codex-model-catalog.json");
 }
@@ -48,7 +60,8 @@ export function profileTargets() {
   return {
     codex: codexConfigPath(),
     "claude-code": claudeCodeConfigPath(),
-    hermes: hermesYamlConfigPath()
+    hermes: hermesYamlConfigPath(),
+    opencode: openCodeConfigPath()
   };
 }
 
@@ -712,7 +725,10 @@ export function syncClientModelArtifacts({
   codexModels = [],
   codexDefaultModel,
   claudeCodeModels = [],
-  forceCodex = false
+  openCodeModels = [],
+  openCodeDefaultModel,
+  forceCodex = false,
+  forceOpenCode = false
 } = {}) {
   return {
     codex: syncCodexModelArtifacts({
@@ -724,6 +740,13 @@ export function syncClientModelArtifacts({
       host,
       port,
       models: claudeCodeModels
+    }),
+    openCode: syncOpenCodeModelArtifacts({
+      host,
+      port,
+      models: openCodeModels,
+      defaultModel: openCodeDefaultModel,
+      force: forceOpenCode
     })
   };
 }
@@ -808,6 +831,153 @@ export function mergeHermesProfile(existing, { host, port } = {}) {
   const next = existing && typeof existing === "object" ? { ...existing } : {};
   const patch = renderHermesProfile({ host, port });
   return { ...next, ...patch };
+}
+
+// ---------- OpenCode (JSON) ----------
+
+function openCodeBaseUrl({ host, port } = {}) {
+  return `http://${host || "127.0.0.1"}:${port || 17888}/opencode/v1`;
+}
+
+function openCodeModelLabel(model) {
+  const name = String(model?.displayName || model?.upstreamModel || model?.id || "").trim();
+  return name || String(model?.id || "model");
+}
+
+function openCodeContextLimit(model) {
+  const n = Number(model?.contextWindow || model?.context_window || model?.maxContext || 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+function openCodeOutputLimit(model) {
+  const n = Number(model?.maxOutputTokens || model?.max_output_tokens || model?.maxTokens || 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+/** 生成 OpenCode provider.switchyard.models map（key 为 Switchyard 模型 id，可含 /） */
+export function buildOpenCodeModelsMap(models = []) {
+  const out = {};
+  for (const model of distinctModels(models)) {
+    const id = String(model?.id || "").trim();
+    if (!id) continue;
+    const entry = { name: openCodeModelLabel(model) };
+    const context = openCodeContextLimit(model);
+    const output = openCodeOutputLimit(model);
+    if (context || output) {
+      entry.limit = {};
+      if (context) entry.limit.context = context;
+      if (output) entry.limit.output = output;
+    }
+    out[id] = entry;
+  }
+  return out;
+}
+
+export function renderOpenCodeProviderBlock({ host, port, models = [] } = {}) {
+  return {
+    npm: "@ai-sdk/openai-compatible",
+    name: "Switchyard",
+    [MARKER]: true,
+    options: {
+      baseURL: openCodeBaseUrl({ host, port }),
+      apiKey: OPENCODE_LOCAL_API_KEY
+    },
+    models: buildOpenCodeModelsMap(models)
+  };
+}
+
+/**
+ * 合并写入 OpenCode 配置：只托管 provider.switchyard，保留用户其它 provider / 顶层设置。
+ * 若当前默认 model 属于 switchyard/* 且模型已删，则更新或清除顶层 model。
+ */
+export function mergeOpenCodeProfile(existing, { host, port, models = [], defaultModel } = {}) {
+  const next = existing && typeof existing === "object" && !Array.isArray(existing)
+    ? { ...existing }
+    : {};
+  if (!next.$schema) next.$schema = "https://opencode.ai/config.json";
+
+  const providers = next.provider && typeof next.provider === "object" && !Array.isArray(next.provider)
+    ? { ...next.provider }
+    : {};
+  providers[OPENCODE_PROVIDER_ID] = renderOpenCodeProviderBlock({ host, port, models });
+  next.provider = providers;
+
+  const modelMap = providers[OPENCODE_PROVIDER_ID].models || {};
+  const modelIds = Object.keys(modelMap);
+  const preferred = String(defaultModel || "").trim();
+  const pickDefault = preferred && modelMap[preferred]
+    ? preferred
+    : modelIds[0] || "";
+
+  const currentModel = typeof next.model === "string" ? next.model.trim() : "";
+  const switchyardPrefix = `${OPENCODE_PROVIDER_ID}/`;
+  const currentIsOurs = currentModel.startsWith(switchyardPrefix);
+  const currentKey = currentIsOurs ? currentModel.slice(switchyardPrefix.length) : "";
+  const currentStillValid = currentIsOurs && Boolean(modelMap[currentKey]);
+
+  if (pickDefault) {
+    if (!currentModel || currentIsOurs) {
+      // 仅在未设默认、或当前默认已是我们管理的 switchyard 模型时更新
+      if (!currentStillValid || (preferred && preferred !== currentKey)) {
+        next.model = `${OPENCODE_PROVIDER_ID}/${pickDefault}`;
+      }
+    }
+  } else if (currentIsOurs && !currentStillValid) {
+    delete next.model;
+  }
+
+  return next;
+}
+
+export function previewOpenCodeProfile(target = {}) {
+  return JSON.stringify(
+    mergeOpenCodeProfile(readJsonSafe(openCodeConfigPath()), target),
+    null,
+    2
+  ) + "\n";
+}
+
+/**
+ * 若本机已有 managed-by-switchyard 的 OpenCode 配置，则按当前模型列表刷新；
+ * 否则跳过（避免未经用户「一键写入」就改写全局 opencode.json）。
+ * force=true 时始终写入。
+ */
+export function syncOpenCodeModelArtifacts({
+  host,
+  port,
+  models = [],
+  defaultModel,
+  force = false
+} = {}) {
+  const file = openCodeConfigPath();
+  const existing = readJsonSafe(file);
+  const managed = Boolean(
+    existing?.provider?.[OPENCODE_PROVIDER_ID]?.[MARKER]
+    || existing?.provider?.[OPENCODE_PROVIDER_ID]?.options?.baseURL?.includes("/opencode")
+  );
+  if (!force && !managed) {
+    return { ok: true, skipped: true, reason: "not-managed", path: file, modelCount: 0 };
+  }
+  const merged = mergeOpenCodeProfile(existing, { host, port, models, defaultModel });
+  const nextText = jsonText(merged);
+  let prevText = "";
+  try { prevText = fs.readFileSync(file, "utf8"); } catch {}
+  if (prevText === nextText) {
+    return {
+      ok: true,
+      path: file,
+      changed: false,
+      modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
+    };
+  }
+  const result = writeText(file, nextText);
+  return {
+    ok: true,
+    path: result.path,
+    backup: result.backup || null,
+    changed: true,
+    modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
+  };
 }
 
 // ---------- Preview adapters ----------
@@ -1247,6 +1417,21 @@ export function applyHermes({ host, port, defaultModel, models, dryRun } = {}) {
   return { ...yamlResult, yamlPath: yamlResult.path, yamlBackup: yamlResult.backup };
 }
 
+export function applyOpenCode({ host, port, defaultModel, models, dryRun } = {}) {
+  const file = openCodeConfigPath();
+  const existing = readJsonSafe(file);
+  const merged = mergeOpenCodeProfile(existing, { host, port, defaultModel, models });
+  const text = jsonText(merged);
+  if (dryRun) return { path: file, preview: text, existing };
+  const result = writeText(file, text);
+  return {
+    ...result,
+    modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length,
+    baseURL: merged.provider?.[OPENCODE_PROVIDER_ID]?.options?.baseURL || null,
+    defaultModel: merged.model || null
+  };
+}
+
 export function applyProfile(id, opts = {}) {
   if (id === "codex") {
     if (opts.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) return applyCodexOfficialDirect(opts);
@@ -1255,6 +1440,7 @@ export function applyProfile(id, opts = {}) {
   }
   if (id === "claude-code") return applyClaudeCode(opts);
   if (id === "hermes") return applyHermes(opts);
+  if (id === "opencode") return applyOpenCode(opts);
   throw new Error(`Unknown profile id: ${id}`);
 }
 
@@ -1262,6 +1448,7 @@ export function restoreProfile(id) {
   if (id === "codex") return restoreLatest(codexConfigPath());
   if (id === "claude-code") return restoreLatest(claudeCodeConfigPath());
   if (id === "hermes") return restoreLatest(hermesYamlConfigPath());
+  if (id === "opencode") return restoreLatest(openCodeConfigPath());
   throw new Error(`Unknown profile id: ${id}`);
 }
 
@@ -1269,6 +1456,7 @@ export function restoreProfileBackup(id, backupName) {
   if (id === "codex") return restoreBackup(codexConfigPath(), backupName);
   if (id === "claude-code") return restoreBackup(claudeCodeConfigPath(), backupName);
   if (id === "hermes") return restoreBackup(hermesConfigPath(), backupName);
+  if (id === "opencode") return restoreBackup(openCodeConfigPath(), backupName);
   throw new Error(`Unknown profile id: ${id}`);
 }
 

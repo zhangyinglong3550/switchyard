@@ -71,22 +71,34 @@ test("diagnostics · detects client configuration drift from config contents", a
       'wire_api = "responses"'
     ].join("\n"),
     claudeSettings: { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:17888/claude-code" } },
-    hermesYamlText: "provider: switchyard\nbase_url: http://127.0.0.1:17888/hermes/v1\n"
+    hermesYamlText: "provider: switchyard\nbase_url: http://127.0.0.1:17888/hermes/v1\n",
+    openCodeSettings: {
+      provider: {
+        switchyard: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "http://127.0.0.1:17888/opencode/v1", apiKey: "switchyard-local" },
+          models: { "a/b": { name: "B" } }
+        }
+      }
+    }
   });
   assert.equal(ok.codex.status, "ok");
   assert.equal(ok["claude-code"].status, "ok");
   assert.equal(ok.hermes.status, "ok");
+  assert.equal(ok.opencode.status, "ok");
 
   const drifted = mod.doctorClientConfigContents({
     host: "127.0.0.1",
     port: 17888,
     codexText: 'model_provider = "openai"',
     claudeSettings: { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
-    hermesYamlText: "provider: openrouter\nbase_url: https://example.com/v1\n"
+    hermesYamlText: "provider: openrouter\nbase_url: https://example.com/v1\n",
+    openCodeSettings: { provider: { anthropic: {} } }
   });
   assert.equal(drifted.codex.status, "drifted");
   assert.equal(drifted["claude-code"].status, "drifted");
   assert.equal(drifted.hermes.status, "drifted");
+  assert.equal(drifted.opencode.status, "drifted");
 });
 
 test("diagnostics · builds compatibility profile and rule recommendations from probes", async () => {

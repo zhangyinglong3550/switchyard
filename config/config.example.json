@@ -25,6 +25,7 @@
     "codex": { "enabled": true, "allowedModels": ["*"] },
     "claude-code": { "enabled": true, "allowedModels": ["*"] },
     "hermes": { "enabled": true, "allowedModels": ["*"] },
+    "opencode": { "enabled": true, "allowedModels": ["*"] },
     "generic-openai": { "enabled": true, "allowedModels": ["*"] }
   }
 }

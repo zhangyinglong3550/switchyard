@@ -1,8 +1,8 @@
 # Switchyard
 
-**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes 里统一选择。
+**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode 里统一选择。
 
-[![version](https://img.shields.io/badge/version-2.2.5-blue)]()
+[![version](https://img.shields.io/badge/version-2.2.6-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 
@@ -38,7 +38,7 @@
 |--|--------------|------------|
 | 主场景 | Claude Code 配置 / 渠道切换 | **本机网关 + 多客户端统一模型目录** |
 | 供应商 | 往往围绕 Claude 链路 | OpenAI / Anthropic / 中转 / 公司网关 / 账号池… **可并行多条** |
-| 在 Agent 里 | 多为「当前启用的那一家」 | 在 **Claude Code、Codex、Hermes** 的模型列表里 **一起出现**，按需切换 |
+| 在 Agent 里 | 多为「当前启用的那一家」 | 在 **Claude Code、Codex、Hermes、OpenCode** 的模型列表里 **一起出现**，按需切换 |
 
 **你在面板里接入的所有模型，会打平成客户端可选列表**——不必为每个 Agent、每个供应商各配一套；DeepSeek、Kimi、GLM、公司 OpenAI 兼容网关、官方 Claude/GPT 等，都可以在同一套 Codex / Claude Code 里选。
 
@@ -124,7 +124,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 1. 从 [Releases](https://github.com/zhangyinglong3550/switchyard/releases) 安装并打开  
 2. **供应商** → 选模板或自定义 → 填 API Key  
 3. **模型** → 启用要用的模型  
-4. **客户端** → 同步 Codex / Claude Code / Hermes  
+4. **客户端** → 同步 Codex / Claude Code / Hermes / OpenCode  
 5. 在 Agent 里直接选模型  
 
 macOS 若提示「已损坏」：
@@ -156,7 +156,7 @@ xattr -cr /Applications/Switchyard.app
 ![架构](docs/assets/screenshots/11-architecture.png)
 
 ```
-Codex / Claude Code / Hermes / 兼容客户端
+Codex / Claude Code / Hermes / OpenCode / 兼容客户端
               │
               ▼
      Switchyard Gateway（本机）

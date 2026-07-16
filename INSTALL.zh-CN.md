@@ -8,7 +8,7 @@
 Switchyard 是一个本机多客户端 AI 模型网关和桌面管理台。它让你：
 
 - 在统一的 UI 中管理多个 AI 供应商（OpenAI / Anthropic / DeepSeek / Kimi / GLM 等）
-- 同时为 Codex、Claude Code、Hermes 提供兼容协议入口
+- 同时为 Codex、Claude Code、Hermes、OpenCode 提供兼容协议入口
 - 一键导入 cc-switch 现有配置
 - 一键写入 Codex / Claude Code / Hermes 客户端配置文件
 - 在测试台直接验证模型是否可用
@@ -97,7 +97,8 @@ export SWITCHYARD_DEEPSEEK_API_KEY="sk-..."
 |--------|----------|
 | Codex | `~/.codex/config.toml` |
 | Claude Code | `~/.claude/settings.json` |
-| Hermes | `~/.hermes/config.json` |
+| Hermes | `~/.hermes/config.yaml` |
+| OpenCode | `~/.config/opencode/opencode.json` |
 
 写入后，重启对应客户端即可看到 Switchyard provider。
 
@@ -119,6 +120,7 @@ Switchyard 同时提供 4 个客户端入口路径：
 | Codex | `http://127.0.0.1:<端口>/codex/v1` | OpenAI Responses |
 | Claude Code | `http://127.0.0.1:<端口>/claude-code` | Anthropic Messages |
 | Hermes | `http://127.0.0.1:<端口>/hermes/v1` | OpenAI Chat |
+| OpenCode | `http://127.0.0.1:<端口>/opencode/v1` | OpenAI Chat |
 | 通用 OpenAI 兼容 | `http://127.0.0.1:<端口>/v1` | OpenAI Chat |
 
 端口在「总览」tab 看到。

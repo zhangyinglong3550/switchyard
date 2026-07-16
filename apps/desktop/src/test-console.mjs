@@ -54,6 +54,7 @@ export function clientPrefix(clientId) {
     codex: "/codex",
     "claude-code": "/claude-code",
     hermes: "/hermes",
+    opencode: "/opencode",
     "generic-openai": ""
   };
   return map[clientId] ?? "";

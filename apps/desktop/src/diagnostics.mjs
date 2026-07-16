@@ -79,7 +79,8 @@ function targetUrls({ host = "127.0.0.1", port = 17888 } = {}) {
     origin,
     codex: `${origin}/codex/v1`,
     claudeCode: `${origin}/claude-code`,
-    hermes: `${origin}/hermes/v1`
+    hermes: `${origin}/hermes/v1`,
+    opencode: `${origin}/opencode/v1`
   };
 }
 
@@ -322,12 +323,27 @@ function detectHermesConfig(yamlText, urls) {
   return statusResult("drifted", "Hermes 配置未指向 Switchyard", { expected: urls.hermes });
 }
 
+function detectOpenCodeConfig(settings, urls) {
+  if (settings == null) return statusResult("missing", "未找到 OpenCode 配置", { expected: urls.opencode });
+  const text = asText(settings);
+  const hasBase =
+    text.includes(urls.opencode)
+    || text.includes(`${urls.origin}/opencode`)
+    || /"baseURL"\s*:\s*"http:\/\/127\.0\.0\.1:\d+\/opencode\/v1"/.test(text);
+  const hasProvider = /"switchyard"\s*:/.test(text) || text.includes("@ai-sdk/openai-compatible");
+  if (hasBase && hasProvider) {
+    return statusResult("ok", "OpenCode 已指向 Switchyard", { expected: urls.opencode });
+  }
+  return statusResult("drifted", "OpenCode 配置未指向 Switchyard", { expected: urls.opencode });
+}
+
 export function doctorClientConfigContents(options = {}) {
   const urls = targetUrls(options);
   return {
     codex: detectCodexConfig(options.codexText, urls),
     "claude-code": detectClaudeCodeConfig(options.claudeSettings, urls),
-    hermes: detectHermesConfig(options.hermesYamlText, urls)
+    hermes: detectHermesConfig(options.hermesYamlText, urls),
+    opencode: detectOpenCodeConfig(options.openCodeSettings, urls)
   };
 }
 
@@ -355,16 +371,24 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
   const claudePath = path.join(home, ".claude", "settings.json");
   // Hermes 只读取 config.yaml；config.json 不再参与诊断。
   const hermesYamlPath = path.join(home, ".hermes", "config.yaml");
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const openCodePath = path.join(
+    xdg && String(xdg).trim() ? String(xdg).trim() : path.join(home, ".config"),
+    "opencode",
+    "opencode.json"
+  );
   const codexText = readTextMaybe(codexPath);
   const claudeSettings = readJsonMaybe(claudePath);
   const hermesYamlText = readTextMaybe(hermesYamlPath);
+  const openCodeSettings = readJsonMaybe(openCodePath);
 
   const contents = doctorClientConfigContents({
     host,
     port,
     codexText: typeof codexText === "string" ? codexText : null,
     claudeSettings: claudeSettings && !claudeSettings.unreadable ? claudeSettings : null,
-    hermesYamlText: typeof hermesYamlText === "string" ? hermesYamlText : null
+    hermesYamlText: typeof hermesYamlText === "string" ? hermesYamlText : null,
+    openCodeSettings: openCodeSettings && !openCodeSettings.unreadable ? openCodeSettings : null
   });
 
   return {
@@ -372,12 +396,14 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     paths: {
       codex: codexPath,
       "claude-code": claudePath,
-      hermes: hermesYamlPath
+      hermes: hermesYamlPath,
+      opencode: openCodePath
     },
     errors: [
       codexText?.unreadable && { client: "codex", ...codexText },
       claudeSettings?.unreadable && { client: "claude-code", ...claudeSettings },
-      hermesYamlText?.unreadable && { client: "hermes", ...hermesYamlText }
+      hermesYamlText?.unreadable && { client: "hermes", ...hermesYamlText },
+      openCodeSettings?.unreadable && { client: "opencode", ...openCodeSettings }
     ].filter(Boolean)
   };
 }
