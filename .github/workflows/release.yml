@@ -69,9 +69,13 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact_name: switchyard-macos
-            package_command: npm run desktop:dmg -- --arm64 --x64 --publish never
-            artifact_path: dist/*.dmg
+            artifact_name: switchyard-macos-arm64
+            package_command: npm run desktop:dmg -- --arm64 --publish never
+            artifact_path: dist/*-arm64.dmg
+          - os: macos-13
+            artifact_name: switchyard-macos-x64
+            package_command: npm run desktop:dmg -- --x64 --publish never
+            artifact_path: dist/*-x64.dmg
           - os: windows-latest
             artifact_name: switchyard-windows
             package_command: npm run desktop:win -- --publish never
