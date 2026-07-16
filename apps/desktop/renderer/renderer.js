@@ -1058,6 +1058,25 @@ const PROFILE_META = {
   grok: { label: "Grok Build", file: "~/.grok/config.toml", entry: "/grok/v1", note: "写入托管块 [model.sy-*]（OpenAI chat_completions + base_url）。首次一键写入后，增/改/启模型会自动刷新；Grok 用 /model 或 Ctrl+M 切换，短 id 为 sy-…。" }
 };
 
+/** 客户端卡片固定顺序：一键写入类优先，OpenCode / Grok 紧随 Hermes，避免被挤到视口外 */
+const CLIENT_CARD_ORDER = ["codex", "claude-code", "hermes", "opencode", "grok", "generic-openai"];
+
+function orderedClientEntries(clients = {}) {
+  const map = clients && typeof clients === "object" ? clients : {};
+  const seen = new Set();
+  const out = [];
+  for (const id of CLIENT_CARD_ORDER) {
+    if (!(id in map)) continue;
+    seen.add(id);
+    out.push([id, map[id]]);
+  }
+  for (const [id, filter] of Object.entries(map)) {
+    if (seen.has(id)) continue;
+    out.push([id, filter]);
+  }
+  return out;
+}
+
 const CLAUDE_CODE_MAPPING_SLOTS = [
   ["haiku", "Haiku"],
   ["sonnet", "Sonnet"],
@@ -1122,7 +1141,7 @@ function renderClients() {
   const { config } = state;
   const grid = document.getElementById("clients-grid");
   grid.innerHTML = "";
-  const clients = Object.entries(config.clients || {});
+  const clients = orderedClientEntries(config.clients || {});
   for (const [id, filter] of clients) {
     const visible = modelsForClient(id);
     const meta = PROFILE_META[id];

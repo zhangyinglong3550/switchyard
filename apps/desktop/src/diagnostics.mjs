@@ -41,7 +41,7 @@ const CATEGORY_HINTS = {
   },
   client_config: {
     title: "客户端配置漂移",
-    hint: "重新安装对应客户端配置，让 Codex、Claude Code 或 Hermes 指回 Switchyard。"
+    hint: "重新安装对应客户端配置，让 Codex、Claude Code、Hermes、OpenCode 或 Grok Build 指回 Switchyard。"
   },
   unknown: {
     title: "未知错误",

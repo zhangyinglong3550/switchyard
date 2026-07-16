@@ -19,3 +19,14 @@ test('renderer provider/model copy controls stay outside table cell protocol mar
   assert.match(text, /function duplicateProviderRow\(providerId\) \{/);
   assert.match(text, /function duplicateModelRow\(modelId\) \{/);
 });
+
+test('clients tab lists OpenCode and Grok with stable card order', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  assert.match(html, /一键写入 \/ 恢复 Codex、Claude Code、Hermes、OpenCode、Grok Build 配置/);
+  assert.match(js, /const CLIENT_CARD_ORDER = \["codex", "claude-code", "hermes", "opencode", "grok", "generic-openai"\]/);
+  assert.match(js, /function orderedClientEntries\(/);
+  assert.match(js, /const clients = orderedClientEntries\(config\.clients \|\| \{\}\)/);
+  assert.match(js, /opencode: \{ label: "OpenCode"/);
+  assert.match(js, /grok: \{ label: "Grok Build"/);
+});
