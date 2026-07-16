@@ -70,7 +70,7 @@ jobs:
         include:
           - os: macos-latest
             artifact_name: switchyard-macos
-            package_command: npm run desktop:dmg -- --publish never
+            package_command: npm run desktop:dmg -- --arm64 --x64 --publish never
             artifact_path: dist/*.dmg
           - os: windows-latest
             artifact_name: switchyard-windows
