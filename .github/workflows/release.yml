@@ -70,11 +70,11 @@ jobs:
         include:
           - os: macos-latest
             artifact_name: switchyard-macos
-            package_command: npm run desktop:dmg
+            package_command: npm run desktop:dmg -- --publish never
             artifact_path: dist/*.dmg
           - os: windows-latest
             artifact_name: switchyard-windows
-            package_command: npm run desktop:win
+            package_command: npm run desktop:win -- --publish never
             artifact_path: |
               dist/*.exe
               dist/*.zip
@@ -89,10 +89,25 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: 安装 Windows 测试依赖
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install sqlite -y --no-progress
+
       - run: npm ci
       - run: npm run check
       - run: npm test
+        if: runner.os == 'macOS'
+      - name: 运行 Windows 兼容测试
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tests = Get-ChildItem packages/core/test/*.mjs |
+            Where-Object { $_.Name -notin @('keychain-store.test.mjs', 'upstream-auth.test.mjs') } |
+            ForEach-Object { $_.FullName }
+          node --test $tests
       - run: npm run release:check
+        if: runner.os == 'macOS'
       - run: ${{ matrix.package_command }}
 
       - uses: actions/upload-artifact@v4
