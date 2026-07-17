@@ -8,6 +8,7 @@ import {
 import { modelIdConflict } from "./model-form-utils.mjs";
 import { normalizeDiscoveredModelForProvider, selectedImportResult as buildSelectedImportResult } from "./import-selection-utils.mjs";
 import { buildTestRequest, parseTestMessages } from "../src/test-console.mjs";
+import { buildSetupProgress, providerCredentialState } from "./setup-utils.mjs";
 
 const { invoke, onLog, onUpdateAvailable, onUpdateProgress } = window.lls;
 
@@ -512,9 +513,48 @@ function renderOverview() {
   document.getElementById("ov-config").textContent = configPath || "-";
   document.getElementById("ov-providers").textContent = config.providers.length;
   document.getElementById("ov-models").textContent = config.models.length;
-  const ready = config.providers.filter((p) => p.apiKey || (p.apiKeyEnv && false)).length; // env presence checked in main
   document.getElementById("overview-subtitle").textContent =
     `共 ${config.providers.length} 个供应商 · ${config.models.length} 个模型`;
+
+  const setupProgress = document.getElementById("overview-setup-progress");
+  const setupSummary = document.getElementById("overview-setup-summary");
+  const nextStep = document.getElementById("overview-next-step");
+  const progress = buildSetupProgress(config, status, state.providerHealth);
+  setupSummary.textContent = `${progress.completed}/${progress.checks.length} 项已完成`;
+  setupProgress.innerHTML = progress.checks.map((item) => `<button class="setup-step ${item.done ? "done" : "pending"}" data-setup-action="${item.id}"><span class="setup-step-mark">${item.done ? "✓" : "○"}</span>${item.label}</button>`).join("");
+  const action = progress.next;
+  if (!action) {
+    nextStep.innerHTML = `<span class="chip good">配置已就绪</span><span>可以开始使用客户端，或运行自检确认连通性。</span>`;
+  } else if (action.id === "provider" || action.id === "credential") {
+    nextStep.innerHTML = `<span>下一步：${action.id === "provider" ? "添加一个供应商" : "为供应商补充 API Key 或账号池"}</span><button class="btn primary" data-overview-action="provider">${action.id === "provider" ? "新增供应商" : "检查供应商"}</button>`;
+  } else if (action.id === "model") {
+    nextStep.innerHTML = `<span>下一步：添加一个可用模型</span><button class="btn primary" data-overview-action="model">新增模型</button>`;
+  } else {
+    nextStep.innerHTML = `<span>下一步：启动本地网关</span><button class="btn primary" data-overview-action="start">启动网关</button>`;
+  }
+  nextStep.querySelector("[data-overview-action='provider']")?.addEventListener("click", () => {
+    const provider = action?.id === "credential"
+      ? config.providers.find((item) => providerCredentialState(item, state.providerHealth?.[item.id]) === "missing") || config.providers[0]
+      : null;
+    setActiveTab("providers");
+    openProviderDialog(provider?.id || null);
+  });
+  nextStep.querySelector("[data-overview-action='model']")?.addEventListener("click", () => openModelDialog(null));
+  nextStep.querySelector("[data-overview-action='start']")?.addEventListener("click", () => runGatewayAction("start"));
+  setupProgress.querySelectorAll("[data-setup-action]").forEach((button) => button.addEventListener("click", () => {
+    const target = button.dataset.setupAction;
+    if (target === "provider" || target === "credential") {
+      setActiveTab("providers");
+      const provider = target === "credential"
+        ? config.providers.find((item) => providerCredentialState(item, state.providerHealth?.[item.id]) === "missing") || config.providers[0]
+        : null;
+      openProviderDialog(provider?.id || null);
+    } else if (target === "model") {
+      setActiveTab("models");
+    } else if (target === "gateway") {
+      runGatewayAction("start");
+    }
+  }));
 
   const ovEndpoints = document.getElementById("ov-endpoints");
   ovEndpoints.innerHTML = "";
@@ -531,14 +571,28 @@ function renderOverview() {
     ["Grok Build", `${base}/grok/v1`],
     ["通用 OpenAI", `${base}/v1`]
   ];
+  const copyAll = document.createElement("button");
+  copyAll.className = "btn endpoint-copy-all";
+  copyAll.textContent = "复制全部地址";
+  copyAll.addEventListener("click", () => copyText(rows.map(([label, url]) => `${label}: ${url}`).join("\n"), "已复制全部接入地址"));
+  ovEndpoints.appendChild(copyAll);
   for (const [label, url] of rows) {
     const row = document.createElement("div");
     row.className = "endpoint-row";
     row.innerHTML = `<span class="label">${escapeHtml(label)}</span><span class="mono">${escapeHtml(url)}</span><button class="btn icon" title="复制">⎘</button>`;
     row.querySelector("button").addEventListener("click", () => {
-      navigator.clipboard.writeText(url).then(() => toast(`已复制：${url}`));
+      copyText(url, `已复制：${url}`);
     });
     ovEndpoints.appendChild(row);
+  }
+}
+
+async function copyText(text, successMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(successMessage);
+  } catch (err) {
+    toast(`复制失败：${err?.message || String(err)}`);
   }
 }
 
@@ -941,6 +995,11 @@ function renderProviders() {
   document.getElementById("providers-subtitle").textContent = `${config.providers.length} 个供应商 · ${config.models.length} 个模型`;
   const tbody = document.getElementById("providers-tbody");
   tbody.innerHTML = "";
+  if (!config.providers.length) {
+    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div>暂无供应商</div><button class="btn primary" data-empty-action="provider">新增供应商</button></div></td></tr>`;
+    tbody.querySelector("[data-empty-action='provider']").addEventListener("click", () => openProviderDialog(null));
+    return;
+  }
   for (const p of config.providers) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -1013,6 +1072,12 @@ function renderModels() {
       m.upstreamModel.toLowerCase().includes(q) ||
       (m.aliases || []).some((a) => a.toLowerCase().includes(q));
   });
+  if (!filtered.length) {
+    const message = config.models.length ? "没有匹配的模型" : "还没有添加模型";
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div>${message}</div><button class="btn primary" data-empty-action="model">新增模型</button></div></td></tr>`;
+    tbody.querySelector("[data-empty-action='model']").addEventListener("click", () => openModelDialog(null));
+    return;
+  }
   for (const m of filtered) {
     const tr = document.createElement("tr");
     const caps = [
@@ -2649,18 +2714,22 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
   const keychainSecret = data._keychainSecret;
   delete data._keychainSecret;
   const editId = form._editId;
-  if (data.authMode === "keychain" && keychainSecret) {
-    await invoke("keychain:set", { account: data.keychainAccount || data.id, secret: keychainSecret });
+  const submitter = e.submitter || form.querySelector('button[type="submit"]');
+  if (submitter) {
+    submitter.disabled = true;
+    submitter.textContent = "保存中…";
   }
-  if (data.authMode === "account_pool" && data.poolStrategy) {
-    try {
+  try {
+    if (data.authMode === "keychain" && keychainSecret) {
+      await invoke("keychain:set", { account: data.keychainAccount || data.id, secret: keychainSecret });
+    }
+    if (data.authMode === "account_pool" && data.poolStrategy) {
       await invoke("account-pool:set-strategy", {
         providerId: data.id,
         poolKind: data.poolKind || "xai_oauth",
         strategy: data.poolStrategy
       });
-    } catch {}
-  }
+    }
   let providers = [...state.config.providers];
   const discoveredModels = state.providerDiscovery
     .filter((item) => item.enabled)
@@ -2702,10 +2771,18 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
     for (const item of discoveredModels) if (!existingIds.has(item.id)) models.push({ ...item, providerId: newId });
   }
   const next = { ...state.config, providers, models };
-  await invoke("config:save", next);
-  await refreshAll().then(() => checkFirstLaunch());
-  toast(editId ? "供应商已更新" : "供应商已新增");
-  form.closest(".dialog-overlay").classList.remove("open");
+    await invoke("config:save", next);
+    await refreshAll().then(() => checkFirstLaunch());
+    toast(editId ? "供应商已更新" : "供应商已新增");
+    form.closest(".dialog-overlay").classList.remove("open");
+  } catch (err) {
+    toast(`保存失败：${err?.message || String(err)}`);
+  } finally {
+    if (submitter) {
+      submitter.disabled = false;
+      submitter.textContent = "保存";
+    }
+  }
 });
 document.getElementById("provider-dialog-wrap").querySelector("[data-close]").addEventListener("click", () => {
   document.getElementById("provider-dialog-wrap").classList.remove("open");
@@ -2991,26 +3068,24 @@ async function removeModel(id) {
 }
 
 /* ---- Service Controls ---- */
-document.getElementById("btn-start").addEventListener("click", async () => {
-  const s = await invoke("gateway:start");
-  await refreshAll();
-  toast(`服务已启动 · ${s.host}:${s.port}`);
-});
-document.getElementById("btn-stop").addEventListener("click", async () => {
-  await invoke("gateway:stop");
-  await refreshAll();
-  toast("服务已停止");
-});
-document.getElementById("btn-restart").addEventListener("click", async () => {
-  const s = await invoke("gateway:restart");
-  await refreshAll();
-  toast(`服务已重启 · ${s.host}:${s.port}`);
-});
-document.getElementById("btn-reload").addEventListener("click", async () => {
-  await invoke("gateway:reload");
-  await refreshAll();
-  toast("配置已热重载");
-});
+async function runGatewayAction(action) {
+  const buttons = [...document.querySelectorAll(`[data-gateway-action="${action}"], #btn-${action}`)];
+  buttons.forEach((button) => { button.disabled = true; button.dataset.originalText ||= button.textContent; button.textContent = "处理中…"; });
+  try {
+    const result = await invoke(`gateway:${action}`);
+    await refreshAll();
+    const message = action === "reload" ? "配置已热重载" : `服务已${action === "start" ? "启动" : action === "stop" ? "停止" : "重启"}${result?.host ? ` · ${result.host}:${result.port}` : ""}`;
+    toast(message);
+  } catch (err) {
+    toast(`网关操作失败：${err?.message || String(err)}`);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; button.textContent = button.dataset.originalText || button.textContent; });
+  }
+}
+document.getElementById("btn-start").addEventListener("click", () => runGatewayAction("start"));
+document.getElementById("btn-stop").addEventListener("click", () => runGatewayAction("stop"));
+document.getElementById("btn-restart").addEventListener("click", () => runGatewayAction("restart"));
+document.getElementById("btn-reload").addEventListener("click", () => runGatewayAction("reload"));
 
 /* ---- Doctor ---- */
 document.getElementById("btn-doctor").addEventListener("click", async () => {

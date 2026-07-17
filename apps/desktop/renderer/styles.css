@@ -423,6 +423,32 @@ body {
   flex: 0 0 auto;
 }
 
+.setup-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.setup-step {
+  border: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: var(--bg-strong);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.setup-step.done { color: var(--good); background: var(--good-soft); }
+.setup-step:hover { border-color: var(--accent); color: var(--accent-strong); }
+.setup-step-mark { font-weight: 700; }
+.setup-next-step { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: var(--text-muted); font-size: 13px; }
+.setup-next-step > span:first-child { flex: 1; }
+.endpoint-copy-all { margin-bottom: 8px; }
+
 .page-title {
   font-size: 20px;
   font-weight: 700;
@@ -1969,6 +1995,10 @@ table.data.compact td {
 
 /* ── Empty state ── */
 .empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   padding: 16px;
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
