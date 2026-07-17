@@ -28,7 +28,7 @@ test("codex profile · merges with existing TOML without losing user blocks", ()
   assert.match(text, /model_provider = "custom"/);
   assert.match(text, /\[model_providers\.custom\]/);
   assert.match(text, /wire_api = "responses"/);
-  assert.match(text, /requires_openai_auth = true/);
+  assert.match(text, /requires_openai_auth = false/);
   assert.match(text, /supports_websockets = false/);
   assert.match(text, /experimental_bearer_token = "dummy"/);
   assert.match(text, /request_max_retries = 5/);
@@ -69,7 +69,7 @@ test("codex profile · official direct removes Switchyard routing without touchi
     'name = "Switchyard"',
     'base_url = "http://127.0.0.1:17888/codex/v1"',
     'wire_api = "responses"',
-    'requires_openai_auth = true',
+    'requires_openai_auth = false',
     ''
   ].join("\n"), "utf8");
 
@@ -100,7 +100,7 @@ test("codex profile · official direct preserves non-Switchyard custom provider"
     'name = "OpenAI"',
     'base_url = "https://api.openai.com/v1"',
     'wire_api = "responses"',
-    'requires_openai_auth = true',
+    'requires_openai_auth = false',
     ''
   ].join("\n"), "utf8");
 
@@ -170,7 +170,7 @@ test("codex profile · writes model catalog for Codex App model picker", () => {
   assert.match(ccSwitchProfile, /model_provider = "custom"/);
   assert.match(ccSwitchProfile, /model_catalog_json = ".*cc-switch-model-catalog\.json"/);
   assert.match(ccSwitchProfile, /base_url = "http:\/\/127\.0\.0\.1:17888\/codex\/v1"/);
-  assert.match(ccSwitchProfile, /requires_openai_auth = true/);
+  assert.match(ccSwitchProfile, /requires_openai_auth = false/);
   assert.match(ccSwitchProfile, /request_max_retries = 5/);
 });
 
@@ -202,7 +202,7 @@ test("codex profile · repairs model cache drift when Switchyard custom provider
     'name = "Switchyard"',
     'base_url = "http://127.0.0.1:17888/codex/v1"',
     'wire_api = "responses"',
-    "requires_openai_auth = true",
+    "requires_openai_auth = false",
     ""
   ].join("\n"), "utf8");
   fs.writeFileSync(pw.codexModelsCachePath(), JSON.stringify({
@@ -238,7 +238,7 @@ test("codex profile · skips model cache repair when custom provider is not Swit
     "[model_providers.custom]",
     'name = "OpenAI"',
     'base_url = "https://api.openai.com/v1"',
-    "requires_openai_auth = true",
+    "requires_openai_auth = false",
     ""
   ].join("\n"), "utf8");
   const before = JSON.stringify({
@@ -353,7 +353,7 @@ test("codex profile · re-apply replaces custom provider block for Codex session
     "",
     "[model_providers.custom]",
     'name = "OpenAI"',
-    "requires_openai_auth = true",
+    "requires_openai_auth = false",
     'wire_api = "responses"',
     ""
   ].join("\n"), "utf8");

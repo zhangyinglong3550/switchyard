@@ -259,7 +259,7 @@ export function renderCcSwitchGatewayProfile({ host, port, defaultModel } = {}) 
     `name = "Switchyard"`,
     `base_url = "${base}/codex/v1"`,
     `wire_api = "responses"`,
-    `requires_openai_auth = true`,
+    `requires_openai_auth = false`,
     `supports_websockets = false`,
     `experimental_bearer_token = "dummy"`,
     `request_max_retries = 5`,
@@ -291,7 +291,7 @@ function renderCodexProviderBlock({ host, port } = {}) {
     `name = "Switchyard"`,
     `base_url = "${base}"`,
     `wire_api = "responses"`,
-    `requires_openai_auth = true`,
+    `requires_openai_auth = false`,
     `supports_websockets = false`,
     `experimental_bearer_token = "dummy"`,
     `request_max_retries = 5`,
@@ -1572,7 +1572,7 @@ export function renderCodexProviderDirectBlock({
     `name = ${tomlString(name || "Provider Direct")}`,
     `base_url = ${tomlString(String(baseUrl || "").replace(/\/+$/, ""))}`,
     `wire_api = ${tomlString(wireApi)}`,
-    `requires_openai_auth = true`,
+    `requires_openai_auth = false`,
     `experimental_bearer_token = ${tomlString(apiKey || "")}`
   );
   if (disableImageGeneration) {
