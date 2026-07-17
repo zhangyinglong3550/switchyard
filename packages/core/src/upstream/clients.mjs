@@ -6,7 +6,7 @@ import path from "node:path";
 import dns from "node:dns";
 import { ProxyAgent } from "undici";
 import { safeJsonParse } from "../utils.mjs";
-import { getProviderKeychainSecret, hasKeychainSecret } from "../keychain-store.mjs";
+import { getProviderKeychainSecret, hasKeychainSecret, keychainAccountForProvider } from "../keychain-store.mjs";
 import { accountPoolReady, isAccountPoolProvider } from "../account-pool/index.mjs";
 import {
   ANTHROPIC_API_VERSION,
@@ -314,7 +314,7 @@ export function providerReady(provider) {
     return Boolean(auth.ok && (auth.accessToken || auth.refreshToken));
   }
   if (provider.authMode === "none") return true;
-  if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(provider);
+  if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(keychainAccountForProvider(provider));
   if (provider.apiKey) return true;
   if (!provider.apiKeyEnv) return true;
   return Boolean(process.env[provider.apiKeyEnv]);

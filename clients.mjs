@@ -6,7 +6,7 @@ import path from "node:path";
 import dns from "node:dns";
 import { ProxyAgent } from "undici";
 import { safeJsonParse } from "../utils.mjs";
-import { getProviderKeychainSecret, hasKeychainSecret } from "../keychain-store.mjs";
+import { getProviderKeychainSecret, hasKeychainSecret, keychainAccountForProvider } from "../keychain-store.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
@@ -188,7 +188,7 @@ export function providerReady(provider) {
   if (!provider?.baseUrl) return false;
   if (isCodexOAuthProvider(provider)) return readCodexOAuthAuth({ provider }).ok;
   if (provider.authMode === "none") return true;
-  if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(provider);
+  if (provider.authMode === "keychain" || provider.keychainAccount) return hasKeychainSecret(keychainAccountForProvider(provider));
   if (provider.apiKey) return true;
   if (!provider.apiKeyEnv) return true;
   return Boolean(process.env[provider.apiKeyEnv]);
