@@ -940,12 +940,15 @@ function refreshTrayMenu() {
 function createTray() {
   if (tray) return tray;
   const trayIconPath = path.resolve(__dirname, "..", "assets", "tray.png");
-  let image = nativeImage.createFromPath(trayIconPath);
+  // 注意：nativeImage.createFromPath 读不到 asar 内的路径（返回空图），打包后托盘会不可见。
+  // 用 fs.readFileSync（支持 asar）+ createFromBuffer，保证打包后图标正常。
+  let image = nativeImage.createEmpty();
+  try { image = nativeImage.createFromBuffer(fs.readFileSync(trayIconPath)); } catch {}
   // macOS 菜单栏按 22px 高度显示，避免大图变形。
   if (process.platform === "darwin" && !image.isEmpty()) {
     image = image.resize({ width: 18, height: 18 });
   }
-  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray = new Tray(image);
   tray.setToolTip("Switchyard");
   tray.setContextMenu(buildTrayMenu());
   // 右键时重建菜单，反映最新网关状态；单击唤出窗口。
