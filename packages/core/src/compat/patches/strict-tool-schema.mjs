@@ -34,6 +34,14 @@ function sanitizeSchema(schema) {
       out.type = withoutNull.length === 1 ? withoutNull[0] : withoutNull;
       continue;
     }
+    // 严格上游（Kimi/Moonshot 等）会拒绝 enum 里的 null：即使 type 折叠成 "string"，
+    // 残留的 null 枚举值仍会触发 "enum value (<nil>) does not match any type in [string]"。
+    // 这里与上面的 type-null 折叠配对，剥掉 enum 中的 null；清空则去掉约束而非留空 enum。
+    if (key === "enum" && Array.isArray(value)) {
+      const withoutNull = value.filter((item) => item != null);
+      if (withoutNull.length) out.enum = withoutNull;
+      continue;
+    }
     if (key === "additionalProperties" && value && typeof value === "object") {
       out.additionalProperties = false;
       continue;
@@ -70,12 +78,14 @@ export const strictToolSchemaPatch = {
     "补齐 tools[].type = function 和 tools[].function",
     "移除 $schema、$id、examples、deprecated 和 null default",
     "展开单分支 anyOf/oneOf，移除 type 数组中的 null",
+    "移除 enum 数组中的 null（严格上游拒绝 null 枚举值）",
     "把对象型 additionalProperties 收敛为 false"
   ],
   risk: "可能降低复杂工具 schema 表达力；只在目标 provider/model 请求前改写。",
   tests: [
     "strict-tool-schema · normalizes loose function tool shape",
-    "strict-tool-schema · removes nullable and unsupported schema keywords"
+    "strict-tool-schema · removes nullable and unsupported schema keywords",
+    "strict-tool-schema · strips null from enum arrays for strict providers"
   ],
   match(ctx) { return targeted(ctx); },
   outbound(body) {

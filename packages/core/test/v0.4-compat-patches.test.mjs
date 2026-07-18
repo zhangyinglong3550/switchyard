@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerPatch, applyOutbound, applyInbound, applyStreamLine, resetPatches, listPatchIds } from "../src/compat/index.mjs";
 import { kimiToolSchemaPatch } from "../src/compat/patches/kimi-tool-schema.mjs";
+import { strictToolSchemaPatch } from "../src/compat/patches/strict-tool-schema.mjs";
 import { deepseekReasoningPatch } from "../src/compat/patches/deepseek-reasoning.mjs";
 import { glmContentTextPatch } from "../src/compat/patches/glm-content-text.mjs";
 import { opencodeToolHistoryPatch } from "../src/compat/patches/opencode-tool-history.mjs";
@@ -63,6 +64,83 @@ testPatch("kimi-tool-schema · does NOT touch non-Kimi providers", () => {
   };
   const out = applyOutbound(body, { provider: { id: "xyz" }, model: { id: "xyz/m" } });
   assert.equal(out.tools[0].function.parameters.$schema, "x");
+});
+
+// ── 1b. Strict tool schema (kimi pack member) ──────────────────────────────
+
+testPatch("strict-tool-schema · collapses nullable type and strips null from enum", () => {
+  registerPatch(strictToolSchemaPatch.id, strictToolSchemaPatch);
+  // 复刻 Grok todo_write.status 的真实 schema：type 含 null + enum 含 null。
+  // Moonshot 会因 "enum value (<nil>) does not match any type in [string]" 拒绝。
+  const ctx = { provider: { id: "wokey" }, model: { id: "wokey/kimi-k3" } };
+  const body = {
+    model: "wokey/kimi-k3",
+    tools: [{
+      type: "function",
+      function: {
+        name: "todo_write",
+        parameters: {
+          type: "object",
+          properties: {
+            todos: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  status: {
+                    type: ["string", "null"],
+                    enum: ["pending", "in_progress", "completed", "cancelled", null]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }]
+  };
+
+  const out = applyOutbound(body, ctx);
+  const status = out.tools[0].function.parameters.properties.todos.items.properties.status;
+  assert.equal(status.type, "string", "nullable type collapsed to single string");
+  assert.deepEqual(status.enum, ["pending", "in_progress", "completed", "cancelled"], "null stripped from enum");
+  assert.ok(!status.enum.includes(null), "no null remains in enum");
+});
+
+testPatch("strict-tool-schema · drops enum when only null remains", () => {
+  registerPatch(strictToolSchemaPatch.id, strictToolSchemaPatch);
+  const ctx = { provider: { id: "kimi" }, model: { id: "kimi/k2" } };
+  const body = {
+    model: "kimi/k2",
+    tools: [{
+      type: "function",
+      function: {
+        name: "f",
+        parameters: { type: "object", properties: { x: { type: ["string", "null"], enum: [null] } } }
+      }
+    }]
+  };
+  const out = applyOutbound(body, ctx);
+  const x = out.tools[0].function.parameters.properties.x;
+  assert.equal(x.type, "string");
+  assert.equal(x.enum, undefined, "empty enum dropped instead of left as []");
+});
+
+testPatch("strict-tool-schema · leaves non-null enums untouched", () => {
+  registerPatch(strictToolSchemaPatch.id, strictToolSchemaPatch);
+  const ctx = { provider: { id: "kimi" }, model: { id: "kimi/k2" } };
+  const body = {
+    model: "kimi/k2",
+    tools: [{
+      type: "function",
+      function: {
+        name: "f",
+        parameters: { type: "object", properties: { x: { type: "string", enum: ["a", "b"] } } }
+      }
+    }]
+  };
+  const out = applyOutbound(body, ctx);
+  assert.deepEqual(out.tools[0].function.parameters.properties.x.enum, ["a", "b"]);
 });
 
 // ── 2. DeepSeek reasoning_content ──────────────────────────────────────────
