@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.14 — 2026-07-19
+
+### Fix
+
+- **Chat → Responses 透传思考档位**：`chatToResponses` 现会把客户端的 `reasoning` / `reasoning_effort` 写成 Responses 原生 `reasoning` 对象（对齐 CC Switch / Codex++）。修复 Hermes / OpenCode 等 Chat 客户端走 Codex Responses 上游时思考等级丢失。
+- **请求日志记录 reasoning 参数**：`request_summary.params` 增加 `reasoning` / `reasoningEffort` / `thinking` 等字段，便于对照日志验证是否传到网关。
+
 ## 2.2.13 — 2026-07-19
 
 ### Feat

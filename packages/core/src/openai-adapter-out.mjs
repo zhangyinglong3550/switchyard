@@ -83,7 +83,47 @@ export function chatToResponses(body, upstreamModel) {
       .map((t) => ({ type: "function", name: t.function?.name || t.name, description: t.function?.description || t.description, parameters: t.function?.parameters || t.parameters }));
   }
   if (body.tool_choice !== undefined) out.tool_choice = toolChoiceToResponsesToolChoice(body.tool_choice);
+  applyChatReasoningToResponses(out, body);
   return out;
+}
+
+/**
+ * Chat 客户端（Hermes / OpenCode / Grok 等）→ Responses 上游时，把思考档位写回
+ * Responses 原生 `reasoning` 对象。对齐 CC Switch / Codex++：转换层必须显式处理 effort，
+ * 不能只搬 messages。
+ *
+ * 接受形态：
+ * - reasoning: { effort, summary, ... }  → 原样（浅拷贝）
+ * - reasoning: "high" / true / false     → 归一成 { effort }
+ * - reasoning_effort: "low"              → { effort: "low" }
+ * reasoning 对象优先于顶层 reasoning_effort。
+ */
+function applyChatReasoningToResponses(out, body) {
+  if (!body || typeof body !== "object") return;
+
+  if (Object.prototype.hasOwnProperty.call(body, "reasoning") && body.reasoning !== undefined) {
+    const reasoning = body.reasoning;
+    if (reasoning == null || reasoning === false) {
+      out.reasoning = { effort: "none" };
+      return;
+    }
+    if (typeof reasoning === "string") {
+      out.reasoning = { effort: reasoning };
+      return;
+    }
+    if (typeof reasoning === "object" && !Array.isArray(reasoning)) {
+      out.reasoning = { ...reasoning };
+      return;
+    }
+    if (reasoning === true) {
+      out.reasoning = { effort: "high" };
+      return;
+    }
+  }
+
+  if (body.reasoning_effort !== undefined && body.reasoning_effort !== null && body.reasoning_effort !== "") {
+    out.reasoning = { effort: String(body.reasoning_effort) };
+  }
 }
 
 function reasoningItemsFromChatMessage(message) {

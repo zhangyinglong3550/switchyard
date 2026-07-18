@@ -333,7 +333,14 @@ function summarizeRequest(chatBody, route, protocol) {
       stream: Boolean(chatBody.stream),
       temperature: chatBody.temperature,
       maxTokens: chatBody.max_tokens,
-      toolChoice: chatBody.tool_choice
+      toolChoice: chatBody.tool_choice,
+      // 思考档位：便于对照日志验证是否传到网关（chat→Responses 透传依赖这些字段）
+      reasoning: chatBody.reasoning,
+      reasoningEffort: chatBody.reasoning_effort
+        ?? (chatBody.reasoning && typeof chatBody.reasoning === "object" ? chatBody.reasoning.effort : undefined),
+      thinking: chatBody.thinking,
+      enableThinking: chatBody.enable_thinking,
+      reasoningSplit: chatBody.reasoning_split
     },
     messages,
     vision: chatBody._switchyardVision || null,

@@ -96,6 +96,40 @@ test("chatToResponses converts Chat tool_choice function shape for Responses", (
   assert.deepEqual(out.tool_choice, { type: "function", name: "Skill" });
 });
 
+test("chatToResponses forwards nested reasoning.effort for Responses upstream", () => {
+  const out = chatToResponses({
+    messages: [{ role: "user", content: "think" }],
+    stream: true,
+    reasoning: { effort: "high", summary: "auto" }
+  }, "gpt-5.6-luna");
+  assert.deepEqual(out.reasoning, { effort: "high", summary: "auto" });
+});
+
+test("chatToResponses maps top-level reasoning_effort to Responses reasoning object", () => {
+  const out = chatToResponses({
+    messages: [{ role: "user", content: "think" }],
+    reasoning_effort: "low"
+  }, "gpt-5.6-luna");
+  assert.deepEqual(out.reasoning, { effort: "low" });
+});
+
+test("chatToResponses prefers nested reasoning over top-level reasoning_effort", () => {
+  const out = chatToResponses({
+    messages: [{ role: "user", content: "think" }],
+    reasoning: { effort: "xhigh" },
+    reasoning_effort: "low"
+  }, "gpt-5.6-luna");
+  assert.deepEqual(out.reasoning, { effort: "xhigh" });
+});
+
+test("chatToResponses maps explicit reasoning off to effort none", () => {
+  const out = chatToResponses({
+    messages: [{ role: "user", content: "think" }],
+    reasoning: null
+  }, "gpt-5.6-luna");
+  assert.deepEqual(out.reasoning, { effort: "none" });
+});
+
 test("Anthropic thinking history survives Chat to Codex Responses conversion", () => {
   const chat = anthropicToChat({
     messages: [{

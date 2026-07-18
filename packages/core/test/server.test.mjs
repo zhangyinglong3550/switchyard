@@ -1067,7 +1067,9 @@ test("server routingMode=gateway forces Responses conversion even when protocols
   assert.equal(resp.status, 200, text);
   assert.equal(received.model, "gpt-upstream");
   assert.deepEqual(received.input, [{ type: "message", role: "user", content: "ping" }]);
-  assert.equal(received.reasoning, undefined);
+  // gateway 模式走 Responses→Chat→Responses；思考档位必须透传（对齐 CC Switch / Codex++）
+  assert.deepEqual(received.reasoning, { effort: "low" });
+  // 其它非 Chat 可表达字段仍会在往返中丢弃
   assert.equal(received.text, undefined);
   assert.equal(received.service_tier, undefined);
 });
