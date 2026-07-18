@@ -56,7 +56,16 @@ function stripReasoningFromStreamLine(line) {
       choice.delta = stripRawReasoningFields(choice.delta);
       changed = true;
     }
-    if (changed) return "data: " + JSON.stringify(parsed);
+    if (!changed) return line;
+    // 严格 chat 客户端（如 Grok Build）无法解析空 delta chunk，
+    // 删除 reasoning 字段后 delta 为空时直接吞掉这一行，避免触发 serde missing field 错误。
+    const allEmpty = choices.every((choice) => {
+      const delta = choice?.delta;
+      if (!delta || typeof delta !== "object") return true;
+      return Object.keys(delta).length === 0;
+    });
+    if (allEmpty && choices.every((choice) => choice?.finish_reason == null)) return null;
+    return "data: " + JSON.stringify(parsed);
   } catch {
     return line;
   }

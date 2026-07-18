@@ -863,8 +863,14 @@ function openCodeBaseUrl({ host, port } = {}) {
 }
 
 function openCodeModelLabel(model) {
-  const name = String(model?.displayName || model?.upstreamModel || model?.id || "").trim();
-  return name || String(model?.id || "model");
+  const base = String(model?.displayName || model?.upstreamModel || model?.id || "").trim()
+    || String(model?.id || "model");
+  // 同名模型跨供应商区分：GLM-5.2 · Coding Plan、GLM-5.2 · OpenCode Go
+  const provider = String(model?.providerName || model?.providerId || "").trim();
+  if (!provider) return base;
+  const escapedProvider = provider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`(?:·|\\(|\\[)\\s*${escapedProvider}\\s*(?:\\)|\\])?$`, "i").test(base)) return base;
+  return `${base} · ${provider}`;
 }
 
 /** OpenCode 校验要求 limit 同时有 context + output；缺省时用保守默认 */

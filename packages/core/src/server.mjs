@@ -718,6 +718,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
       return pipeStream(result.upstream, res, {
         provider: route.provider,
         model: route.model,
+        clientId,
         onStreamSummary: (summary) => {
           recordStreamDiagnostics(requestRecord, summary, { status: result.upstream?.status || 0 });
         }

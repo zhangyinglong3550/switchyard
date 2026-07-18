@@ -26,13 +26,13 @@ function supportsDirection(patch, direction) {
   return true;
 }
 
-function activePatchEntries({ provider, model, direction }) {
+function activePatchEntries({ provider, model, direction, clientId }) {
   const active = [];
   const forcedPatchIds = patchIdsFromCompatPacks(provider, model);
   for (const [id, patch] of PATCHES.entries()) {
     try {
       const forced = forcedPatchIds.has(id);
-      if (supportsDirection(patch, direction) && (forced || patch.match({ provider, model, direction }))) {
+      if (supportsDirection(patch, direction) && (forced || patch.match({ provider, model, direction, clientId }))) {
         active.push({ id, patch, source: forced ? "manual" : "auto" });
       }
     } catch {
@@ -42,8 +42,8 @@ function activePatchEntries({ provider, model, direction }) {
   return active;
 }
 
-export function activePatches({ provider, model, direction }) {
-  return activePatchEntries({ provider, model, direction }).map(({ id, patch }) => ({ id, patch }));
+export function activePatches({ provider, model, direction, clientId }) {
+  return activePatchEntries({ provider, model, direction, clientId }).map(({ id, patch }) => ({ id, patch }));
 }
 
 export function activePatchDescriptors({ provider, model, direction }) {
@@ -109,6 +109,7 @@ import { roleNormalizePatch } from "./patches/role-normalize.mjs";
 import { reasoningStatePatch } from "./patches/reasoning-state.mjs";
 import { strictToolSchemaPatch } from "./patches/strict-tool-schema.mjs";
 import { aigoChatPatch } from "./patches/aigo-chat.mjs";
+import { grokProtocolStrictPatch } from "./patches/grok-protocol-strict.mjs";
 
 export const BUILTIN_COMPAT_PACKS = [
   {
@@ -198,7 +199,8 @@ export const BUILTIN_PATCHES = [
   officialGPTFallbackPatch,
   chatReasoningPatch,
   reasoningOptionsPatch,
-  reasoningStatePatch
+  reasoningStatePatch,
+  grokProtocolStrictPatch
 ];
 
 export function registerBuiltinPatches() {
