@@ -2966,6 +2966,9 @@ function openModelDialog(editId) {
     }
     form.querySelector('[name="contextWindow"]').value = existing.contextWindow || "";
     form.querySelector('[name="maxOutputTokens"]').value = existing.maxOutputTokens || "";
+    form.querySelector('[name="priceInput"]').value = existing.pricing?.input ?? "";
+    form.querySelector('[name="priceOutput"]').value = existing.pricing?.output ?? "";
+    form.querySelector('[name="priceCurrency"]').value = existing.pricing?.currency || "USD";
   } else {
     renderClientScopeOptions("model-visible-clients", ["*"]);
     renderCompatPackOptions("model-compat-packs", []);
@@ -2997,6 +3000,11 @@ function collectModelForm() {
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
   const retry = collectRetryFromRaw(raw);
+  const priceInput = Number(raw.priceInput);
+  const priceOutput = Number(raw.priceOutput);
+  const pricing = (Number.isFinite(priceInput) && priceInput > 0) || (Number.isFinite(priceOutput) && priceOutput > 0)
+    ? { input: Number.isFinite(priceInput) && priceInput > 0 ? priceInput : 0, output: Number.isFinite(priceOutput) && priceOutput > 0 ? priceOutput : 0, currency: String(raw.priceCurrency || "USD") }
+    : undefined;
   return {
     id: String(raw.id || "").trim(),
     providerId: String(raw.providerId || "").trim(),
@@ -3008,6 +3016,7 @@ function collectModelForm() {
     visionFallbackModelId: String(raw.visionFallbackModelId || "").trim() || undefined,
     proxyUrl: String(raw.proxyUrl || "").trim() || undefined,
     ...(retry ? { retry } : {}),
+    ...(pricing ? { pricing } : {}),
     allowedClients: collectClientScopeOptions("model-visible-clients"),
     compatPacks: collectCompatPackOptions("model-compat-packs"),
     capabilities: {
@@ -3386,6 +3395,18 @@ async function refreshUsageStats() {
   state.usageRequests = requests || [];
   const usageTbody = document.getElementById("usage-tbody");
   const reqTbody = document.getElementById("request-log-tbody");
+  // 模型计价表：model_id -> { input, output, currency }（每 1M token）
+  const priceMap = new Map(
+    (state.config?.models || [])
+      .filter((m) => m && m.pricing && (m.pricing.input || m.pricing.output))
+      .map((m) => [m.id, m.pricing])
+  );
+  const CURRENCY_SYMBOL = { USD: "$", CNY: "¥" };
+  const costByCurrency = {}; // currency -> amount
+  const formatCost = (amount, currency) => {
+    const sym = CURRENCY_SYMBOL[currency] || `${currency} `;
+    return `${sym}${amount < 0.01 ? amount.toFixed(4) : amount.toFixed(2)}`;
+  };
   if (usageTbody) {
     usageTbody.innerHTML = "";
     for (const row of usage || []) {
@@ -3398,6 +3419,15 @@ async function refreshUsageStats() {
         : Number(row.success_rate);
       const rateText = rate == null || !Number.isFinite(rate) ? "—" : `${rate}%`;
       const rateClass = rate == null ? "muted" : rate >= 95 ? "chip good" : rate >= 80 ? "chip warn" : "chip bad";
+      const price = priceMap.get(row.model_id);
+      let costText = "-";
+      if (price) {
+        const cost = (Number(row.prompt_tokens || 0) / 1e6) * (price.input || 0)
+          + (Number(row.completion_tokens || 0) / 1e6) * (price.output || 0);
+        const currency = price.currency || "USD";
+        costByCurrency[currency] = (costByCurrency[currency] || 0) + cost;
+        costText = formatCost(cost, currency);
+      }
       tr.innerHTML = `
         <td>${escapeHtml(agentLabel(row.client_id))}</td>
         <td class="mono">${escapeHtml(row.model_id || "-")}</td>
@@ -3407,11 +3437,12 @@ async function refreshUsageStats() {
         <td>${escapeHtml(errors)}</td>
         <td><span class="${rateClass}">${escapeHtml(rateText)}</span></td>
         <td>${escapeHtml(row.total_tokens || 0)}</td>
+        <td>${escapeHtml(costText)}</td>
         <td>${escapeHtml(row.avg_latency_ms || 0)} ms</td>
       `;
       usageTbody.appendChild(tr);
     }
-    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="9" class="muted">暂无用量数据</td></tr>';
+    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="10" class="muted">暂无用量数据</td></tr>';
   }
   if (reqTbody) {
     reqTbody.innerHTML = "";
@@ -3446,11 +3477,15 @@ async function refreshUsageStats() {
   }, 0);
   const totalTokens = (usage || []).reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
   const overallRate = totalRequests > 0 ? Math.round((totalSuccess / totalRequests) * 1000) / 10 : null;
+  const costParts = Object.entries(costByCurrency)
+    .filter(([, v]) => v > 0)
+    .map(([cur, v]) => formatCost(v, cur));
+  const costSuffix = costParts.length ? ` · 成本 ${costParts.join(" + ")}` : "";
   const usageSummary = document.getElementById("usage-summary");
   if (usageSummary) {
     usageSummary.textContent = overallRate == null
-      ? `${totalRequests} 次 · ${totalTokens} tokens`
-      : `${totalRequests} 次 · 成功 ${totalSuccess} · 失败 ${totalErrors} · 成功率 ${overallRate}% · ${totalTokens} tokens`;
+      ? `${totalRequests} 次 · ${totalTokens} tokens${costSuffix}`
+      : `${totalRequests} 次 · 成功 ${totalSuccess} · 失败 ${totalErrors} · 成功率 ${overallRate}% · ${totalTokens} tokens${costSuffix}`;
   }
   const requestSummary = document.getElementById("request-log-summary");
   if (requestSummary) requestSummary.textContent = `${requests?.length || 0} 条`;

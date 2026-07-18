@@ -325,7 +325,7 @@
             <div class="hd"><h3>模型用量</h3><span class="sub" id="usage-summary">-</span></div>
             <div class="table-scroll medium">
               <table class="data compact" id="usage-model-table">
-                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>均延迟</th></tr></thead>
+                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>成本</th><th>均延迟</th></tr></thead>
                 <tbody id="usage-tbody"></tbody>
               </table>
             </div>
@@ -959,6 +959,20 @@
         <label>上下文窗口 <input class="field" name="contextWindow" type="number" min="0" placeholder="例：128000"></label>
         <label>最大输出 Token <input class="field" name="maxOutputTokens" type="number" min="0" placeholder="例：8192"></label>
       </div>
+      <details class="callout-details compact">
+        <summary class="callout-title">计费（可选，用于用量成本估算）</summary>
+        <div class="callout-body">按每百万 Token 计价，填后「用量统计」会估算成本。留空则不计。</div>
+        <div class="row">
+          <label>输入价格 / 1M <input class="field" name="priceInput" type="number" min="0" step="0.0001" placeholder="例：0.5"></label>
+          <label>输出价格 / 1M <input class="field" name="priceOutput" type="number" min="0" step="0.0001" placeholder="例：1.5"></label>
+          <label>币种
+            <select class="field" name="priceCurrency">
+              <option value="USD">USD</option>
+              <option value="CNY">CNY</option>
+            </select>
+          </label>
+        </div>
+      </details>
       <label>视觉兜底模型（可选）
         <select class="field" name="visionFallbackModelId" id="model-vision-fallback-select">
           <option value="">不启用</option>
