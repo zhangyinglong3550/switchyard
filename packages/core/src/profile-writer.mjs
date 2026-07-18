@@ -229,6 +229,7 @@ function stripSwitchyardManagedCodexBlock(text, { replaceModel = false } = {}) {
     if (/^model_catalog_json\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
     if (/^openai_base_url\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
     if (/^model_reasoning_effort\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
+    if (/^disable_response_storage\s*=/.test(trimmed) && (shouldStripManagedTopLevel || afterManagedMarker)) continue;
     if (/^model\s*=/.test(trimmed) && replaceModel && shouldStripManagedTopLevel) continue;
     if (/^model\s*=/.test(trimmed) && afterManagedMarker) continue;
     if (trimmed !== "") afterManagedMarker = false;
@@ -623,7 +624,19 @@ export function mergeCodexProfile(existing, { host, port, defaultModel } = {}) {
 }
 
 export function mergeCodexOfficialDirectProfile(existing) {
-  const stripped = stripSwitchyardManagedCodexBlock(existing || "", { replaceModel: true });
+  const original = existing || "";
+  // 供应商直连（provider_direct）残留：marker / custom provider / 顶层路由键都要清掉，
+  // 否则「官方直连」会留下 AI Go 等三方 base_url，看起来明显不对。
+  const hadProviderDirect = /switchyard-provider-direct/i.test(original);
+  let stripped = stripSwitchyardManagedCodexBlock(original, { replaceModel: true });
+  if (hadProviderDirect) {
+    stripped = stripped
+      .split(/\r?\n/)
+      .filter((line) => !/^#\s*managed-by:\s*switchyard-provider-direct/i.test(line.trim()))
+      .join("\n");
+    stripped = stripCustomProviderSection(stripped);
+    stripped = stripTopLevelCodexRoutingKeys(stripped);
+  }
   return stripped.replace(/\s+$/, "") + "\n";
 }
 
@@ -1420,12 +1433,53 @@ export function mergeHermesYamlProfile(existing, { host, port, models, defaultMo
 
 // ---------- Backup / Restore ----------
 
+/**
+ * 备份文件名前缀：用「父目录.文件名」消歧。
+ * 否则 ~/.codex/config.toml 与 ~/.grok/config.toml 都会变成 config.toml.*.bak，
+ * 恢复时 Codex 会捞到 Grok 的配置（格式完全不对）。
+ * 父目录名去掉前导点：.codex → codex，避免备份名以点开头。
+ */
+export function backupNamePrefix(filePath) {
+  const resolved = path.resolve(filePath);
+  const base = path.basename(resolved);
+  let parent = path.basename(path.dirname(resolved)).replace(/^\.+/, "");
+  if (!parent || parent === path.sep || parent === "/") return base;
+  // 只保留安全字符，避免路径分隔符进备份名
+  parent = parent.replace(/[^A-Za-z0-9._-]+/g, "_");
+  if (!parent) return base;
+  return `${parent}.${base}`;
+}
+
+function backupClientHint(filePath) {
+  const parent = path.basename(path.dirname(path.resolve(filePath))).replace(/^\.+/, "").toLowerCase();
+  if (parent === "codex") return "codex";
+  if (parent === "grok") return "grok";
+  return parent || "";
+}
+
+function looksLikeForeignConfigBackup(filePath, content) {
+  const client = backupClientHint(filePath);
+  const text = String(content || "");
+  // Grok Build：典型 [cli]/marketplace/xAI；Codex 恢复列表里要排除
+  const looksGrok =
+    /^\[cli\]/m.test(text) &&
+    (/official_marketplace|plugin-marketplace|xAI Official|grok-build|\[models\]/i.test(text));
+  // Codex：model_providers / computer-use notify 等
+  const looksCodex =
+    /\[model_providers/i.test(text) ||
+    /model_provider\s*=/i.test(text) ||
+    /computer-use|Codex Computer Use|cc-switch-model-catalog|managed-by-switchyard|switchyard-provider-direct/i.test(text);
+  if (client === "codex" && looksGrok && !looksCodex) return true;
+  if (client === "grok" && looksCodex && !looksGrok) return true;
+  return false;
+}
+
 export function backupFile(filePath) {
   if (!fs.existsSync(filePath)) return null;
   const dir = backupDir();
   ensureDir(dir);
   const stamp = nowIso().replace(/[:.]/g, "-");
-  const target = path.join(dir, `${path.basename(filePath)}.${stamp}.bak`);
+  const target = path.join(dir, `${backupNamePrefix(filePath)}.${stamp}.bak`);
   fs.copyFileSync(filePath, target);
   return target;
 }
@@ -1433,9 +1487,27 @@ export function backupFile(filePath) {
 export function listBackups(filePath) {
   const dir = backupDir();
   if (!fs.existsSync(dir)) return [];
-  const prefix = `${path.basename(filePath)}.`;
+  const scopedPrefix = `${backupNamePrefix(filePath)}.`;
+  const legacyPrefix = `${path.basename(filePath)}.`;
+  // 新格式：codex.config.toml.* / grok.config.toml.*
+  // 旧格式：config.toml.*（Codex/Grok 曾混用，按内容排除串台）
   return fs.readdirSync(dir)
-    .filter((name) => name.startsWith(prefix) && name.endsWith(".bak"))
+    .filter((name) => name.endsWith(".bak"))
+    .filter((name) => {
+      if (name.startsWith(scopedPrefix)) return true;
+      // 旧版仅 basename：config.toml.*（Codex/Grok 曾混用，按内容排除串台）
+      // 新版 scoped 名（codex.config.toml.* / grok.config.toml.*）不会命中对方的 scoped 前缀
+      if (!name.startsWith(legacyPrefix)) return false;
+      // 避免把「其它父目录.basename.stamp.bak」误当成 legacy：
+      // 例如不存在，因为 grok.config.toml 不以 config.toml. 开头；保持简单内容过滤即可
+      const full = path.join(dir, name);
+      try {
+        const content = fs.readFileSync(full, "utf8");
+        return !looksLikeForeignConfigBackup(filePath, content);
+      } catch {
+        return false;
+      }
+    })
     .map((name) => {
       const full = path.join(dir, name);
       let stat = null;
@@ -1578,7 +1650,7 @@ export function renderCodexProviderDirectBlock({
     `name = ${tomlString(name || "Provider Direct")}`,
     `base_url = ${tomlString(String(baseUrl || "").replace(/\/+$/, ""))}`,
     `wire_api = ${tomlString(wireApi)}`,
-    `requires_openai_auth = false`,
+    `requires_openai_auth = true`,
     `experimental_bearer_token = ${tomlString(apiKey || "")}`
   );
   if (disableImageGeneration) {

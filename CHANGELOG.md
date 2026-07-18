@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.12 — 2026-07-19
+
+### Fix
+
+- **Codex 配置备份串台**：`~/.codex/config.toml` 与 `~/.grok/config.toml` 曾共用 `config.toml.*.bak` 文件名，恢复 Codex 时可能捞到 Grok 的 `[cli]`/marketplace 配置。新备份改为 `codex.config.toml.*` / `grok.config.toml.*`；旧备份仍兼容，但会按内容排除明显串台项。
+- **Codex 切「官方直连」残留三方配置**：从手切供应商直连（`provider_direct`）切官方时，未清掉 `switchyard-provider-direct` 的 custom provider / 顶层路由键。现会完整剥离，只保留用户自有块（如 `[mcp]`）。
+- **手切三方代理 `requires_openai_auth`**：`provider_direct` 写入由 `false` 改为 `true`，与常见 CC Switch 手配一致。
+
 ## 2.2.10 — 2026-07-16
 
 ### Fix

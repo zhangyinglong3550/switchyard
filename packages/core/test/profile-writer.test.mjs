@@ -89,6 +89,66 @@ test("codex profile · official direct removes Switchyard routing without touchi
   assert.match(text, /foo = "bar"/);
 });
 
+test("codex profile · official direct strips provider_direct leftovers", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    "# managed-by: switchyard-provider-direct",
+    'model_provider = "custom"',
+    'model_reasoning_effort = "high"',
+    "disable_response_storage = true",
+    'model = "gpt-5.5"',
+    "",
+    "[mcp]",
+    'foo = "bar"',
+    "",
+    "[model_providers.custom]",
+    'name = "AI Go"',
+    'base_url = "https://aigo.example/v1"',
+    'wire_api = "responses"',
+    "requires_openai_auth = true",
+    'experimental_bearer_token = "sk-xxx"',
+    ""
+  ].join("\n"), "utf8");
+
+  pw.applyCodexOfficialDirect();
+  const text = fs.readFileSync(file, "utf8");
+
+  assert.doesNotMatch(text, /switchyard-provider-direct/);
+  assert.doesNotMatch(text, /model_provider\s*=/);
+  assert.doesNotMatch(text, /disable_response_storage/);
+  assert.doesNotMatch(text, /model_reasoning_effort/);
+  assert.doesNotMatch(text, /\[model_providers\.custom\]/);
+  assert.doesNotMatch(text, /aigo\.example/);
+  assert.doesNotMatch(text, /experimental_bearer_token/);
+  assert.doesNotMatch(text, /model = "gpt-5\.5"/);
+  assert.match(text, /\[mcp\]/);
+  assert.match(text, /foo = "bar"/);
+});
+
+test("codex profile · provider_direct requires_openai_auth = true", () => {
+  const block = pw.renderCodexProviderDirectBlock({
+    name: "AI Go",
+    baseUrl: "https://aigo.example/v1",
+    apiKey: "sk-test",
+    model: "gpt-5.5"
+  });
+  assert.match(block, /requires_openai_auth = true/);
+  assert.doesNotMatch(block, /requires_openai_auth = false/);
+
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "[mcp]\nfoo = \"bar\"\n", "utf8");
+  pw.applyCodexProviderDirect({
+    provider: { id: "aigo", name: "AI Go", baseUrl: "https://aigo.example/v1", apiKey: "sk-test" },
+    model: { upstreamModel: "gpt-5.5" }
+  });
+  const text = fs.readFileSync(file, "utf8");
+  assert.match(text, /requires_openai_auth = true/);
+  assert.match(text, /experimental_bearer_token = "sk-test"/);
+  assert.match(text, /\[mcp\]/);
+});
+
 test("codex profile · official direct preserves non-Switchyard custom provider", () => {
   const file = pw.codexConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -112,6 +172,76 @@ test("codex profile · official direct preserves non-Switchyard custom provider"
   assert.match(text, /\[model_providers\.custom\]/);
   assert.match(text, /name = "OpenAI"/);
   assert.match(text, /base_url = "https:\/\/api\.openai\.com\/v1"/);
+});
+
+test("backupFile · uses parent.basename so Codex/Grok config.toml do not collide", () => {
+  const codexFile = pw.codexConfigPath();
+  const grokFile = pw.grokConfigPath();
+  fs.mkdirSync(path.dirname(codexFile), { recursive: true });
+  fs.mkdirSync(path.dirname(grokFile), { recursive: true });
+  fs.writeFileSync(codexFile, 'model_provider = "custom"\n[model_providers.custom]\nname = "Switchyard"\n', "utf8");
+  fs.writeFileSync(grokFile, [
+    "[cli]",
+    'installer = "internal"',
+    "",
+    "[marketplace]",
+    "official_marketplace_auto_installed = true",
+    "",
+    "[[marketplace.sources]]",
+    'name = "xAI Official"',
+    "",
+    "[ui]",
+    'fork_secondary_model = "grok-build"',
+    "",
+    "[models]",
+    'default = "sy-grok-pool--grok-4.5"',
+    ""
+  ].join("\n"), "utf8");
+
+  const codexBak = pw.backupFile(codexFile);
+  const grokBak = pw.backupFile(grokFile);
+  assert.ok(codexBak.includes("codex.config.toml."));
+  assert.ok(grokBak.includes("grok.config.toml."));
+  assert.notEqual(path.basename(codexBak), path.basename(grokBak));
+
+  const codexList = pw.listBackups(codexFile).map((e) => e.name);
+  const grokList = pw.listBackups(grokFile).map((e) => e.name);
+  assert.ok(codexList.some((n) => n.startsWith("codex.config.toml.")));
+  assert.ok(grokList.some((n) => n.startsWith("grok.config.toml.")));
+  assert.ok(!codexList.some((n) => n.startsWith("grok.config.toml.")));
+  assert.ok(!grokList.some((n) => n.startsWith("codex.config.toml.")));
+});
+
+test("listBackups · legacy config.toml backups exclude foreign client content", () => {
+  const codexFile = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(codexFile), { recursive: true });
+  fs.writeFileSync(codexFile, "current-codex\n", "utf8");
+  fs.mkdirSync(process.env.SWITCHYARD_BACKUP_DIR, { recursive: true });
+  fs.writeFileSync(
+    path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-02-01T00-00-00-000Z.bak"),
+    'model_provider = "custom"\n[model_providers.custom]\nname = "Switchyard"\n',
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-02-01T00-00-01-000Z.bak"),
+    [
+      "[cli]",
+      'installer = "internal"',
+      "[marketplace]",
+      "official_marketplace_auto_installed = true",
+      "[[marketplace.sources]]",
+      'name = "xAI Official"',
+      "[ui]",
+      'fork_secondary_model = "grok-build"',
+      "[models]",
+      'default = "sy-x"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const names = pw.listBackups(codexFile).map((e) => e.name);
+  assert.ok(names.includes("config.toml.2099-02-01T00-00-00-000Z.bak"));
+  assert.ok(!names.includes("config.toml.2099-02-01T00-00-01-000Z.bak"), "Grok-shaped legacy backup must not appear in Codex list");
 });
 
 test("codex profile · writes model catalog for Codex App model picker", () => {
@@ -675,13 +805,22 @@ test("restoreProfileBackup · restores selected backup by name", () => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, "current\n", "utf8");
   fs.mkdirSync(process.env.SWITCHYARD_BACKUP_DIR, { recursive: true });
-  fs.writeFileSync(path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-01-000Z.bak"), "newer\n", "utf8");
-  fs.writeFileSync(path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-00-000Z.bak"), "selected\n", "utf8");
+  // 旧版 basename 备份仍可按名恢复；内容需像 Codex 以免被 listBackups 内容过滤掉
+  fs.writeFileSync(
+    path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-01-000Z.bak"),
+    'model_provider = "custom"\nnewer\n',
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(process.env.SWITCHYARD_BACKUP_DIR, "config.toml.2099-01-01T00-00-00-000Z.bak"),
+    'model_provider = "custom"\nselected\n',
+    "utf8"
+  );
 
   const r = pw.restoreProfileBackup("codex", "config.toml.2099-01-01T00-00-00-000Z.bak");
   assert.equal(r.ok, true);
   assert.equal(r.backupName, "config.toml.2099-01-01T00-00-00-000Z.bak");
-  assert.equal(fs.readFileSync(file, "utf8"), "selected\n");
+  assert.equal(fs.readFileSync(file, "utf8"), 'model_provider = "custom"\nselected\n');
 });
 
 test("restoreProfile · returns no-backup when file never backed up", () => {
