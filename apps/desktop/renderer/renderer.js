@@ -854,7 +854,11 @@ function compatPacksHtml(ids = []) {
   const selected = Array.isArray(ids) ? ids : [];
   if (!selected.length) return "";
   const byId = new Map((state.compatPacks || []).map((pack) => [pack.id, pack]));
-  return selected.map((id) => `<span class="chip">${escapeHtml(byId.get(id)?.label || id)}</span>`).join("");
+  return selected.map((id) => {
+    const pack = byId.get(id);
+    const tip = pack ? `${pack.description || ""}${Array.isArray(pack.changes) && pack.changes.length ? "\n" + pack.changes.map((c) => "• " + c).join("\n") : ""}` : "";
+    return `<span class="chip"${tip ? ` title="${escapeHtml(tip)}"` : ""}>${escapeHtml(pack?.label || id)}</span>`;
+  }).join("");
 }
 
 const COMPAT_DIRECTION_LABEL = {

@@ -881,17 +881,44 @@ function showMainWindow() {
 }
 
 // 创建系统托盘图标与右键菜单（显示窗口 / 退出）。
-function createTray() {
-  if (tray) return tray;
-  const trayIconPath = path.resolve(__dirname, "..", "assets", "tray.png");
-  let image = nativeImage.createFromPath(trayIconPath);
-  // macOS 菜单栏按 22px 高度显示，避免大图变形。
-  if (process.platform === "darwin" && !image.isEmpty()) {
-    image = image.resize({ width: 18, height: 18 });
-  }
-  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
-  tray.setToolTip("Switchyard");
-  const menu = Menu.buildFromTemplate([
+function buildTrayMenu() {
+  const status = statusFromServer();
+  const gatewayLabel = status.running ? `网关：运行中 · ${status.host}:${status.port}` : "网关：已停止";
+  const trayStart = async () => {
+    try {
+      await startGateway();
+      syncCodexArtifacts("tray-start");
+      startCodexArtifactMonitor();
+    } catch (err) {
+      appendLog({ level: "error", msg: "tray start failed", error: String(err?.message || err) });
+    } finally {
+      refreshTrayMenu();
+    }
+  };
+  const trayRestart = async () => {
+    try {
+      await restartGateway();
+      syncCodexArtifacts("tray-restart");
+      startCodexArtifactMonitor();
+    } catch (err) {
+      appendLog({ level: "error", msg: "tray restart failed", error: String(err?.message || err) });
+    } finally {
+      refreshTrayMenu();
+    }
+  };
+  const trayStop = () => {
+    try { stopGateway(); } catch (err) {
+      appendLog({ level: "error", msg: "tray stop failed", error: String(err?.message || err) });
+    } finally {
+      refreshTrayMenu();
+    }
+  };
+  return Menu.buildFromTemplate([
+    { label: gatewayLabel, enabled: false },
+    { label: "启动网关", click: () => { trayStart(); } },
+    { label: "停止网关", click: () => { trayStop(); } },
+    { label: "重启网关", click: () => { trayRestart(); } },
+    { type: "separator" },
     { label: "显示窗口", click: () => showMainWindow() },
     { type: "separator" },
     {
@@ -902,8 +929,27 @@ function createTray() {
       }
     }
   ]);
-  tray.setContextMenu(menu);
-  // 单击托盘图标（Windows/Linux 习惯）唤出窗口；macOS 用右键菜单。
+}
+
+function refreshTrayMenu() {
+  if (tray) {
+    try { tray.setContextMenu(buildTrayMenu()); } catch {}
+  }
+}
+
+function createTray() {
+  if (tray) return tray;
+  const trayIconPath = path.resolve(__dirname, "..", "assets", "tray.png");
+  let image = nativeImage.createFromPath(trayIconPath);
+  // macOS 菜单栏按 22px 高度显示，避免大图变形。
+  if (process.platform === "darwin" && !image.isEmpty()) {
+    image = image.resize({ width: 18, height: 18 });
+  }
+  tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+  tray.setToolTip("Switchyard");
+  tray.setContextMenu(buildTrayMenu());
+  // 右键时重建菜单，反映最新网关状态；单击唤出窗口。
+  tray.on("right-click", () => refreshTrayMenu());
   tray.on("click", () => showMainWindow());
   return tray;
 }
