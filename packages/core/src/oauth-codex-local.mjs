@@ -62,10 +62,11 @@ export function isAccessTokenUsable(accessToken, {
   const iso = resolveAccessExpiresAt({ accessToken: token, expiresAt });
   if (!iso) {
     // 无 exp 信息时，只要 token 非空就先视为可用（后续请求失败再刷新）
-    return token.length > 20;
+    // 账号池/单测可能是短占位 token，不能按长度硬砍
+    return true;
   }
   const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return token.length > 20;
+  if (!Number.isFinite(ms)) return true;
   return now + skewMs < ms;
 }
 
