@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.13 — 2026-07-19
+
+### Feat
+
+- **Codex OAuth 有效登录检测与页内登录**：新增/编辑 `codex_oauth` 供应商时检测本机 `~/.codex/auth.json` 是否为**有效登录**（access 未过期，或可 refresh 续期），而不是只看文件是否存在。无效时可在供应商页点「登录 Codex」（调起 `codex login`）、刷新状态、尝试续期，或高级粘贴 `refresh_token` 回写 auth.json。请求前会尽量自动续期 access。
+
 ## 2.2.12 — 2026-07-19
 
 ### Fix

@@ -682,6 +682,54 @@ async function refreshAnthropicOauthStatus() {
   }
 }
 
+function formatCodexOauthStatusHtml(st) {
+  if (!st) {
+    return `<span class="chip warn">未知状态</span>`;
+  }
+  if (st.loggedIn && st.valid) {
+    const parts = [];
+    parts.push(`<span class="chip good">${st.accessUsable ? "登录有效" : "可续期"}</span>`);
+    parts.push(escapeHtml(st.email || st.accountId || "ChatGPT 账号"));
+    if (st.sourceLabel || st.source) {
+      parts.push(`<span class="tiny muted">· ${escapeHtml(st.sourceLabel || st.source)}</span>`);
+    }
+    if (st.expiresAt) {
+      parts.push(`<span class="tiny muted">access 至 ${escapeHtml(String(st.expiresAt).slice(0, 19).replace("T", " "))}</span>`);
+    }
+    if (st.needsRefresh || (!st.accessUsable && st.canRefresh)) {
+      parts.push(`<span class="chip warn">access 已过期 · 可自动续</span>`);
+    } else if (st.canRefresh) {
+      parts.push(`<span class="chip good">可续</span>`);
+    }
+    if (st.refreshed) {
+      parts.push(`<span class="tiny muted">· 已自动续期</span>`);
+    }
+    if (st.refreshError) {
+      parts.push(`<span class="tiny muted">· 续期告警：${escapeHtml(st.refreshError)}</span>`);
+    }
+    return parts.join(" ");
+  }
+  const reason = st.reason ? `（${escapeHtml(st.reason)}）` : "";
+  return `<span class="chip warn">未检测到有效登录</span> <span class="tiny muted">${escapeHtml(st.hint || "请点「登录 Codex」完成授权")}${reason}</span>`;
+}
+
+async function refreshCodexOauthStatus({ tryRefresh = true } = {}) {
+  const statusEl = document.getElementById("provider-codex-oauth-status");
+  if (!statusEl) return null;
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  const proxyUrl = form?.querySelector?.('[name="proxyUrl"]')?.value?.trim() || "";
+  statusEl.innerHTML = `<span class="tiny muted">正在检测有效登录…</span>`;
+  try {
+    const st = await invoke("codex-oauth:status", { providerId, proxyUrl, tryRefresh });
+    statusEl.innerHTML = formatCodexOauthStatusHtml(st);
+    return st;
+  } catch (err) {
+    statusEl.innerHTML = `<span class="chip bad">状态读取失败</span> <span class="tiny muted">${escapeHtml(err?.message || String(err))}</span>`;
+    return null;
+  }
+}
+
 function syncProviderAuthControls() {
   const mode = document.getElementById("provider-auth-mode")?.value || "api_key";
   const preset = providerPresetById(document.getElementById("provider-preset-select")?.value);
@@ -691,6 +739,7 @@ function syncProviderAuthControls() {
   const note = document.getElementById("provider-auth-note");
   const poolPanel = document.getElementById("provider-account-pool-panel");
   const anthropicPanel = document.getElementById("provider-anthropic-oauth-panel");
+  const codexPanel = document.getElementById("provider-codex-oauth-panel");
   if (!keyFields || !note) return;
   const needsKey = mode === "api_key" || mode === "keychain";
   keyFields.style.display = needsKey ? "" : "none";
@@ -698,12 +747,16 @@ function syncProviderAuthControls() {
   note.textContent = mode === "keychain"
     ? "已选择系统安全存储：macOS 使用 Keychain，Windows 使用当前用户 DPAPI 加密存储；配置文件只保存引用，不保存明文。"
     : mode === "codex_oauth"
-    ? "已选择 Codex OAuth：Switchyard 会复用本机 codex login 的登录态，不需要在这里填写 API Key。"
+    ? "已选择 Codex OAuth：会检测本机 ~/.codex/auth.json 是否为有效登录（access 未过期，或可 refresh 续期），不需要填写 API Key。"
     : mode === "anthropic_oauth"
     ? "已选择 Anthropic 官方认证（对齐 CC Switch）：复用本机 Claude Code 登录态（macOS Keychain / ~/.claude/.credentials.json），无需填写 API Key。"
     : mode === "account_pool"
     ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
+  if (codexPanel) {
+    codexPanel.style.display = mode === "codex_oauth" ? "" : "none";
+    if (mode === "codex_oauth") refreshCodexOauthStatus({ tryRefresh: true }).catch(() => {});
+  }
   if (anthropicPanel) {
     anthropicPanel.style.display = mode === "anthropic_oauth" ? "" : "none";
     if (mode === "anthropic_oauth") refreshAnthropicOauthStatus().catch(() => {});
@@ -2544,6 +2597,60 @@ document.getElementById("provider-preset-select").addEventListener("change", (e)
 document.getElementById("provider-auth-mode").addEventListener("change", () => {
   syncProviderAuthControls();
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
+});
+document.getElementById("btn-codex-oauth-login")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "";
+  try {
+    toast("正在调起 codex login…请在浏览器完成 ChatGPT 授权");
+    const result = await invoke("codex-oauth:login", { providerId });
+    if (!result?.ok) return toast(result?.error || "登录失败", "error");
+    toast(result.email ? `Codex 登录成功：${result.email}` : "Codex 登录成功（已写入有效 auth.json）");
+    await refreshCodexOauthStatus({ tryRefresh: true });
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
+});
+document.getElementById("btn-codex-oauth-refresh-status")?.addEventListener("click", () => {
+  refreshCodexOauthStatus({ tryRefresh: true })
+    .then((st) => {
+      if (!st) return;
+      toast(
+        st.loggedIn ? (st.accessUsable ? "登录有效" : "凭证可续期") : "未检测到有效登录",
+        st.loggedIn ? "success" : "error"
+      );
+    })
+    .catch((err) => toast(err?.message || String(err), "error"));
+});
+document.getElementById("btn-codex-oauth-refresh-token")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const proxyUrl = form?.querySelector?.('[name="proxyUrl"]')?.value?.trim() || "";
+  try {
+    toast("正在尝试用 refresh_token 续期…");
+    const result = await invoke("codex-oauth:refresh", { proxyUrl, forceRefresh: true });
+    if (!result?.ok) return toast(result?.error || "续期失败", "error");
+    toast(result.refreshed ? "续期成功，已回写 auth.json" : "当前 access 仍可用，无需续期");
+    await refreshCodexOauthStatus({ tryRefresh: false });
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
+});
+document.getElementById("btn-codex-oauth-import")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const proxyUrl = form?.querySelector?.('[name="proxyUrl"]')?.value?.trim() || "";
+  const refreshToken = document.getElementById("provider-codex-refresh-token")?.value?.trim() || "";
+  if (!refreshToken) return toast("请粘贴 refresh_token", "error");
+  try {
+    toast("正在用 refresh_token 换取 access_token…");
+    const result = await invoke("codex-oauth:import-refresh", { proxyUrl, refreshToken });
+    if (!result?.ok) return toast(result?.error || "导入失败", "error");
+    toast(result.email ? `导入成功：${result.email}` : "已写入有效 ~/.codex/auth.json");
+    const input = document.getElementById("provider-codex-refresh-token");
+    if (input) input.value = "";
+    await refreshCodexOauthStatus({ tryRefresh: false });
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
 });
 document.getElementById("btn-anthropic-oauth-login")?.addEventListener("click", async () => {
   const form = document.getElementById("provider-form");

@@ -15,6 +15,13 @@ import {
   ensureAnthropicAccessToken,
   resolveAnthropicOAuthAuth
 } from "../oauth-anthropic.mjs";
+import {
+  codexAuthPath as codexLocalAuthPath,
+  ensureCodexLocalAccessToken,
+  isAccessTokenUsable,
+  readCodexLocalAuth,
+  resolveAccessExpiresAt
+} from "../oauth-codex-local.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
@@ -49,86 +56,88 @@ export function isAnthropicOAuthProvider(provider) {
 export { isAccountPoolProvider };
 
 export function codexAuthPath() {
-  return path.join(os.homedir(), ".codex", "auth.json");
-}
-
-function decodeJwtPayload(token) {
-  const part = String(token || "").split(".")[1];
-  if (!part) return {};
-  try {
-    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
-    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function extractAccountId(auth, accessToken, provider) {
-  const tokenPayload = decodeJwtPayload(accessToken);
-  const openaiAuth = tokenPayload?.["https://api.openai.com/auth"];
-  return provider?.codexAccountId ||
-    provider?.accountId ||
-    auth?.tokens?.account_id ||
-    auth?.account_id ||
-    openaiAuth?.chatgpt_account_id ||
-    tokenPayload?.chatgpt_account_id ||
-    tokenPayload?.account_id ||
-    "";
+  return codexLocalAuthPath();
 }
 
 // ~/.codex/auth.json 读取缓存：按 mtime 失效，避免每次请求都同步读盘 + JSON.parse。
-const codexAuthCache = new Map(); // authFile -> { mtimeMs, parsed, accessToken }
+const codexAuthCache = new Map(); // authFile -> { mtimeMs, result }
 
 export function resetCodexAuthCache() {
   codexAuthCache.clear();
 }
 
+/**
+ * 读取本机 Codex OAuth。
+ * ok=true 表示「有效登录」：access 未过期，或 access 过期但有 refresh_token 可续。
+ * 请求头仍优先用 accessToken；若 access 已不可用，调用方应先 ensureCodexLocalAccessToken。
+ */
 export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null } = {}) {
-  // 账号池绑定的多 Codex 号：内存 token 优先
+  // 账号池绑定的多 Codex 号：内存 token 优先（池子在 bind 时保证可用）
   if (provider?._codexAccessToken) {
+    const accessToken = String(provider._codexAccessToken).trim();
+    const expiresAt = String(provider._codexExpiresAt || "").trim();
+    const accessUsable = isAccessTokenUsable(accessToken, { expiresAt });
+    const refreshToken = String(provider._codexRefreshToken || "").trim();
+    const valid = accessUsable || Boolean(refreshToken);
     return {
-      ok: true,
+      ok: valid,
+      reason: valid ? "" : "memory-token-unusable",
       authFile: "(account-pool)",
-      accessToken: provider._codexAccessToken,
-      accountId: provider._codexAccountId || provider.codexAccountId || provider.accountId || ""
+      source: "account-pool",
+      accessToken,
+      refreshToken,
+      accountId: provider._codexAccountId || provider.codexAccountId || provider.accountId || "",
+      email: provider._codexEmail || "",
+      expiresAt: resolveAccessExpiresAt({ accessToken, expiresAt }),
+      accessUsable,
+      canRefresh: Boolean(refreshToken),
+      hasAccessToken: Boolean(accessToken),
+      hasRefreshToken: Boolean(refreshToken)
     };
   }
+
+  const file = authFile || codexAuthPath();
   try {
-    if (!fs.existsSync(authFile)) return { ok: false, reason: "missing-auth-file", authFile };
-    const stat = fs.statSync(authFile);
-    const mtimeMs = Number(stat.mtimeMs) || 0;
-    const cached = codexAuthCache.get(authFile);
-    let auth;
-    let accessToken;
-    if (cached && cached.mtimeMs === mtimeMs) {
-      auth = cached.parsed;
-      accessToken = cached.accessToken;
-    } else {
-      auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
-      accessToken =
-        auth?.tokens?.access_token ||
-        auth?.access_token ||
-        auth?.token ||
-        auth?.credentials?.access_token ||
-        "";
-      if (accessToken) codexAuthCache.set(authFile, { mtimeMs, parsed: auth, accessToken });
+    if (!fs.existsSync(file)) {
+      return {
+        ok: false,
+        reason: "missing-auth-file",
+        authFile: file,
+        accessUsable: false,
+        canRefresh: false,
+        hasAccessToken: false,
+        hasRefreshToken: false
+      };
     }
-    if (!accessToken) return { ok: false, reason: "missing-access-token", authFile };
-    return {
-      ok: true,
-      authFile,
-      accessToken,
-      accountId: extractAccountId(auth, accessToken, provider)
-    };
+    const stat = fs.statSync(file);
+    const mtimeMs = Number(stat.mtimeMs) || 0;
+    const cached = codexAuthCache.get(file);
+    if (cached && cached.mtimeMs === mtimeMs) {
+      return { ...cached.result };
+    }
+    const parsed = readCodexLocalAuth({ authFile: file, provider: null });
+    // 不把 _raw 放进缓存副本，避免误用
+    const { _raw, ...result } = parsed;
+    codexAuthCache.set(file, { mtimeMs, result });
+    return { ...result };
   } catch (err) {
-    return { ok: false, reason: err?.message || "invalid-auth-file", authFile };
+    return {
+      ok: false,
+      reason: err?.message || "invalid-auth-file",
+      authFile: file,
+      accessUsable: false,
+      canRefresh: false,
+      hasAccessToken: false,
+      hasRefreshToken: false
+    };
   }
 }
 
 export function codexOAuthHeaders(provider) {
   const auth = readCodexOAuthAuth({ provider });
-  if (!auth.ok) return {};
+  // 发请求需要可用的 access；仅有 refresh 时先不带头（dispatch 侧应 ensure）
+  if (!auth.accessToken) return {};
+  if (!auth.accessUsable && !auth.ok) return {};
   return {
     Authorization: `Bearer ${auth.accessToken}`,
     "OpenAI-Beta": "responses=experimental",
@@ -137,6 +146,8 @@ export function codexOAuthHeaders(provider) {
     ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {})
   };
 }
+
+export { ensureCodexLocalAccessToken };
 
 export function readAnthropicOAuthAuth({ provider = null, authFile } = {}) {
   return resolveAnthropicOAuthAuth({ provider, authFile });
@@ -292,6 +303,29 @@ export async function callOpenAIChat(provider, body, opts) {
 export async function callOpenAIResponses(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/responses");
   const codexOAuth = isCodexOAuthProvider(provider);
+  // 本机 codex_oauth：发请求前尽量保证 access 未过期（可 refresh 时回写 auth.json）
+  if (codexOAuth && !provider._codexAccessToken) {
+    try {
+      const ensured = await ensureCodexLocalAccessToken({
+        provider,
+        proxyUrl: provider.proxyUrl || opts?.proxyUrl || "",
+        fetchImpl: opts?.fetchImpl
+      });
+      if (ensured.ok && ensured.accessToken) {
+        provider = {
+          ...provider,
+          _codexAccessToken: ensured.accessToken,
+          _codexRefreshToken: ensured.refreshToken || "",
+          _codexAccountId: ensured.accountId || "",
+          _codexEmail: ensured.email || "",
+          _codexExpiresAt: ensured.expiresAt || ""
+        };
+        if (ensured.refreshed) resetCodexAuthCache();
+      }
+    } catch {
+      // 刷新失败时仍用磁盘 access 尝试一次
+    }
+  }
   return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), {
     ...opts,
     noKeepAlive: opts?.noKeepAlive ?? codexOAuth,
@@ -327,7 +361,11 @@ export async function callAnthropicMessages(provider, body, opts) {
 export function providerReady(provider) {
   if (!provider?.baseUrl) return false;
   if (isAccountPoolProvider(provider)) return accountPoolReady(provider);
-  if (isCodexOAuthProvider(provider)) return readCodexOAuthAuth({ provider }).ok;
+  if (isCodexOAuthProvider(provider)) {
+    // 有效登录：access 可用，或 access 过期但有 refresh 可续
+    const auth = readCodexOAuthAuth({ provider });
+    return Boolean(auth.ok && (auth.accessUsable || auth.canRefresh || auth.hasRefreshToken));
+  }
   if (isAnthropicOAuthProvider(provider)) {
     const auth = readAnthropicOAuthAuth({ provider });
     return Boolean(auth.ok && (auth.accessToken || auth.refreshToken));

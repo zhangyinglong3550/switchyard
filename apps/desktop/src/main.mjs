@@ -65,6 +65,7 @@ import {
   providerReady,
   proxyDispatcher,
   readCodexOAuthAuth,
+  resetCodexAuthCache,
   isCodexOAuthProvider,
   isAnthropicOAuthProvider,
   isAccountPoolProvider,
@@ -79,6 +80,15 @@ import {
   refreshAnthropicTokens,
   readAnthropicOAuthFile
 } from "../../../packages/core/src/oauth-anthropic.mjs";
+import {
+  codexAuthPath,
+  codexOAuthStatus,
+  codexOAuthStatusAsync,
+  ensureCodexLocalAccessToken,
+  runCodexOAuthLogin,
+  writeCodexLocalAuth
+} from "../../../packages/core/src/oauth-codex-local.mjs";
+import { refreshCodexTokens } from "../../../packages/core/src/account-pool/oauth-codex.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
@@ -1046,6 +1056,112 @@ ipcMain.handle("anthropic-oauth:import-refresh", async (_e, payload = {}) => {
   writeAnthropicOAuthFile(tokens, authFile);
   appendLog({ level: "info", msg: "anthropic oauth import refresh ok", email: tokens.email || "" });
   return { ok: true, email: tokens.email, expiresAt: tokens.expiresAt, authFile };
+});
+
+// ── Codex / ChatGPT OAuth（本机 ~/.codex/auth.json）──────────
+ipcMain.handle("codex-oauth:status", async (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  const proxyUrl = payload.proxyUrl || "";
+  const tryRefresh = payload.tryRefresh !== false;
+  const provider = providerId ? { id: providerId, authMode: "codex_oauth", proxyUrl } : null;
+  try {
+    const st = await codexOAuthStatusAsync(provider, {
+      proxyUrl,
+      tryRefresh
+    });
+    // 不把 token 打进日志
+    appendLog({
+      level: "info",
+      msg: "codex oauth status",
+      loggedIn: Boolean(st.loggedIn),
+      reason: st.reason || "",
+      accessUsable: Boolean(st.accessUsable),
+      canRefresh: Boolean(st.canRefresh),
+      refreshed: Boolean(st.refreshed)
+    });
+    return st;
+  } catch (err) {
+    return {
+      ok: false,
+      loggedIn: false,
+      valid: false,
+      reason: err?.message || String(err),
+      authFile: codexAuthPath(),
+      hint: "读取 Codex 登录状态失败"
+    };
+  }
+});
+ipcMain.handle("codex-oauth:login", async (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  appendLog({ level: "info", msg: "codex oauth login started", providerId: providerId || "default" });
+  const result = await runCodexOAuthLogin({
+    openUrl: (url) => shell.openExternal(url),
+    authFile: codexAuthPath()
+  });
+  resetCodexAuthCache();
+  if (result.ok) {
+    appendLog({
+      level: "info",
+      msg: "codex oauth login ok",
+      email: result.email || "",
+      accountId: result.accountId || ""
+    });
+  } else {
+    appendLog({ level: "warn", msg: "codex oauth login failed", error: result.error || "" });
+  }
+  return result;
+});
+ipcMain.handle("codex-oauth:refresh", async (_e, payload = {}) => {
+  const proxyUrl = payload.proxyUrl || "";
+  resetCodexAuthCache();
+  const ensured = await ensureCodexLocalAccessToken({
+    proxyUrl,
+    forceRefresh: Boolean(payload.forceRefresh)
+  });
+  resetCodexAuthCache();
+  if (!ensured.ok) {
+    return {
+      ok: false,
+      error: ensured.reason || "refresh-failed",
+      authFile: ensured.authFile || codexAuthPath()
+    };
+  }
+  appendLog({
+    level: "info",
+    msg: "codex oauth refresh ok",
+    refreshed: Boolean(ensured.refreshed),
+    email: ensured.email || ""
+  });
+  return {
+    ok: true,
+    refreshed: Boolean(ensured.refreshed),
+    email: ensured.email,
+    accountId: ensured.accountId,
+    expiresAt: ensured.expiresAt,
+    authFile: ensured.authFile
+  };
+});
+ipcMain.handle("codex-oauth:import-refresh", async (_e, payload = {}) => {
+  const refreshToken = String(payload.refreshToken || payload.refresh_token || "").trim();
+  if (!refreshToken) throw new Error("请提供 refresh_token");
+  const proxyUrl = payload.proxyUrl || "";
+  const tokens = await refreshCodexTokens(refreshToken, { proxyUrl });
+  const written = writeCodexLocalAuth(tokens, { authFile: codexAuthPath() });
+  resetCodexAuthCache();
+  appendLog({ level: "info", msg: "codex oauth import refresh ok", email: tokens.email || "" });
+  return {
+    ok: true,
+    email: tokens.email || written.email,
+    accountId: tokens.accountId || written.accountId,
+    expiresAt: tokens.expiresAt,
+    authFile: written.authFile
+  };
+});
+// 同步快速探测（不 refresh），供 UI 初次展示
+ipcMain.handle("codex-oauth:status-sync", (_e, payload = {}) => {
+  const providerId = payload.providerId || payload.id || "";
+  const provider = providerId ? { id: providerId, authMode: "codex_oauth" } : null;
+  return codexOAuthStatus(provider);
 });
 ipcMain.handle("gateway:reload", () => {
   const result = reloadConfig();

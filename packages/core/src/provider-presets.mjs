@@ -52,7 +52,7 @@ export const PROVIDER_PRESETS = [
     riskLevel: "high",
     riskNote: "官方文档和社区实践均提示：通过本地网关复用 Codex 官方 OAuth/内部接口可能带来账号限制或封号风险。推荐优先使用官方直连；仅在明确理解风险时使用该 cc-switch/Hermes-style 代理适配。",
     dashboardUrl: "https://chatgpt.com",
-    note: "默认复用本机 codex login；查询模型会优先读取 ChatGPT Codex 官方模型接口。",
+    note: "默认复用本机 codex login（检测有效登录，不只看 auth.json 是否存在）；无有效凭证时可在供应商页点「登录 Codex」。查询模型会优先读取 ChatGPT Codex 官方模型接口。",
     models: [
       { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "gpt-5.4", displayName: "GPT-5.4", contextWindow: 272000, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },

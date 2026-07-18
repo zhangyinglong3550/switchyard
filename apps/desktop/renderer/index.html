@@ -764,6 +764,30 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-codex-oauth-panel" style="display:none;">
+        <div class="callout-title">Codex OAuth（本机 ChatGPT 登录）</div>
+        <div class="callout-body">
+          复用本机 <code>~/.codex/auth.json</code>（由 <code>codex login</code> / ChatGPT OAuth 写入）。
+          状态检测看的是<strong>有效登录</strong>，不是只看文件在不在：
+          access_token 未过期，或已过期但有可用 refresh_token 可自动续期，才算已登录。
+        </div>
+        <div id="provider-codex-oauth-status" style="margin-top:10px;" class="tiny">检查登录状态…</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-codex-oauth-login">登录 Codex</button>
+          <button class="btn" type="button" id="btn-codex-oauth-refresh-status">刷新状态</button>
+          <button class="btn" type="button" id="btn-codex-oauth-refresh-token">尝试续期</button>
+        </div>
+        <details style="margin-top:12px;">
+          <summary class="tiny muted">高级：粘贴 refresh_token 写入 ~/.codex/auth.json</summary>
+          <label style="margin-top:8px;">refresh_token
+            <input class="field" id="provider-codex-refresh-token" type="password" autocomplete="off" placeholder="ChatGPT / Codex refresh token">
+          </label>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px;">
+            <button class="btn" type="button" id="btn-codex-oauth-import">导入并换取 access_token</button>
+          </div>
+          <div class="tiny muted" style="margin-top:6px;">会调用官方 token 端点换取 access，并回写 <code>~/.codex/auth.json</code>。请勿把 token 发到聊天或日志。</div>
+        </details>
+      </div>
       <div class="callout" id="provider-anthropic-oauth-panel" style="display:none;">
         <div class="callout-title">Claude Official（对齐 CC Switch）</div>
         <div class="callout-body">
