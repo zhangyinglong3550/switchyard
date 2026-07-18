@@ -28,7 +28,7 @@ test("codex profile · merges with existing TOML without losing user blocks", ()
   assert.match(text, /model_provider = "custom"/);
   assert.match(text, /\[model_providers\.custom\]/);
   assert.match(text, /wire_api = "responses"/);
-  assert.match(text, /requires_openai_auth = false/);
+  assert.match(text, /requires_openai_auth = true/);
   assert.match(text, /supports_websockets = false/);
   assert.match(text, /experimental_bearer_token = "dummy"/);
   assert.match(text, /request_max_retries = 5/);
@@ -300,7 +300,7 @@ test("codex profile · writes model catalog for Codex App model picker", () => {
   assert.match(ccSwitchProfile, /model_provider = "custom"/);
   assert.match(ccSwitchProfile, /model_catalog_json = ".*cc-switch-model-catalog\.json"/);
   assert.match(ccSwitchProfile, /base_url = "http:\/\/127\.0\.0\.1:17888\/codex\/v1"/);
-  assert.match(ccSwitchProfile, /requires_openai_auth = false/);
+  assert.match(ccSwitchProfile, /requires_openai_auth = true/);
   assert.match(ccSwitchProfile, /request_max_retries = 5/);
 });
 
