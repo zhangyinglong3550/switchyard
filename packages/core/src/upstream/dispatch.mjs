@@ -127,8 +127,12 @@ async function runWithAccountPool(provider, opts, runner) {
 }
 
 export async function dispatchChat(provider, upstreamModel, chatBody, opts = {}) {
-  // 可恢复失败时同模型重试（默认最多 3 次）；账号池换号在其内部再套一层
-  return withDispatchRetry(provider, opts.model, opts, () =>
+  // 账号池已在 runWithAccountPool 内换号 failover（最多 ACCOUNT_POOL_MAX_ATTEMPTS 个账号）。
+  // 若外层 withDispatchRetry 再叠一轮重试，会放大成「池尝试 × 重试」次上游调用
+  // （默认 3×3=9），对 5xx/限流场景反而加剧压力。故账号池供应商关闭外层重试，
+  // 由池内换号兜底；非池供应商保留外层重试（默认最多 3 次）。
+  const retryOpts = isAccountPoolProvider(provider) ? { ...opts, retry: { enabled: false } } : opts;
+  return withDispatchRetry(provider, opts.model, retryOpts, () =>
     runWithAccountPool(provider, opts, (activeProvider, account) =>
       dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
     )

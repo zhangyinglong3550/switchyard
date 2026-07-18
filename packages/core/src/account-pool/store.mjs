@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { ensureDir } from "../utils.mjs";
+import { ensureDir, atomicWriteFileSync } from "../utils.mjs";
 
 export const POOL_KINDS = new Set(["xai_oauth", "antigravity_oauth", "codex_oauth"]);
 export const POOL_STRATEGIES = new Set([
@@ -169,7 +169,7 @@ export function savePool(pool, { home } = {}) {
     ...normalized,
     updatedAt: new Date().toISOString()
   };
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
+  atomicWriteFileSync(file, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
   try {
     fs.chmodSync(file, 0o600);
   } catch {}

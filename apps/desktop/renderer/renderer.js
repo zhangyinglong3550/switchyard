@@ -176,12 +176,16 @@ function applyTableColumnWidths(tableSelector) {
   }
 }
 
-const toast = (msg) => {
+const toast = (msg, type) => {
   const el = document.getElementById("toast");
   el.textContent = msg;
+  el.classList.remove("error", "success");
+  if (type) el.classList.add(type);
   el.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("show"), 2000);
+  // 错误态停留更久，给用户看清；成功/信息态 2.5s
+  const dur = type === "error" ? 5000 : 2500;
+  toast._t = setTimeout(() => el.classList.remove("show"), dur);
 };
 
 let providerCompatRecommendationRun = 0;

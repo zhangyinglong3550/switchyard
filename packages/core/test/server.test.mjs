@@ -1955,3 +1955,38 @@ test("server preserves Anthropic image input for vision fallback", async (t) => 
   assert.equal(JSON.stringify(textUpstreamBody).includes("image_url"), false);
   assert.match(JSON.stringify(textUpstreamBody), /图片里有一个表单/);
 });
+
+test("server returns 502 (not 500) when upstream is unreachable (status 0)", async (t) => {
+  // 占一个端口后立刻关闭，得到一个必然 ECONNREFUSED 的地址 -> fetch failed -> dispatch status 0
+  const sock = net.createServer();
+  await new Promise((r) => sock.listen(0, "127.0.0.1", r));
+  const closedPort = sock.address().port;
+  await new Promise((r) => sock.close(r));
+
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${closedPort}/v1`, retry: { enabled: false } }],
+    models: [{ id: "p/m", providerId: "p", upstreamModel: "m" }],
+    clients: { grok: { enabled: true, allowedModels: ["*"] } }
+  });
+
+  const server = createServer();
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const result = await fetchJson(`http://127.0.0.1:${port}/grok/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "p/m", messages: [{ role: "user", content: "hi" }] })
+  });
+
+  // 修复前：json(res, 0, ...) 让 Node 抛 "Invalid status code: 0"，客户端收到 500。
+  // 修复后：status 0 在 json() 出口收敛成 502，返回正常 JSON 错误体。
+  assert.equal(result.status, 502, `expected 502, got ${result.status} body=${JSON.stringify(result.body)}`);
+  assert.ok(result.body && (result.body.error || result.body.message), "should return JSON error body");
+});

@@ -77,6 +77,13 @@ function extractAccountId(auth, accessToken, provider) {
     "";
 }
 
+// ~/.codex/auth.json 读取缓存：按 mtime 失效，避免每次请求都同步读盘 + JSON.parse。
+const codexAuthCache = new Map(); // authFile -> { mtimeMs, parsed, accessToken }
+
+export function resetCodexAuthCache() {
+  codexAuthCache.clear();
+}
+
 export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null } = {}) {
   // 账号池绑定的多 Codex 号：内存 token 优先
   if (provider?._codexAccessToken) {
@@ -89,13 +96,24 @@ export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null
   }
   try {
     if (!fs.existsSync(authFile)) return { ok: false, reason: "missing-auth-file", authFile };
-    const auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
-    const accessToken =
-      auth?.tokens?.access_token ||
-      auth?.access_token ||
-      auth?.token ||
-      auth?.credentials?.access_token ||
-      "";
+    const stat = fs.statSync(authFile);
+    const mtimeMs = Number(stat.mtimeMs) || 0;
+    const cached = codexAuthCache.get(authFile);
+    let auth;
+    let accessToken;
+    if (cached && cached.mtimeMs === mtimeMs) {
+      auth = cached.parsed;
+      accessToken = cached.accessToken;
+    } else {
+      auth = JSON.parse(fs.readFileSync(authFile, "utf8"));
+      accessToken =
+        auth?.tokens?.access_token ||
+        auth?.access_token ||
+        auth?.token ||
+        auth?.credentials?.access_token ||
+        "";
+      if (accessToken) codexAuthCache.set(authFile, { mtimeMs, parsed: auth, accessToken });
+    }
     if (!accessToken) return { ok: false, reason: "missing-access-token", authFile };
     return {
       ok: true,
@@ -171,6 +189,7 @@ export function extractForwardableClientHeaders(incoming = {}) {
     // 请求体/协商类头必须由 Switchyard 自己写，避免覆盖上游 Content-Type 导致 xAI 等返回 415
     "content-type", "accept", "accept-encoding", "accept-language",
     "authorization", "x-api-key", "x-goog-api-key",
+    "cookie", "set-cookie",
     "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto", "x-forwarded-for", "forwarded",
     "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "true-client-ip",
     "x-request-id", "x-correlation-id", "x-trace-id", "traceparent", "tracestate"
@@ -329,6 +348,8 @@ export async function readJsonResponse(res) {
         status: res.status,
         url: res.url || "",
         bodyPreview: String(text || "").slice(0, 12000)
+          .replace(/(Bearer\s+)[A-Za-z0-9._\-]+/gi, "$1<redacted>")
+          .replace(/(sk-)[A-Za-z0-9_\-]{8,}/g, "$1<redacted>")
       });
       fs.appendFileSync(path.join(os.homedir(), "file", "codex", "switchyard-raw-upstream.log"), `${line}
 `);

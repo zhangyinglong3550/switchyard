@@ -2169,6 +2169,18 @@ table.data.compact td {
   transform: translateY(0);
 }
 
+/* 错误/成功态：左边色条 + 轻微底色区分，避免错误提示和成功提示长得一样 */
+.toast.error {
+  background: #2a1416;
+  border-color: #b91c1c;
+  color: #fecaca;
+}
+.toast.success {
+  background: #14241a;
+  border-color: #15803d;
+  color: #bbf7d0;
+}
+
 /* ── Scroll containers ── */
 .scroll { overflow: auto; }
 

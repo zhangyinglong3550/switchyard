@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { backupDir, ensureDir, nowIso, DEFAULT_HOME } from "./utils.mjs";
+import { backupDir, ensureDir, nowIso, DEFAULT_HOME, atomicWriteFileSync } from "./utils.mjs";
 import { claudeCodeDiscoveryModelId } from "./config.mjs";
 import crypto from "node:crypto";
 
@@ -440,7 +440,7 @@ export function buildCodexModelCatalog({ models = [], defaultModel } = {}) {
 export function writeCodexModelCatalog({ catalog, models, defaultModel } = {}, outPath = codexModelCatalogPath()) {
   const nextCatalog = catalog || buildCodexModelCatalog({ models, defaultModel });
   ensureDir(path.dirname(outPath));
-  fs.writeFileSync(outPath, JSON.stringify(nextCatalog, null, 2) + "\n", "utf8");
+  atomicWriteFileSync(outPath, JSON.stringify(nextCatalog, null, 2) + "\n", "utf8");
   return { path: outPath, catalog: nextCatalog };
 }
 
@@ -469,7 +469,7 @@ export function buildCodexModelsCache({ catalog, models, defaultModel, clientVer
 export function writeCodexModelsCache({ catalog, models, defaultModel, clientVersion } = {}, outPath = codexModelsCachePath()) {
   const cache = buildCodexModelsCache({ catalog, models, defaultModel, clientVersion });
   ensureDir(path.dirname(outPath));
-  fs.writeFileSync(outPath, JSON.stringify(cache, null, 2) + "\n", "utf8");
+  atomicWriteFileSync(outPath, JSON.stringify(cache, null, 2) + "\n", "utf8");
   return { path: outPath, cache };
 }
 
@@ -533,7 +533,7 @@ function writeJsonIfChanged(filePath, value) {
     if (fs.readFileSync(filePath, "utf8") === next) return false;
   } catch {}
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, next, "utf8");
+  atomicWriteFileSync(filePath, next, "utf8");
   return true;
 }
 
@@ -718,7 +718,7 @@ export function writeClaudeCodeGatewayModelsCache({ host, port, models, fetchedA
   const cache = buildClaudeCodeGatewayModelsCache({ host, port, models, fetchedAt });
   if (!cache.models.length) return { path: outPath, skipped: true, modelCount: 0 };
   ensureDir(path.dirname(outPath));
-  fs.writeFileSync(outPath, JSON.stringify(cache, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  atomicWriteFileSync(outPath, JSON.stringify(cache, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   try { fs.chmodSync(outPath, 0o600); } catch {}
   return { path: outPath, modelCount: cache.models.length };
 }
@@ -1481,7 +1481,7 @@ function readJsonSafe(file) {
 function writeText(file, text) {
   ensureDir(path.dirname(file));
   const backup = backupFile(file);
-  fs.writeFileSync(file, text, "utf8");
+  atomicWriteFileSync(file, text, "utf8");
   return { path: file, backup };
 }
 

@@ -28,11 +28,38 @@ export function ensureDir(dir) {
 
 export function json(res, status, body) {
   if (res.destroyed || res.writableEnded) return;
-  res.writeHead(status, {
+  // 网络错误会带 status=0，直接 writeHead(0) 会让 Node 抛 ERR_HTTP_INVALID_STATUS_CODE
+  // （表现为客户端收到 500 + "Invalid status code: 0"）。这里把非法状态统一收敛成 502。
+  const code = Number.isFinite(Number(status)) && Number(status) >= 100 && Number(status) <= 999
+    ? Number(status)
+    : 502;
+  res.writeHead(code, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store"
   });
   res.end(JSON.stringify(body, null, 2));
+}
+
+/**
+ * 原子写入：先写临时文件再 rename，避免进程中途崩溃导致配置/账号池文件被截断损坏。
+ * POSIX 同设备 rename 是原子的；Windows/跨设备 rename 失败时回退到直接写（非原子但可用）。
+ * options 同 fs.writeFileSync，可选 mode 会在写后 chmod 到临时文件。
+ */
+export function atomicWriteFileSync(file, data, options = {}) {
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  fs.writeFileSync(tmp, data, options);
+  if (options.mode) {
+    try { fs.chmodSync(tmp, options.mode); } catch {}
+  }
+  try {
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch {}
+    fs.writeFileSync(file, data, options);
+    if (options.mode) {
+      try { fs.chmodSync(file, options.mode); } catch {}
+    }
+  }
 }
 
 export function readJsonBody(req) {

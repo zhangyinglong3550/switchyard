@@ -248,6 +248,57 @@ test("dispatch · account pool failover on 429", async () => {
   }
 });
 
+test("dispatch · account pool does NOT multiply retries (no outer retry amplification)", async () => {
+  // 2 个账号全部 500（500 不触发 cooldown，账号仍 eligible）。
+  // 修复前：外层 withDispatchRetry(3) × 池(2) = 最多 6 次上游调用。
+  // 修复后：账号池关闭外层重试，只由池内换号，calls ≤ 池大小(2)。
+  const home = tmpHome();
+  const prev = process.env.SWITCHYARD_HOME;
+  process.env.SWITCHYARD_HOME = home;
+  resetRoundRobinCursors();
+  try {
+    await importXaiAccountsFromText("amplify-pool", JSON.stringify([
+      { type: "xai", email: "a@x.com", access_token: "ta", refresh_token: "ra-ra-ra-ra-ra-ra-ra-ra1" },
+      { type: "xai", email: "b@x.com", access_token: "tb", refresh_token: "rb-rb-rb-rb-rb-rb-rb-rb1" }
+    ]));
+
+    const provider = {
+      id: "amplify-pool",
+      authMode: "account_pool",
+      poolKind: "xai_oauth",
+      baseUrl: "https://api.x.ai/v1",
+      apiFormat: "openai_chat"
+    };
+
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: 500,
+        text: async () => JSON.stringify({ error: "boom" }),
+        json: async () => ({ error: "boom" })
+      };
+    };
+
+    const result = await dispatchChat(provider, "grok-4.5", {
+      model: "grok-4.5",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false
+    }, { fetchImpl });
+
+    assert.equal(result.kind, "error");
+    assert.equal(result.status, 500);
+    // 池有 2 个账号 -> 最多 2 次上游调用；修复前会是 6 次。
+    assert.ok(calls <= 2, `expected <= 2 upstream calls (no amplification), got ${calls}`);
+    assert.equal(result.retryPolicy?.enabled, false, "outer retry should be disabled for account pool");
+  } finally {
+    if (prev === undefined) delete process.env.SWITCHYARD_HOME;
+    else process.env.SWITCHYARD_HOME = prev;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("sso convert · homepage 403 does not hard-fail probe", async () => {
   const { convertSsoCookie, isWebSsoJwt } = await import(`../src/account-pool/sso-convert.mjs?v=${Date.now()}-403`);
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
