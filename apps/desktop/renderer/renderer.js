@@ -3552,18 +3552,26 @@ async function refreshUsageStats() {
           : hitRate > 0
             ? "chip warn"
             : "muted";
+      const isDiscovery = row.model_id === "(发现探测)" || row.model_id === "(discovery)";
+      const modelCell = isDiscovery
+        ? `<span class="chip muted" title="客户端协议探测：列模型 / Ollama tags / props / version 等，不消耗上游推理">${escapeHtml(row.model_id)}</span>`
+        : `<span class="mono">${escapeHtml(row.model_id || "-")}</span>`;
+      // 探测行不计费、命中率无意义时显示 —
+      if (isDiscovery) {
+        costText = "—";
+      }
       tr.innerHTML = `
         <td>${escapeHtml(agentLabel(row.client_id))}</td>
-        <td class="mono">${escapeHtml(row.model_id || "-")}</td>
-        <td class="mono tiny">${escapeHtml(row.provider_id || "-")}</td>
+        <td>${modelCell}</td>
+        <td class="mono tiny">${escapeHtml(isDiscovery ? "—" : (row.provider_id || "-"))}</td>
         <td>${escapeHtml(requests)}</td>
         <td>${escapeHtml(success)}</td>
         <td>${escapeHtml(errors)}</td>
         <td><span class="${rateClass}">${escapeHtml(rateText)}</span></td>
         <td>${escapeHtml(row.total_tokens || 0)}</td>
-        <td class="mono" title="cache_read / 命中量">${escapeHtml(cacheRead)}</td>
-        <td class="mono" title="cache_creation / 写入量">${escapeHtml(cacheCreation)}</td>
-        <td><span class="${hitRateClass}" title="cache_read ÷ prompt">${escapeHtml(hitRateText)}</span></td>
+        <td class="mono" title="cache_read / 命中量">${escapeHtml(isDiscovery ? "—" : cacheRead)}</td>
+        <td class="mono" title="cache_creation / 写入量">${escapeHtml(isDiscovery ? "—" : cacheCreation)}</td>
+        <td><span class="${isDiscovery ? "muted" : hitRateClass}" title="cache_read ÷ prompt">${escapeHtml(isDiscovery ? "—" : hitRateText)}</span></td>
         <td>${escapeHtml(costText)}</td>
         <td>${escapeHtml(row.avg_latency_ms || 0)} ms</td>
       `;
@@ -3575,13 +3583,19 @@ async function refreshUsageStats() {
     reqTbody.innerHTML = "";
     for (const [index, row] of (requests || []).entries()) {
       const tr = document.createElement("tr");
+      const modelLabel = row.model_id || row.requested_model || "";
+      const isDiscoveryRow = modelLabel === "(发现探测)"
+        || (!modelLabel && /^(GET|HEAD)$/i.test(row.method || "") && !/chat\/completions|\/responses$|\/messages$/i.test(row.path || ""));
+      const modelDisplay = isDiscoveryRow
+        ? `<span class="chip muted" title="${escapeHtml(row.path || "")}">(发现探测)</span>`
+        : `<span class="mono">${escapeHtml(modelLabel || "-")}</span>`;
       tr.innerHTML = `
         <td class="mono">${escapeHtml(formatDate(row.ts))}</td>
         <td>${escapeHtml(agentLabel(row.client_id))}</td>
-        <td class="mono">${escapeHtml(row.model_id || row.requested_model || "-")}</td>
+        <td>${modelDisplay}</td>
         <td>${escapeHtml(row.status || "-")}</td>
         <td>${escapeHtml(row.latency_ms || 0)} ms</td>
-        <td><button class="btn" data-request-issue="${index}">问题包</button><button class="btn" data-request-export="${index}">导出</button><button class="btn" data-request-replay="${index}">草稿回放</button></td>
+        <td>${isDiscoveryRow ? '<span class="tiny muted">探测</span>' : `<button class="btn" data-request-issue="${index}">问题包</button><button class="btn" data-request-export="${index}">导出</button><button class="btn" data-request-replay="${index}">草稿回放</button>`}</td>
       `;
       reqTbody.appendChild(tr);
     }
@@ -4308,6 +4322,35 @@ document.getElementById("btn-sessions-refresh")?.addEventListener("click", () =>
 document.getElementById("session-agent-filter")?.addEventListener("change", () => {
   refreshAgentSessions().catch((err) => toast(`刷新会话失败：${err.message}`));
 });
+function openSessionRenameDialog({ id, name = "" } = {}) {
+  if (!id) return;
+  state.sessionRename = { id, name: name || "" };
+  const meta = document.getElementById("session-rename-meta");
+  if (meta) meta.textContent = `会话 ID：${id}`;
+  const input = document.getElementById("session-rename-title");
+  if (input) {
+    input.value = name || "";
+    queueMicrotask(() => {
+      input.focus();
+      input.select();
+    });
+  }
+  document.getElementById("session-rename-wrap")?.classList.add("open");
+}
+
+async function submitSessionRename(title) {
+  const id = state.sessionRename?.id;
+  if (!id) return;
+  const result = await invoke("agent:sessions:rename", { id, title });
+  document.getElementById("session-rename-wrap")?.classList.remove("open");
+  state.sessionRename = null;
+  if (result?.cleared) toast("已清除自定义名称");
+  else if (result?.nativeSynced) toast(`已命名为「${result.title}」（已同步原生）`);
+  else toast(`已命名为「${result?.title || String(title || "").trim()}」`);
+  if (result?.nativeError) toast(`原生标题同步失败：${result.nativeError}`);
+  await refreshAgentSessions();
+}
+
 document.getElementById("sessions-tbody")?.addEventListener("click", async (event) => {
   const view = event.target.closest("[data-session-view]");
   const rename = event.target.closest("[data-session-rename]");
@@ -4317,18 +4360,11 @@ document.getElementById("sessions-tbody")?.addEventListener("click", async (even
       const row = await invoke("agent:sessions:read", { id: view.dataset.sessionView });
       openSessionViewer(row);
     } else if (rename) {
-      const current = rename.dataset.sessionName || "";
-      const next = window.prompt("会话名称（留空则清除自定义名）", current);
-      if (next === null) return;
-      const result = await invoke("agent:sessions:rename", {
+      // Electron 渲染进程不支持 window.prompt，改用应用内对话框
+      openSessionRenameDialog({
         id: rename.dataset.sessionRename,
-        title: next
+        name: rename.dataset.sessionName || ""
       });
-      if (result?.cleared) toast("已清除自定义名称");
-      else if (result?.nativeSynced) toast(`已命名为「${result.title}」（已同步原生）`);
-      else toast(`已命名为「${result?.title || next.trim()}」`);
-      if (result?.nativeError) toast(`原生标题同步失败：${result.nativeError}`);
-      await refreshAgentSessions();
     } else if (del) {
       if (!confirm("确定删除或归档这个会话吗？文件会移到废纸篓，Hermes 数据库会话会标记为归档。")) return;
       await invoke("agent:sessions:delete", { id: del.dataset.sessionDelete });
@@ -4337,6 +4373,24 @@ document.getElementById("sessions-tbody")?.addEventListener("click", async (even
     }
   } catch (err) {
     toast(`会话操作失败：${err.message}`);
+  }
+});
+
+document.getElementById("btn-session-rename-confirm")?.addEventListener("click", () => {
+  const title = document.getElementById("session-rename-title")?.value ?? "";
+  submitSessionRename(title).catch((err) => toast(`会话命名失败：${err.message}`));
+});
+
+document.getElementById("btn-session-rename-clear")?.addEventListener("click", () => {
+  submitSessionRename("").catch((err) => toast(`清除会话名失败：${err.message}`));
+});
+
+document.getElementById("session-rename-title")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    document.getElementById("btn-session-rename-confirm")?.click();
+  } else if (event.key === "Escape") {
+    document.getElementById("session-rename-wrap")?.classList.remove("open");
   }
 });
 

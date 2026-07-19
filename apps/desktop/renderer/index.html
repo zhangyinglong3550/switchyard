@@ -608,6 +608,22 @@
   </div>
 </div>
 
+<div class="dialog-overlay" id="session-rename-wrap">
+  <div class="dialog">
+    <h2>会话命名</h2>
+    <div class="tiny muted" id="session-rename-meta">-</div>
+    <label>名称
+      <input class="field" id="session-rename-title" placeholder="自定义显示名" maxlength="200" autocomplete="off">
+    </label>
+    <div class="callout compact">写入 Switchyard 覆盖层；留空并保存可清除自定义名。Hermes / OpenCode / Grok 会尽量同步原生标题。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-rename-wrap">取消</button>
+      <button class="btn" type="button" id="btn-session-rename-clear">清除名称</button>
+      <button class="btn primary" type="button" id="btn-session-rename-confirm">保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="dialog-overlay" id="skill-link-wrap">
   <div class="dialog">
     <h2>复制 Skill 到其他 Agent</h2>

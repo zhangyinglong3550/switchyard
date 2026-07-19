@@ -229,6 +229,75 @@ test("usage UI · model table headers include success rate, cache and latency co
   assert.match(renderer, /agent:sessions:rename/);
 });
 
+test("request log store · discovery probes aggregate as (发现探测) not unknown", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-discovery-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=discovery-${Date.now()}`);
+
+  // new-style: gateway already or store labels discovery
+  store.recordRequestEvent({
+    ts: "2026-07-19T12:00:00.000Z",
+    requestLog: true,
+    method: "GET",
+    path: "/hermes/v1/models",
+    clientId: "hermes",
+    status: 200,
+    ms: 1
+  });
+  store.recordRequestEvent({
+    ts: "2026-07-19T12:00:01.000Z",
+    requestLog: true,
+    method: "GET",
+    path: "/hermes/api/tags",
+    clientId: "hermes",
+    status: 404,
+    ms: 0
+  });
+  store.recordRequestEvent({
+    ts: "2026-07-19T12:00:02.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/hermes/api/show",
+    clientId: "hermes",
+    status: 404,
+    ms: 0
+  });
+  // real chat
+  store.recordRequestEvent({
+    ts: "2026-07-19T12:00:03.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/hermes/v1/chat/completions",
+    clientId: "hermes",
+    providerId: "codex",
+    modelId: "codex/gpt-5.6-luna",
+    requestedModel: "codex/gpt-5.6-luna",
+    status: 200,
+    ms: 100,
+    promptTokens: 10,
+    totalTokens: 12
+  });
+
+  const rows = store.listRequestLogs({ limit: 10 });
+  const probeRows = rows.filter((r) => r.model_id === store.DISCOVERY_PROBE_MODEL_ID);
+  assert.equal(probeRows.length, 3);
+
+  const byAgent = store.usageByAgentModel({ agentId: "hermes" });
+  const probe = byAgent.find((r) => r.model_id === store.DISCOVERY_PROBE_MODEL_ID);
+  const chat = byAgent.find((r) => r.model_id === "codex/gpt-5.6-luna");
+  assert.ok(probe, "discovery bucket present");
+  assert.equal(probe.request_count, 3);
+  assert.equal(probe.error_count, 2); // two 404
+  assert.ok(chat);
+  assert.equal(chat.request_count, 1);
+  assert.equal(byAgent.some((r) => r.model_id === "(unknown)"), false);
+});
+
 test("request log store · aggregates cache_read / cache_creation and hit rate per model", async (t) => {
   if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-cache-"));

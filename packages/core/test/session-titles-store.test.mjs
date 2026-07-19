@@ -50,8 +50,13 @@ test("sessions UI · rename control and IPC channel present", () => {
   const main = fs.readFileSync(path.join(root, "apps/desktop/src/main.mjs"), "utf8");
   assert.match(html, /id="sessions-tbody"/);
   assert.match(html, /自定义名称|命名/);
+  assert.match(html, /id="session-rename-wrap"/);
+  assert.match(html, /id="session-rename-title"/);
   assert.match(renderer, /data-session-rename/);
   assert.match(renderer, /agent:sessions:rename/);
+  assert.match(renderer, /openSessionRenameDialog/);
+  // Electron 禁用 window.prompt，命名必须走应用内对话框
+  assert.doesNotMatch(renderer, /window\.prompt\s*\(/);
   assert.match(main, /agent:sessions:rename/);
   assert.match(main, /renameAgentSession/);
 });

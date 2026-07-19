@@ -4,6 +4,14 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { ensureDir, logDir, nowIso } from "../../../packages/core/src/utils.mjs";
 import { cacheHitRatePercent } from "../../../packages/core/src/stream-usage.mjs";
+import {
+  DISCOVERY_PROBE_MODEL_ID,
+  isDiscoveryProbeRequest,
+  resolveUsageModelKey,
+  usageModelKeySql
+} from "../../../packages/core/src/request-kind.mjs";
+
+export { DISCOVERY_PROBE_MODEL_ID, isDiscoveryProbeRequest, resolveUsageModelKey };
 
 const DEFAULT_RETAIN_DAYS = 14;
 const DEFAULT_MAX_ROWS = 10000;
@@ -220,14 +228,28 @@ function ensureRequestLogColumns() {
 }
 
 function sanitizeEvent(entry) {
+  const method = entry.method || null;
+  const path = entry.path || null;
+  let modelId = entry.modelId || null;
+  let requestedModel = entry.requestedModel || null;
+  // 探测请求统一落库为「发现探测」，避免用量页显示「未知」
+  if (isDiscoveryProbeRequest({
+    method,
+    path,
+    modelId,
+    requestedModel
+  })) {
+    modelId = modelId || DISCOVERY_PROBE_MODEL_ID;
+    requestedModel = requestedModel || DISCOVERY_PROBE_MODEL_ID;
+  }
   return {
     ts: entry.ts || nowIso(),
-    method: entry.method || null,
-    path: entry.path || null,
+    method,
+    path,
     client_id: entry.clientId || null,
     provider_id: entry.providerId || null,
-    model_id: entry.modelId || null,
-    requested_model: entry.requestedModel || null,
+    model_id: modelId,
+    requested_model: requestedModel,
     upstream_model: entry.upstreamModel || null,
     api_format: entry.apiFormat || null,
     status: intValue(entry.status),
@@ -378,14 +400,15 @@ function usageSelectMetrics() {
 export function usageByModel(filters = {}) {
   initRequestLogStore();
   const limit = Math.min(Math.max(intValue(filters.limit) || 100, 1), 1000);
+  const modelKey = usageModelKeySql();
   const rows = runSql(`
     SELECT
-      COALESCE(model_id, requested_model, '(unknown)') AS model_id,
+      ${modelKey} AS model_id,
       provider_id,
       ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
-    GROUP BY COALESCE(model_id, requested_model, '(unknown)'), provider_id
+    GROUP BY ${modelKey}, provider_id
     ORDER BY request_count DESC, total_tokens DESC
     LIMIT ${limit};
   `, { json: true });
@@ -395,15 +418,16 @@ export function usageByModel(filters = {}) {
 export function usageByAgentModel(filters = {}) {
   initRequestLogStore();
   const limit = Math.min(Math.max(intValue(filters.limit) || 100, 1), 1000);
+  const modelKey = usageModelKeySql();
   const rows = runSql(`
     SELECT
       COALESCE(client_id, '(unknown)') AS client_id,
-      COALESCE(model_id, requested_model, '(unknown)') AS model_id,
+      ${modelKey} AS model_id,
       provider_id,
       ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
-    GROUP BY COALESCE(client_id, '(unknown)'), COALESCE(model_id, requested_model, '(unknown)'), provider_id
+    GROUP BY COALESCE(client_id, '(unknown)'), ${modelKey}, provider_id
     ORDER BY request_count DESC, total_tokens DESC
     LIMIT ${limit};
   `, { json: true });
@@ -413,15 +437,16 @@ export function usageByAgentModel(filters = {}) {
 export function usageDaily(filters = {}) {
   initRequestLogStore();
   const limit = Math.min(Math.max(intValue(filters.limit) || 30, 1), 366);
+  const modelKey = usageModelKeySql();
   const rows = runSql(`
     SELECT
       date(ts, 'localtime') AS day,
       COALESCE(client_id, '(unknown)') AS client_id,
-      COALESCE(model_id, requested_model, '(unknown)') AS model_id,
+      ${modelKey} AS model_id,
       ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
-    GROUP BY date(ts, 'localtime'), COALESCE(client_id, '(unknown)'), COALESCE(model_id, requested_model, '(unknown)')
+    GROUP BY date(ts, 'localtime'), COALESCE(client_id, '(unknown)'), ${modelKey}
     ORDER BY day DESC, request_count DESC, total_tokens DESC
     LIMIT ${limit * 200};
   `, { json: true });

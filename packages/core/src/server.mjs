@@ -22,6 +22,10 @@ import {
   mergeUsage,
   normalizeUsageObject
 } from "./stream-usage.mjs";
+import {
+  DISCOVERY_PROBE_MODEL_ID,
+  isDiscoveryProbeRequest
+} from "./request-kind.mjs";
 registerBuiltinPatches();
 
 const CLIENT_PROTOCOL = {
@@ -165,7 +169,14 @@ export function createServer({ onLog } = {}) {
       emit({ level: "error", msg: message });
       json(res, 500, { error: message });
     } finally {
-      emit({ level: "info", msg: "request", ...requestRecord, status: res.statusCode, ms: Date.now() - start });
+      // 协议探测（列模型 / Ollama tags / props 等）无 body.model，单独标成「发现探测」
+      const finished = { ...requestRecord, status: res.statusCode, ms: Date.now() - start };
+      if (isDiscoveryProbeRequest(finished)) {
+        finished.modelId = finished.modelId || DISCOVERY_PROBE_MODEL_ID;
+        finished.requestedModel = finished.requestedModel || DISCOVERY_PROBE_MODEL_ID;
+        finished.requestKind = "discovery_probe";
+      }
+      emit({ level: "info", msg: "request", ...finished });
     }
   });
 
