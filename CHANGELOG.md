@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.16 — 2026-07-19
+
+### Feat
+
+- **会话命名**：Sessions 页可为本机会话自定义名称。标题写入 `~/.switchyard/session-titles.json` 覆盖层；Hermes / OpenCode / Grok 尽量同步写回原生 title（Claude / Codex 等仅覆盖显示名）。留空可清除自定义名。
+- **按模型缓存统计**（对齐 CC Switch 核心口径，不做缓存计价）：
+  - 从上游 usage 提取 `cache_read` / `cache_creation`（含 Anthropic `cache_*_input_tokens`、OpenAI `prompt_tokens_details` 等别名）。
+  - 请求日志落库并按 Agent×模型聚合：缓存命中量、缓存写入量、命中率（`cache_read ÷ prompt`，cap 100%）。
+  - 用量页表格与汇总展示缓存列。
+
 ## 2.2.15 — 2026-07-19
 
 ### Fix

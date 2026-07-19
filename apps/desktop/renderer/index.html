@@ -277,7 +277,7 @@
       <div class="toolbar">
         <div>
           <div class="page-title">用量统计</div>
-          <div class="tiny muted">按 Agent 和模型查看调用次数、成功率、失败、Token 与延迟</div>
+          <div class="tiny muted">按 Agent 和模型查看调用次数、成功率、失败、Token、缓存命中（来自上游 usage）与延迟</div>
         </div>
         <div style="flex:1;"></div>
         <select class="field" id="usage-agent-filter" style="min-width:160px;">
@@ -325,7 +325,7 @@
             <div class="hd"><h3>模型用量</h3><span class="sub" id="usage-summary">-</span></div>
             <div class="table-scroll medium">
               <table class="data compact" id="usage-model-table">
-                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>成本</th><th>均延迟</th></tr></thead>
+                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>缓存命中</th><th>缓存写入</th><th>命中率</th><th>成本</th><th>均延迟</th></tr></thead>
                 <tbody id="usage-tbody"></tbody>
               </table>
             </div>
@@ -365,7 +365,10 @@
     <!-- Sessions -->
     <section class="tab-panel" id="panel-sessions">
       <div class="toolbar">
-        <div class="page-title">Agent 会话</div>
+        <div>
+          <div class="page-title">Agent 会话</div>
+          <div class="tiny muted">可为会话自定义名称（写入 Switchyard 覆盖层；Hermes / OpenCode / Grok 尽量同步原生标题）</div>
+        </div>
         <div style="flex:1;"></div>
         <select class="field" id="session-agent-filter">
           <option value="">全部 Agent</option>

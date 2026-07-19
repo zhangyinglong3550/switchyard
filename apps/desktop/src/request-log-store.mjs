@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { ensureDir, logDir, nowIso } from "../../../packages/core/src/utils.mjs";
+import { cacheHitRatePercent } from "../../../packages/core/src/stream-usage.mjs";
 
 const DEFAULT_RETAIN_DAYS = 14;
 const DEFAULT_MAX_ROWS = 10000;
@@ -185,6 +186,8 @@ export function initRequestLogStore() {
       prompt_tokens INTEGER DEFAULT 0,
       completion_tokens INTEGER DEFAULT 0,
       total_tokens INTEGER DEFAULT 0,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_creation_tokens INTEGER DEFAULT 0,
       prompt_preview TEXT,
       response_preview TEXT,
       request_summary TEXT,
@@ -207,7 +210,9 @@ function ensureRequestLogColumns() {
     ["prompt_preview", "TEXT"],
     ["response_preview", "TEXT"],
     ["request_summary", "TEXT"],
-    ["response_summary", "TEXT"]
+    ["response_summary", "TEXT"],
+    ["cache_read_tokens", "INTEGER DEFAULT 0"],
+    ["cache_creation_tokens", "INTEGER DEFAULT 0"]
   ]) {
     if (columns.has(name)) continue;
     runSql(`ALTER TABLE request_logs ADD COLUMN ${name} ${type};`);
@@ -230,6 +235,8 @@ function sanitizeEvent(entry) {
     prompt_tokens: intValue(entry.promptTokens),
     completion_tokens: intValue(entry.completionTokens),
     total_tokens: intValue(entry.totalTokens),
+    cache_read_tokens: intValue(entry.cacheReadTokens ?? entry.cache_read_tokens),
+    cache_creation_tokens: intValue(entry.cacheCreationTokens ?? entry.cache_creation_tokens),
     prompt_preview: entry.promptPreview ? String(entry.promptPreview).slice(0, 1200) : null,
     response_preview: entry.responsePreview ? String(entry.responsePreview).slice(0, 1200) : null,
     request_summary: jsonSummary(entry.requestSummary),
@@ -334,12 +341,20 @@ export function enrichUsageStatsRow(row = {}) {
   const success_rate = request_count > 0
     ? Math.round((success_count / request_count) * 1000) / 10
     : null;
+  const prompt_tokens = numberOrZero(row.prompt_tokens);
+  const cache_read_tokens = numberOrZero(row.cache_read_tokens);
+  const cache_creation_tokens = numberOrZero(row.cache_creation_tokens);
+  const cache_hit_rate = cacheHitRatePercent(cache_read_tokens, prompt_tokens);
   return {
     ...row,
     request_count,
     error_count,
     success_count,
     success_rate,
+    prompt_tokens,
+    cache_read_tokens,
+    cache_creation_tokens,
+    cache_hit_rate,
     avg_latency_ms: row.avg_latency_ms == null || row.avg_latency_ms === ""
       ? 0
       : numberOrZero(row.avg_latency_ms)
@@ -354,6 +369,8 @@ function usageSelectMetrics() {
       SUM(prompt_tokens) AS prompt_tokens,
       SUM(completion_tokens) AS completion_tokens,
       SUM(total_tokens) AS total_tokens,
+      SUM(COALESCE(cache_read_tokens, 0)) AS cache_read_tokens,
+      SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens,
       ROUND(AVG(latency_ms), 1) AS avg_latency_ms
   `;
 }

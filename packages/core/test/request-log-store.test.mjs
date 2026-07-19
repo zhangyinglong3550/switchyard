@@ -199,7 +199,7 @@ test("request log store · per-model success rate, failure and latency from real
   assert.equal(empty.success_count, 0);
 });
 
-test("usage UI · model table headers include success rate and latency columns", () => {
+test("usage UI · model table headers include success rate, cache and latency columns", () => {
   const htmlPath = path.resolve(
     path.dirname(new URL(import.meta.url).pathname),
     "../../../apps/desktop/renderer/index.html"
@@ -213,12 +213,102 @@ test("usage UI · model table headers include success rate and latency columns",
   assert.match(html, /成功率/);
   assert.match(html, /调用/);
   assert.match(html, /失败/);
+  assert.match(html, /缓存命中/);
+  assert.match(html, /缓存写入/);
+  assert.match(html, /命中率/);
   assert.match(html, /均延迟/);
-  // renderer renders success_rate
+  // renderer renders success_rate + cache fields
   const rendererPath = path.join(path.dirname(resolved), "renderer.js");
   const renderer = fs.readFileSync(rendererPath, "utf8");
   assert.match(renderer, /success_rate/);
   assert.match(renderer, /success_count/);
+  assert.match(renderer, /cache_read_tokens/);
+  assert.match(renderer, /cache_creation_tokens/);
+  assert.match(renderer, /cache_hit_rate/);
+  assert.match(renderer, /data-session-rename/);
+  assert.match(renderer, /agent:sessions:rename/);
+});
+
+test("request log store · aggregates cache_read / cache_creation and hit rate per model", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-cache-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=cache-${Date.now()}`);
+
+  // model A: two requests — cache read 400+300=700, prompt 500+500=1000 → hit 70%
+  store.recordRequestEvent({
+    ts: "2026-07-19T10:00:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/messages",
+    clientId: "claude-code",
+    providerId: "anthropic",
+    modelId: "anthropic/claude-sonnet",
+    status: 200,
+    ms: 100,
+    promptTokens: 500,
+    completionTokens: 20,
+    totalTokens: 520,
+    cacheReadTokens: 400,
+    cacheCreationTokens: 50
+  });
+  store.recordRequestEvent({
+    ts: "2026-07-19T10:01:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/messages",
+    clientId: "claude-code",
+    providerId: "anthropic",
+    modelId: "anthropic/claude-sonnet",
+    status: 200,
+    ms: 80,
+    promptTokens: 500,
+    completionTokens: 10,
+    totalTokens: 510,
+    cacheReadTokens: 300,
+    cacheCreationTokens: 0
+  });
+  // model B: no cache
+  store.recordRequestEvent({
+    ts: "2026-07-19T10:02:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/chat/completions",
+    clientId: "codex",
+    providerId: "openai",
+    modelId: "openai/gpt",
+    status: 200,
+    ms: 50,
+    promptTokens: 100,
+    completionTokens: 5,
+    totalTokens: 105,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0
+  });
+
+  const byModel = store.usageByModel();
+  const a = byModel.find((row) => row.model_id === "anthropic/claude-sonnet");
+  const b = byModel.find((row) => row.model_id === "openai/gpt");
+  assert.ok(a);
+  assert.equal(a.cache_read_tokens, 700);
+  assert.equal(a.cache_creation_tokens, 50);
+  assert.equal(a.prompt_tokens, 1000);
+  assert.equal(a.cache_hit_rate, 70);
+  assert.ok(b);
+  assert.equal(b.cache_read_tokens, 0);
+  assert.equal(b.cache_hit_rate, 0);
+
+  const agentRows = store.usageByAgentModel({ agentId: "claude-code" });
+  assert.equal(agentRows.length, 1);
+  assert.equal(agentRows[0].cache_hit_rate, 70);
+  assert.equal(agentRows[0].cache_read_tokens, 700);
+
+  const empty = store.enrichUsageStatsRow({ request_count: 1, prompt_tokens: 0, cache_read_tokens: 10 });
+  assert.equal(empty.cache_hit_rate, null);
 });
 
 test("request log store · cleanup removes old rows and caps max rows", async (t) => {

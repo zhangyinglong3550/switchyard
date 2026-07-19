@@ -3539,6 +3539,19 @@ async function refreshUsageStats() {
         costByCurrency[currency] = (costByCurrency[currency] || 0) + cost;
         costText = formatCost(cost, currency);
       }
+      const cacheRead = Number(row.cache_read_tokens || 0);
+      const cacheCreation = Number(row.cache_creation_tokens || 0);
+      const hitRate = row.cache_hit_rate == null || row.cache_hit_rate === ""
+        ? null
+        : Number(row.cache_hit_rate);
+      const hitRateText = hitRate == null || !Number.isFinite(hitRate) ? "—" : `${hitRate}%`;
+      const hitRateClass = hitRate == null
+        ? "muted"
+        : hitRate >= 50
+          ? "chip good"
+          : hitRate > 0
+            ? "chip warn"
+            : "muted";
       tr.innerHTML = `
         <td>${escapeHtml(agentLabel(row.client_id))}</td>
         <td class="mono">${escapeHtml(row.model_id || "-")}</td>
@@ -3548,12 +3561,15 @@ async function refreshUsageStats() {
         <td>${escapeHtml(errors)}</td>
         <td><span class="${rateClass}">${escapeHtml(rateText)}</span></td>
         <td>${escapeHtml(row.total_tokens || 0)}</td>
+        <td class="mono" title="cache_read / 命中量">${escapeHtml(cacheRead)}</td>
+        <td class="mono" title="cache_creation / 写入量">${escapeHtml(cacheCreation)}</td>
+        <td><span class="${hitRateClass}" title="cache_read ÷ prompt">${escapeHtml(hitRateText)}</span></td>
         <td>${escapeHtml(costText)}</td>
         <td>${escapeHtml(row.avg_latency_ms || 0)} ms</td>
       `;
       usageTbody.appendChild(tr);
     }
-    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="10" class="muted">暂无用量数据</td></tr>';
+    if (!usage?.length) usageTbody.innerHTML = '<tr><td colspan="13" class="muted">暂无用量数据</td></tr>';
   }
   if (reqTbody) {
     reqTbody.innerHTML = "";
@@ -3587,16 +3603,25 @@ async function refreshUsageStats() {
     return sum + Math.max(0, Number(row.request_count || 0) - Number(row.error_count || 0));
   }, 0);
   const totalTokens = (usage || []).reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
+  const totalPrompt = (usage || []).reduce((sum, row) => sum + Number(row.prompt_tokens || 0), 0);
+  const totalCacheRead = (usage || []).reduce((sum, row) => sum + Number(row.cache_read_tokens || 0), 0);
+  const totalCacheCreation = (usage || []).reduce((sum, row) => sum + Number(row.cache_creation_tokens || 0), 0);
   const overallRate = totalRequests > 0 ? Math.round((totalSuccess / totalRequests) * 1000) / 10 : null;
+  const overallHitRate = totalPrompt > 0
+    ? Math.min(100, Math.round((totalCacheRead / totalPrompt) * 1000) / 10)
+    : null;
   const costParts = Object.entries(costByCurrency)
     .filter(([, v]) => v > 0)
     .map(([cur, v]) => formatCost(v, cur));
   const costSuffix = costParts.length ? ` · 成本 ${costParts.join(" + ")}` : "";
+  const cacheSuffix = totalPrompt > 0 || totalCacheRead > 0 || totalCacheCreation > 0
+    ? ` · 缓存命中 ${totalCacheRead} · 写入 ${totalCacheCreation}${overallHitRate == null ? "" : ` · 命中率 ${overallHitRate}%`}`
+    : "";
   const usageSummary = document.getElementById("usage-summary");
   if (usageSummary) {
     usageSummary.textContent = overallRate == null
-      ? `${totalRequests} 次 · ${totalTokens} tokens${costSuffix}`
-      : `${totalRequests} 次 · 成功 ${totalSuccess} · 失败 ${totalErrors} · 成功率 ${overallRate}% · ${totalTokens} tokens${costSuffix}`;
+      ? `${totalRequests} 次 · ${totalTokens} tokens${cacheSuffix}${costSuffix}`
+      : `${totalRequests} 次 · 成功 ${totalSuccess} · 失败 ${totalErrors} · 成功率 ${overallRate}% · ${totalTokens} tokens${cacheSuffix}${costSuffix}`;
   }
   const requestSummary = document.getElementById("request-log-summary");
   if (requestSummary) requestSummary.textContent = `${requests?.length || 0} 条`;
@@ -4033,13 +4058,17 @@ async function refreshAgentSessions() {
   tbody.innerHTML = "";
   for (const row of rows || []) {
     const tr = document.createElement("tr");
+    const nameCell = row.hasCustomTitle
+      ? `<div>${escapeHtml(row.name)}</div><div class="tiny muted">自定义名称${row.nativeName && row.nativeName !== row.name ? ` · 原名 ${escapeHtml(row.nativeName)}` : ""}</div>`
+      : escapeHtml(row.name || "");
     tr.innerHTML = `
       <td>${escapeHtml(row.agentLabel || agentLabel(row.agentId))}</td>
-      <td class="mono">${escapeHtml(row.name)}</td>
+      <td class="mono">${nameCell}</td>
       <td class="mono">${escapeHtml(row.relativePath || row.path)}</td>
       <td>${escapeHtml(row.source === "hermes-state-db" ? `${row.messageCount || 0} 条` : formatBytes(row.size))}</td>
       <td class="mono">${escapeHtml(formatDate(row.mtime))}</td>
       <td class="actions-cell">
+        <button class="btn" data-session-rename="${escapeHtml(row.id)}" data-session-name="${escapeHtml(row.name || "")}">命名</button>
         <button class="btn" data-session-view="${escapeHtml(row.id)}">查看</button>
         <button class="btn danger" data-session-delete="${escapeHtml(row.id)}">删除</button>
       </td>
@@ -4281,11 +4310,25 @@ document.getElementById("session-agent-filter")?.addEventListener("change", () =
 });
 document.getElementById("sessions-tbody")?.addEventListener("click", async (event) => {
   const view = event.target.closest("[data-session-view]");
+  const rename = event.target.closest("[data-session-rename]");
   const del = event.target.closest("[data-session-delete]");
   try {
     if (view) {
       const row = await invoke("agent:sessions:read", { id: view.dataset.sessionView });
       openSessionViewer(row);
+    } else if (rename) {
+      const current = rename.dataset.sessionName || "";
+      const next = window.prompt("会话名称（留空则清除自定义名）", current);
+      if (next === null) return;
+      const result = await invoke("agent:sessions:rename", {
+        id: rename.dataset.sessionRename,
+        title: next
+      });
+      if (result?.cleared) toast("已清除自定义名称");
+      else if (result?.nativeSynced) toast(`已命名为「${result.title}」（已同步原生）`);
+      else toast(`已命名为「${result?.title || next.trim()}」`);
+      if (result?.nativeError) toast(`原生标题同步失败：${result.nativeError}`);
+      await refreshAgentSessions();
     } else if (del) {
       if (!confirm("确定删除或归档这个会话吗？文件会移到废纸篓，Hermes 数据库会话会标记为归档。")) return;
       await invoke("agent:sessions:delete", { id: del.dataset.sessionDelete });

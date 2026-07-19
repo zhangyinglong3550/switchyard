@@ -36,6 +36,7 @@ import {
 import {
   listAgentSessions,
   readAgentSession,
+  renameAgentSession,
   listAgentSkills,
   readAgentSkill,
   saveAgentSkill,
@@ -1203,6 +1204,7 @@ ipcMain.handle("logs:open-file", async () => {
 });
 ipcMain.handle("agent:sessions:list", (_e, filters = {}) => listAgentSessions(filters));
 ipcMain.handle("agent:sessions:read", (_e, { id }) => readAgentSession(id));
+ipcMain.handle("agent:sessions:rename", (_e, { id, title } = {}) => renameAgentSession(id, title));
 ipcMain.handle("agent:sessions:delete", async (_e, { id }) => {
   const resource = resolveAgentResource(id, "session");
   if (resource.source === "hermes-state-db") {

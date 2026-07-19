@@ -361,12 +361,23 @@ function previewJson(value, max = 800) {
 }
 
 function normalizeResponseUsage(usage) {
-  const promptTokens = firstNumber(usage?.prompt_tokens, usage?.input_tokens);
-  const completionTokens = firstNumber(usage?.completion_tokens, usage?.output_tokens);
+  // 复用 stream-usage 完整归一（含 cache），摘要里同时保留 camelCase 供 UI
+  const normalized = normalizeUsageObject(usage);
+  if (!normalized) {
+    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  }
   return {
-    promptTokens,
-    completionTokens,
-    totalTokens: firstNumber(usage?.total_tokens, promptTokens + completionTokens)
+    promptTokens: normalized.prompt_tokens,
+    completionTokens: normalized.completion_tokens,
+    totalTokens: normalized.total_tokens,
+    cacheReadTokens: normalized.cache_read_tokens,
+    cacheCreationTokens: normalized.cache_creation_tokens,
+    // snake_case 兼容落库 / 旧读者
+    prompt_tokens: normalized.prompt_tokens,
+    completion_tokens: normalized.completion_tokens,
+    total_tokens: normalized.total_tokens,
+    cache_read_tokens: normalized.cache_read_tokens,
+    cache_creation_tokens: normalized.cache_creation_tokens
   };
 }
 
@@ -551,13 +562,9 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
       argumentsPreview: `${functionCallDeltaCount} delta events, ${functionCallDoneCount} done events`
     });
   }
-  // 流式 usage：优先 diag 解析到的 usage，再回退空
+  // 流式 usage：优先 diag 解析到的 usage（含 cache），再回退空
   const streamUsage = summary?.usage
-    ? {
-      promptTokens: firstNumber(summary.usage.prompt_tokens, summary.usage.promptTokens),
-      completionTokens: firstNumber(summary.usage.completion_tokens, summary.usage.completionTokens),
-      totalTokens: firstNumber(summary.usage.total_tokens, summary.usage.totalTokens)
-    }
+    ? normalizeResponseUsage(summary.usage)
     : normalizeResponseUsage(null);
   return {
     stream: true,

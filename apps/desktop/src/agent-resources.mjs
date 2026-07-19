@@ -2,6 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import {
+  applySessionTitleOverlays,
+  getSessionTitle,
+  loadSessionTitles,
+  resolveSessionDisplayName,
+  setSessionTitle
+} from "./session-titles-store.mjs";
 
 const TEXT_MAX_BYTES = 512 * 1024;
 const SESSION_EXTENSIONS = new Set([".jsonl", ".json", ".session", ".log"]);
@@ -328,7 +335,8 @@ export function listAgentSessions({ agentId = "", source = "", includeAllSources
     if (agent.id === "opencode") rows.push(...listOpenCodeSessions({ source: sourceFilter, includeAllSources }));
   }
   rows.sort((a, b) => String(b.mtime).localeCompare(String(a.mtime)));
-  return rows.slice(0, 500);
+  // 应用本机自定义会话名（不改底层 id/路径）
+  return applySessionTitleOverlays(rows.slice(0, 500));
 }
 
 function runSqliteJson(db, sql) {
@@ -604,14 +612,99 @@ function readTextFile(file, maxBytes = TEXT_MAX_BYTES) {
 
 export function readAgentSession(id) {
   const decoded = decodeResource(id);
-  if (decoded.source === "hermes-state-db") return readHermesDbSession(id);
-  if (decoded.source === "opencode-storage") return readOpenCodeSession(id);
-  const resource = resolveAgentResource(id, "session");
-  if (resource.agent.id === "grok" && path.basename(resource.target) === "summary.json") {
-    return readGrokSession(resource);
+  let row;
+  if (decoded.source === "hermes-state-db") row = readHermesDbSession(id);
+  else if (decoded.source === "opencode-storage") row = readOpenCodeSession(id);
+  else {
+    const resource = resolveAgentResource(id, "session");
+    if (resource.agent.id === "grok" && path.basename(resource.target) === "summary.json") {
+      row = readGrokSession(resource);
+    } else {
+      const read = readTextFile(resource.target, 256 * 1024);
+      row = { ...resource, ...read, conversation: parseSessionConversation(read.text, resource.agent.id) };
+    }
   }
-  const read = readTextFile(resource.target, 256 * 1024);
-  return { ...resource, ...read, conversation: parseSessionConversation(read.text, resource.agent.id) };
+  const store = loadSessionTitles();
+  const resolved = resolveSessionDisplayName({
+    id,
+    name: row?.name || row?.title || path.basename(row?.target || id)
+  }, store);
+  return {
+    ...row,
+    id: row?.id || id,
+    nativeName: resolved.nativeName,
+    name: resolved.name,
+    hasCustomTitle: resolved.hasCustomTitle
+  };
+}
+
+/**
+ * 为会话命名：写入 ~/.switchyard/session-titles.json；
+ * Hermes / OpenCode / Grok 尽量同步写回原生 title（失败不阻断 overlay）。
+ * title 为空则清除自定义名。
+ */
+export function renameAgentSession(id, title) {
+  const resource = resolveAgentResource(id, "session");
+  const agentId = resource.agent?.id || resource.agentId || "";
+  let nativeSynced = false;
+  let nativeError = null;
+  const trimmed = String(title ?? "").trim();
+
+  if (trimmed) {
+    try {
+      nativeSynced = syncNativeSessionTitle(resource, trimmed);
+    } catch (err) {
+      nativeError = err?.message || String(err);
+      nativeSynced = false;
+    }
+  }
+
+  const result = setSessionTitle(id, trimmed, { agentId, nativeSynced });
+  return {
+    ok: true,
+    id,
+    agentId,
+    title: result.title,
+    cleared: result.cleared,
+    nativeSynced,
+    nativeError,
+    name: result.title || null
+  };
+}
+
+function syncNativeSessionTitle(resource, title) {
+  const agentId = resource.agent?.id || resource.agentId || "";
+  const source = resource.source || "";
+
+  if (source === "hermes-state-db" || agentId === "hermes" && source === "hermes-state-db") {
+    const db = hermesStateDb();
+    if (!safeStat(db)?.isFile()) throw new Error("Hermes state.db 不存在");
+    const sessionId = resource.sessionId;
+    if (!sessionId) throw new Error("缺少 Hermes sessionId");
+    runSqlite(db, `UPDATE sessions SET title = ${sqlValue(title)} WHERE id = ${sqlValue(sessionId)};`);
+    return true;
+  }
+
+  if (source === "opencode-storage" || agentId === "opencode") {
+    const file = resource.target;
+    const meta = readJsonFileMaybe(file);
+    if (!meta || typeof meta !== "object") throw new Error("OpenCode 会话文件不可读");
+    meta.title = title;
+    fs.writeFileSync(file, JSON.stringify(meta, null, 2) + "\n", "utf8");
+    return true;
+  }
+
+  if (agentId === "grok" && path.basename(resource.target || "") === "summary.json") {
+    const meta = readJsonFileMaybe(resource.target);
+    if (!meta || typeof meta !== "object") throw new Error("Grok summary.json 不可读");
+    meta.session_summary = title;
+    // 保留 generated_title；用户自定义写在 session_summary
+    fs.writeFileSync(resource.target, JSON.stringify(meta, null, 2) + "\n", "utf8");
+    return true;
+  }
+
+  // Claude / Codex 等：仅 overlay
+  return false;
 }
 
 function parseGrokUpdatesConversation(text) {
