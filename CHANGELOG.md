@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.15 — 2026-07-19
+
+### Fix
+
+- **Claude ↔ 思考档位双向映射**（对齐 CC Switch `resolve_reasoning_effort`）：
+  - `anthropicToChat`：`output_config.effort` / `thinking.budget_tokens` / `thinking.type=adaptive` → Chat `reasoning.effort`（`max`→`xhigh`；未知值不注入）。
+  - `chatToAnthropicMessages`：Chat `reasoning` / `reasoning_effort` → Anthropic `thinking` + `output_config`；写入 budget 时同步抬高 `max_tokens`，避免 `budget > max_tokens` 400。
+  - Claude → Codex Responses 链路：档位经 Chat 中转后由 2.2.14 的 `chatToResponses` 继续透传。
+- **tool_call reasoning 占位**：`reasoning-state` 在 thinking 已启用且 assistant 带 `tool_calls` 却无任何 reasoning 时补非空占位，避免 Kimi/DeepSeek 等上游 `reasoning_content is missing` 400。
+
 ## 2.2.14 — 2026-07-19
 
 ### Fix

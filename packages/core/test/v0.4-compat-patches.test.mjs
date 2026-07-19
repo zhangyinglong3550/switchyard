@@ -10,7 +10,9 @@ import { opencodeGlmNoToolsPatch } from "../src/compat/patches/opencode-glm-no-t
 import { officialGPTFallbackPatch } from "../src/compat/patches/official-gpt-fallback.mjs";
 import { chatReasoningPatch } from "../src/compat/patches/chat-reasoning.mjs";
 import { reasoningOptionsPatch } from "../src/compat/patches/reasoning-options.mjs";
+import { reasoningStatePatch } from "../src/compat/patches/reasoning-state.mjs";
 import { toolHistoryAdjacentPatch } from "../src/compat/patches/tool-history-adjacent.mjs";
+import { SWITCHYARD_THINKING_KEY, TOOL_CALL_REASONING_PLACEHOLDER } from "../src/reasoning.mjs";
 
 // Helper: register a single test patch, run the test, then reset.
 function testPatch(name, fn) {
@@ -307,6 +309,72 @@ testPatch("reasoning-options · explicit model metadata overrides provider metad
   );
   assert.equal(out.reasoning_split, true);
   assert.equal(out.enable_thinking, undefined);
+});
+
+// ── reasoning-state ────────────────────────────────────────────────────────
+
+testPatch("reasoning-state · attaches internal thinking to assistant history", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "done",
+          [SWITCHYARD_THINKING_KEY]: [{ type: "thinking", thinking: "checked files" }]
+        }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
+  );
+  assert.equal(out.messages[1].reasoning_content, "checked files");
+  assert.equal(out.thinking.type, "enabled");
+});
+
+testPatch("reasoning-state · disables thinking when history cannot pass it back", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: "prev without thinking" }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
+  );
+  assert.equal(out.thinking.type, "disabled");
+});
+
+testPatch("reasoning-state · backfills placeholder reasoning on bare tool_call assistant", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "Read", arguments: "{}" } }],
+          [SWITCHYARD_THINKING_KEY]: [{ type: "thinking", thinking: "picked tool" }]
+        },
+        { role: "tool", tool_call_id: "c1", content: "ok" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c2", type: "function", function: { name: "Read", arguments: "{}" } }]
+        }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
+  );
+  // 第一条有真实 thinking，第二条无 thinking 需占位
+  assert.equal(out.messages[1].reasoning_content, "picked tool");
+  assert.equal(out.messages[3].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
+  assert.equal(out.thinking.type, "enabled");
 });
 
 // ── 3. GLM content.text ────────────────────────────────────────────────────

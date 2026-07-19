@@ -1,4 +1,9 @@
-import { SWITCHYARD_THINKING_KEY, thinkingSummaryText, reasoningBlocksFromMessage } from "../../reasoning.mjs";
+import {
+  SWITCHYARD_THINKING_KEY,
+  thinkingSummaryText,
+  reasoningBlocksFromMessage,
+  ensureToolCallReasoningPlaceholder
+} from "../../reasoning.mjs";
 
 const TARGET_RE = /deepseek|glm|zhipu|z-ai|zai|kimi|moonshot|xiaomi|mimo|qwen|dashscope|bailian|aliyun|modelscope|openrouter/i;
 
@@ -61,27 +66,36 @@ export const reasoningStatePatch = {
   changes: [
     "assistant thinking block -> reasoning_content / reasoning",
     "thinking 已启用但历史里没有可回传 thinking 时，自动降级为 disabled",
+    "带 tool_calls 且无 reasoning 的 assistant 补非空占位（Kimi/DeepSeek 硬要求）",
     "减少 DeepSeek/GLM 等上游要求 thinking passback 时的 400"
   ],
-  risk: "在多轮历史缺失 thinking 块时会关闭上游 thinking，以换取稳定性；可能降低该轮推理能力。",
+  risk: "在多轮历史缺失 thinking 块时会关闭上游 thinking，以换取稳定性；可能降低该轮推理能力。占位 reasoning 仅为通过校验，不含真实思考。",
   tests: [
     "reasoning-state · attaches internal thinking to assistant history",
-    "reasoning-state · disables thinking when history cannot pass it back"
+    "reasoning-state · disables thinking when history cannot pass it back",
+    "reasoning-state · backfills placeholder reasoning on bare tool_call assistant"
   ],
   match(ctx) { return targeted(ctx); },
   outbound(body) {
     if (!body || !Array.isArray(body.messages)) return body;
     let attachedAny = false;
     let assistantCount = 0;
-    const messages = body.messages.map((message) => {
+    let messages = body.messages.map((message) => {
       if (message?.role === "assistant") assistantCount += 1;
       const result = attachReasoningContent(message);
       attachedAny = attachedAny || result.attached;
       return result.message;
     });
-    const next = { ...body, messages };
+    let next = { ...body, messages };
     if (assistantCount > 0 && hasEnabledThinking(next) && !attachedAny) {
-      return disableThinking(next);
+      next = disableThinking(next);
+    }
+    // thinking 仍启用时：tool_call 消息若仍无 reasoning，补占位，避免上游 400
+    if (hasEnabledThinking(next)) {
+      next = {
+        ...next,
+        messages: next.messages.map((message) => ensureToolCallReasoningPlaceholder(message))
+      };
     }
     return next;
   }

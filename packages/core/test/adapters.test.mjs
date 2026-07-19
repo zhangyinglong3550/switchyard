@@ -464,6 +464,85 @@ test("anthropicToChat lifts tool_use and tool_result into chat tool flow", () =>
   assert.equal(tool.tool_call_id, "tu1");
 });
 
+test("anthropicToChat maps output_config.effort to chat reasoning", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "think" }],
+    output_config: { effort: "high" }
+  }, "u");
+  assert.deepEqual(chat.reasoning, { effort: "high" });
+});
+
+test("anthropicToChat maps output_config.max to xhigh", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "think" }],
+    output_config: { effort: "max" }
+  }, "u");
+  assert.deepEqual(chat.reasoning, { effort: "xhigh" });
+});
+
+test("anthropicToChat maps thinking.budget_tokens bands to effort", () => {
+  const low = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    thinking: { type: "enabled", budget_tokens: 2000 }
+  }, "u");
+  assert.deepEqual(low.reasoning, { effort: "low" });
+
+  const medium = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    thinking: { type: "enabled", budget_tokens: 8000 }
+  }, "u");
+  assert.deepEqual(medium.reasoning, { effort: "medium" });
+
+  const high = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    thinking: { type: "enabled", budget_tokens: 20000 }
+  }, "u");
+  assert.deepEqual(high.reasoning, { effort: "high" });
+});
+
+test("anthropicToChat maps thinking.adaptive to xhigh", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    thinking: { type: "adaptive" }
+  }, "u");
+  assert.deepEqual(chat.reasoning, { effort: "xhigh" });
+});
+
+test("anthropicToChat prefers output_config over thinking budget", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    output_config: { effort: "low" },
+    thinking: { type: "enabled", budget_tokens: 32000 }
+  }, "u");
+  assert.deepEqual(chat.reasoning, { effort: "low" });
+});
+
+test("anthropicToChat does not inject reasoning for unknown output_config effort", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    output_config: { effort: "super-ultra" }
+  }, "u");
+  assert.equal(chat.reasoning, undefined);
+});
+
+test("anthropicToChat does not inject reasoning when thinking disabled", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "t" }],
+    thinking: { type: "disabled" }
+  }, "u");
+  assert.equal(chat.reasoning, undefined);
+});
+
+test("anthropic effort survives Chat → Responses conversion", () => {
+  const chat = anthropicToChat({
+    messages: [{ role: "user", content: "think hard" }],
+    output_config: { effort: "max" },
+    stream: true
+  }, "gpt");
+  const responses = chatToResponses(chat, "gpt-5.6-luna");
+  assert.deepEqual(responses.reasoning, { effort: "xhigh" });
+});
+
 test("chatToAnthropic converts tool_calls back to tool_use blocks", () => {
   const out = chatToAnthropic({
     choices: [{ finish_reason: "tool_calls", message: { content: "", tool_calls: [{ id: "c1", function: { name: "f", arguments: "{\"a\":1}" } }] } }],
@@ -480,6 +559,62 @@ test("chatToAnthropicMessages emits text content blocks", () => {
     messages: [{ role: "user", content: "hello" }]
   }, "claude-test");
   assert.deepEqual(out.messages[0].content, [{ type: "text", text: "hello" }]);
+});
+
+test("chatToAnthropicMessages maps reasoning.effort to thinking + output_config", () => {
+  const out = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning: { effort: "high" },
+    max_tokens: 1024
+  }, "claude-test");
+  assert.deepEqual(out.thinking, { type: "enabled", budget_tokens: 16384 });
+  assert.deepEqual(out.output_config, { effort: "high" });
+  // budget 16384 → max_tokens 至少 16384+1024
+  assert.ok(out.max_tokens >= 16384 + 1024);
+});
+
+test("chatToAnthropicMessages maps xhigh to output_config.max and large budget", () => {
+  const out = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning_effort: "xhigh"
+  }, "claude-test");
+  assert.equal(out.output_config.effort, "max");
+  assert.equal(out.thinking.type, "enabled");
+  assert.equal(out.thinking.budget_tokens, 32000);
+  assert.ok(out.max_tokens >= 32000 + 1024);
+});
+
+test("chatToAnthropicMessages maps reasoning none to thinking disabled", () => {
+  const out = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning: { effort: "none" }
+  }, "claude-test");
+  assert.deepEqual(out.thinking, { type: "disabled" });
+  assert.equal(out.output_config, undefined);
+});
+
+test("chatToAnthropicMessages does not invent thinking without reasoning", () => {
+  const out = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }]
+  }, "claude-test");
+  assert.equal(out.thinking, undefined);
+  assert.equal(out.output_config, undefined);
+});
+
+test("chatToAnthropicMessages maps low/medium effort budgets", () => {
+  const low = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning: { effort: "low" }
+  }, "claude-test");
+  assert.equal(low.thinking.budget_tokens, 2048);
+  assert.equal(low.output_config.effort, "low");
+
+  const medium = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning: { effort: "medium" }
+  }, "claude-test");
+  assert.equal(medium.thinking.budget_tokens, 8192);
+  assert.equal(medium.output_config.effort, "medium");
 });
 
 test("chatToAnthropicMessages groups consecutive tool results for parallel tool_use", () => {

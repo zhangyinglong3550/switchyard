@@ -3,7 +3,12 @@
 // produce a chat-style payload for the client adapter to finish).
 import crypto from "node:crypto";
 import { contentToText } from "./utils.mjs";
-import { SWITCHYARD_THINKING_KEY, cloneAnthropicThinkingBlocks, reasoningBlocksFromMessage } from "./reasoning.mjs";
+import {
+  SWITCHYARD_THINKING_KEY,
+  cloneAnthropicThinkingBlocks,
+  reasoningBlocksFromMessage,
+  applyChatReasoningToAnthropic
+} from "./reasoning.mjs";
 
 function parseDataUrl(url) {
   const m = /^data:([^;,]+);base64,(.*)$/s.exec(String(url || ""));
@@ -106,6 +111,8 @@ export function chatToAnthropicMessages(body, upstreamModel) {
       out.tool_choice = { type: "tool", name: body.tool_choice.function.name };
     }
   }
+  // Chat/Responses 思考档位 → Anthropic thinking + output_config（不覆盖已有原生字段）
+  applyChatReasoningToAnthropic(out, body);
   return out;
 }
 

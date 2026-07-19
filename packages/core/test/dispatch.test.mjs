@@ -620,3 +620,88 @@ test("dispatchChat → anthropic upstream preserves tool_use round-trip", async 
   assert.equal(tc[0].function.name, "lookup");
   assert.equal(result.payload.choices[0].finish_reason, "tool_calls");
 });
+
+test("dispatchChat → openai_responses preserves Claude-mapped reasoning.effort", async (t) => {
+  resetPatches();
+  registerBuiltinPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    assert.equal(req.url, "/responses");
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "resp_1",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }]
+    }));
+  });
+  t.after(() => close(up).then(() => resetPatches()));
+  // 模拟 Claude Code：anthropicToChat 已把 output_config 写成 chat.reasoning
+  const { anthropicToChat } = await import("../src/anthropic-adapter.mjs");
+  const chatBody = anthropicToChat({
+    messages: [{ role: "user", content: "think" }],
+    output_config: { effort: "max" },
+    stream: false
+  }, "gpt-5.5");
+  const provider = { id: "codex-pool", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${up.address().port}` };
+  const result = await dispatchChat(provider, "gpt-5.5", chatBody, {
+    model: { id: "codex-pool/gpt-5.5", providerId: "codex-pool" }
+  });
+  assert.equal(result.kind, "json");
+  assert.deepEqual(received.reasoning, { effort: "xhigh" });
+});
+
+test("dispatchChat → anthropic_messages maps chat reasoning to thinking + output_config", async (t) => {
+  resetPatches();
+  registerBuiltinPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "msg1",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 }
+    }));
+  });
+  t.after(() => close(up).then(() => resetPatches()));
+  const provider = { id: "anth", apiFormat: "anthropic_messages", baseUrl: `http://127.0.0.1:${up.address().port}` };
+  const result = await dispatchChat(provider, "claude-sonnet", {
+    messages: [{ role: "user", content: "go" }],
+    reasoning: { effort: "high" },
+    max_tokens: 1024
+  });
+  assert.equal(result.kind, "json");
+  assert.deepEqual(received.thinking, { type: "enabled", budget_tokens: 16384 });
+  assert.deepEqual(received.output_config, { effort: "high" });
+  assert.ok(received.max_tokens >= 16384 + 1024, "max_tokens must exceed thinking budget");
+});
+
+test("dispatchChat → anthropic_messages does not invent thinking without reasoning", async (t) => {
+  resetPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "msg1",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 }
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "anth", apiFormat: "anthropic_messages", baseUrl: `http://127.0.0.1:${up.address().port}` };
+  const result = await dispatchChat(provider, "claude-sonnet", {
+    messages: [{ role: "user", content: "go" }]
+  });
+  assert.equal(result.kind, "json");
+  assert.equal(received.thinking, undefined);
+  assert.equal(received.output_config, undefined);
+});

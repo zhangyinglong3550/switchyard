@@ -1,7 +1,12 @@
 // Adapter between Anthropic Messages API and OpenAI Chat Completions.
 import crypto from "node:crypto";
 import { contentToText, safeJsonParse } from "./utils.mjs";
-import { SWITCHYARD_THINKING_KEY, cloneAnthropicThinkingBlocks, reasoningBlocksFromMessage } from "./reasoning.mjs";
+import {
+  SWITCHYARD_THINKING_KEY,
+  cloneAnthropicThinkingBlocks,
+  reasoningBlocksFromMessage,
+  resolveReasoningEffortFromAnthropic
+} from "./reasoning.mjs";
 
 function contentToChatContent(content) {
   if (!Array.isArray(content)) return contentToText(content);
@@ -98,7 +103,23 @@ export function anthropicToChat(body, upstreamModel) {
     else if (body.tool_choice.type === "auto") chat.tool_choice = "auto";
     else if (body.tool_choice.type === "any") chat.tool_choice = "required";
   }
+  // Claude Code 思考档位 → Chat reasoning，供 reasoning-options / chatToResponses 继续映射
+  applyAnthropicReasoningToChat(chat, body);
   return chat;
+}
+
+/**
+ * Anthropic 请求级 thinking / output_config → Chat `reasoning` 对象。
+ * 对齐 CC Switch resolve_reasoning_effort；未知值不注入。
+ */
+function applyAnthropicReasoningToChat(chat, body) {
+  const effort = resolveReasoningEffortFromAnthropic(body);
+  if (effort == null) return;
+  if (effort === "none") {
+    chat.reasoning = { effort: "none" };
+    return;
+  }
+  chat.reasoning = { effort };
 }
 
 export function chatToAnthropic(payload, requestedModel) {
