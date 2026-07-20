@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.18 — 2026-07-20
+
+### Fix
+
+- **配置预览 = 合并后全文**：Codex / Claude Code 等与「一键写入」同一套 merge，预览不再只显示补丁片段。
+- **Claude Code 关闭 Foundry 旁路**：写入时清除 `CLAUDE_CODE_USE_FOUNDRY`、`ANTHROPIC_FOUNDRY_*` 以及裸模型旁路（`ANTHROPIC_SMALL_FAST_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL`），避免企业 Foundry 配置残留导致仍走 `openapi-ait` 而本地 Switchyard 看似已写入却不可用。
+
 ## 2.2.17 — 2026-07-19
 
 ### Feat
