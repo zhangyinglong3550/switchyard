@@ -551,6 +551,72 @@ test("claude-code profile · merges into existing settings.json env without drop
   assert.equal(parsed["managed-by-switchyard"], true);
 });
 
+test("claude-code profile · disables Foundry routing that would bypass Switchyard", () => {
+  const file = pw.claudeCodeConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    theme: "dark",
+    env: {
+      OTHER_KEY: "keep",
+      CLAUDE_CODE_USE_FOUNDRY: "1",
+      CLAUDE_CODE_SKIP_FOUNDRY_AUTH: "1",
+      ANTHROPIC_FOUNDRY_BASE_URL: "https://openapi-ait.ke.com",
+      ANTHROPIC_FOUNDRY_API_KEY: "secret-key",
+      ANTHROPIC_CUSTOM_HEADERS: "email-prefix: user",
+      ANTHROPIC_SMALL_FAST_MODEL: "GLM-5.1",
+      CLAUDE_CODE_SUBAGENT_MODEL: "GLM-5.1",
+      OTEL_LOGS_EXPORTER: "otlp"
+    }
+  }, null, 2), "utf8");
+
+  pw.applyClaudeCode({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "ke/glm-5.2",
+    models: [
+      { id: "ke/glm-5.2", providerId: "ke", upstreamModel: "glm-5.2", displayName: "GLM-5.2" },
+      { id: "ke/deepseek-v4-flash", providerId: "ke", upstreamModel: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash" }
+    ]
+  });
+
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(parsed.theme, "dark");
+  assert.equal(parsed.env.OTHER_KEY, "keep");
+  assert.equal(parsed.env.OTEL_LOGS_EXPORTER, "otlp");
+  assert.equal(parsed.env.ANTHROPIC_CUSTOM_HEADERS, "email-prefix: user");
+  assert.equal(parsed.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:17888/claude-code");
+  assert.equal(parsed.env.ANTHROPIC_AUTH_TOKEN, "${SWITCHYARD_KEY}");
+  assert.equal(parsed.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
+  assert.equal(parsed.env.CLAUDE_CODE_SKIP_FOUNDRY_AUTH, undefined);
+  assert.equal(parsed.env.ANTHROPIC_FOUNDRY_BASE_URL, undefined);
+  assert.equal(parsed.env.ANTHROPIC_FOUNDRY_API_KEY, undefined);
+  assert.equal(parsed.env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
+  assert.equal(parsed.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
+  assert.match(parsed.env.ANTHROPIC_MODEL, /^claude-switchyard-ke-glm-5\.2-/);
+});
+
+test("claude-code preview · returns merged settings.json not just the patch", () => {
+  const file = pw.claudeCodeConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    theme: "keep-me",
+    env: {
+      OTHER_KEY: "keep",
+      CLAUDE_CODE_USE_FOUNDRY: "1",
+      ANTHROPIC_FOUNDRY_BASE_URL: "https://openapi-ait.ke.com"
+    }
+  }, null, 2), "utf8");
+
+  const text = pw.previewClaudeCodeProfile({ host: "127.0.0.1", port: 17888 });
+  const parsed = JSON.parse(text);
+  assert.equal(parsed.theme, "keep-me");
+  assert.equal(parsed.env.OTHER_KEY, "keep");
+  assert.equal(parsed.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:17888/claude-code");
+  assert.equal(parsed.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
+  assert.equal(parsed.env.ANTHROPIC_FOUNDRY_BASE_URL, undefined);
+  assert.equal(parsed["managed-by-switchyard"], true);
+});
+
 test("claude-code profile · replaces stale single-model slots with routed Switchyard models", () => {
   const file = pw.claudeCodeConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -946,12 +1012,32 @@ test("opencode sync · skips when not managed", () => {
 test("preview · returns plain text suitable for UI", () => {
   const codex = pw.previewCodexProfile({ host: "127.0.0.1", port: 17888 });
   assert.match(codex, /wire_api = "responses"/);
+  assert.match(codex, /model_provider = "custom"/);
 
   const cc = pw.previewClaudeCodeProfile({ host: "127.0.0.1", port: 17888 });
   assert.match(cc, /ANTHROPIC_BASE_URL/);
+  assert.match(cc, /managed-by-switchyard/);
 
   const her = pw.previewHermesProfile({ host: "127.0.0.1", port: 17888 });
   assert.match(her, /\/hermes\/v1/);
+});
+
+test("codex preview · merges existing user TOML instead of patch-only", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    "model_reasoning_effort = \"low\"",
+    "",
+    "[unrelated]",
+    "model_provider = \"keep-me\"",
+    ""
+  ].join("\n"), "utf8");
+
+  const text = pw.previewCodexProfile({ host: "127.0.0.1", port: 17888, defaultModel: "a/b" });
+  assert.match(text, /model_reasoning_effort = "low"/);
+  assert.match(text, /\[unrelated\]\nmodel_provider = "keep-me"/);
+  assert.match(text, /model_provider = "custom"/);
+  assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:17888\/codex\/v1"/);
 });
 
 test("grok profile · writes managed model blocks and preserves user config", () => {

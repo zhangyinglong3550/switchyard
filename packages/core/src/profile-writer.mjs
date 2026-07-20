@@ -654,6 +654,27 @@ const CLAUDE_MODEL_ENV_KEYS = [
   "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"
 ];
 
+/**
+ * 与 Switchyard 本地代理互斥的 Claude Code / Foundry 路由开关。
+ * 企业 Foundry 配置常残留 CLAUDE_CODE_USE_FOUNDRY=1，会绕过 ANTHROPIC_BASE_URL，
+ * 导致一键写入后仍走 openapi-ait.ke.com 等 Foundry 端点。
+ */
+const CLAUDE_FOUNDRY_CONFLICT_ENV_KEYS = [
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+  "ANTHROPIC_FOUNDRY_BASE_URL",
+  "ANTHROPIC_FOUNDRY_API_KEY"
+];
+
+/**
+ * 未走 Switchyard discovery id 的旁路模型 env。
+ * 例如 ANTHROPIC_SMALL_FAST_MODEL=GLM-5.1 会在子代理/快路径直接请求，本地网关无法识别。
+ */
+const CLAUDE_BYPASS_MODEL_ENV_KEYS = [
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL"
+];
+
 function modelLabel(model) {
   return model?.displayName || model?.upstreamModel || model?.id || "";
 }
@@ -845,6 +866,10 @@ export function mergeClaudeCodeProfile(existing, { host, port, models, defaultMo
   const patch = renderClaudeCodeProfile({ host, port, models, defaultModel, modelMapping });
   next[MARKER] = true;
   next.env = { ...(next.env || {}) };
+  // 关掉 Foundry 直连，强制走 ANTHROPIC_BASE_URL → Switchyard
+  for (const key of CLAUDE_FOUNDRY_CONFLICT_ENV_KEYS) delete next.env[key];
+  // 清掉非 discovery id 的旁路模型，避免子代理仍打 GLM-5.1 等裸名
+  for (const key of CLAUDE_BYPASS_MODEL_ENV_KEYS) delete next.env[key];
   if (models?.length) {
     for (const key of CLAUDE_MODEL_ENV_KEYS) delete next.env[key];
   }
@@ -1302,13 +1327,15 @@ export function syncGrokModelArtifacts({
 }
 
 // ---------- Preview adapters ----------
+// 所有预览与「一键写入」同一套 merge：展示合并后的完整文件内容。
 
-export function previewCodexProfile(target) {
+export function previewCodexProfile(target = {}) {
+  const existing = readText(codexConfigPath());
   if (target?.mode === CODEX_ACCESS_MODES.OFFICIAL_DIRECT) {
-    return mergeCodexOfficialDirectProfile(readText(codexConfigPath()));
+    return mergeCodexOfficialDirectProfile(existing);
   }
   if (target?.mode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
-    return mergeCodexProviderDirectProfile(readText(codexConfigPath()), {
+    return mergeCodexProviderDirectProfile(existing, {
       name: target.provider?.name || target.provider?.id || "Provider Direct",
       baseUrl: target.provider?.baseUrl || "",
       apiKey: target.apiKey || target.provider?.apiKey || "",
@@ -1317,12 +1344,24 @@ export function previewCodexProfile(target) {
       disableImageGeneration: looksLikeAigoProvider(target.provider || {})
     });
   }
-  return renderCodexProfile(target);
+  const profileDefaultModel = codexDefaultModelForCatalog({
+    models: target.models,
+    defaultModel: target.defaultModel
+  });
+  return mergeCodexProfile(existing, {
+    host: target.host,
+    port: target.port,
+    defaultModel: profileDefaultModel
+  });
 }
-export function previewClaudeCodeProfile(target) {
-  return JSON.stringify(renderClaudeCodeProfile(target), null, 2);
+
+export function previewClaudeCodeProfile(target = {}) {
+  const existing = readJsonSafe(claudeCodeConfigPath());
+  const merged = mergeClaudeCodeProfile(existing, target);
+  return JSON.stringify(merged, null, 2) + "\n";
 }
-export function previewHermesProfile(target) {
+
+export function previewHermesProfile(target = {}) {
   // 预览真正会写入的 config.yaml 内容（Hermes 只读 YAML）。
   return mergeHermesYamlProfile(readText(hermesYamlConfigPath()), target);
 }
