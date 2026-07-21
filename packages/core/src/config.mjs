@@ -48,7 +48,45 @@ export function loadConfig(file = configPath()) {
   return config;
 }
 
+/**
+ * Drop client/global defaultModel (and Claude modelMapping entries) that no longer
+ * point at an enabled model. Prevents stale ids like deleted pool providers from
+ * surviving in config.json after the model list was cleaned up.
+ */
+export function pruneOrphanedModelRefs(config) {
+  if (!config || typeof config !== "object") return config;
+  const enabled = new Set(
+    (config.models || [])
+      .filter((model) => model && model.enabled !== false && model.id)
+      .map((model) => String(model.id).trim())
+  );
+  const isLive = (value) => {
+    const id = String(value || "").trim();
+    return Boolean(id) && enabled.has(id);
+  };
+
+  if (config.defaultModel != null && !isLive(config.defaultModel)) {
+    config.defaultModel = null;
+  }
+
+  if (config.clients && typeof config.clients === "object") {
+    for (const client of Object.values(config.clients)) {
+      if (!client || typeof client !== "object") continue;
+      if (client.defaultModel != null && !isLive(client.defaultModel)) {
+        client.defaultModel = null;
+      }
+      if (client.modelMapping && typeof client.modelMapping === "object") {
+        for (const key of Object.keys(client.modelMapping)) {
+          if (!isLive(client.modelMapping[key])) delete client.modelMapping[key];
+        }
+      }
+    }
+  }
+  return config;
+}
+
 export function saveConfig(config, file = configPath()) {
+  pruneOrphanedModelRefs(config);
   validateConfig(config);
   ensureDir(path.dirname(file));
   const payload = JSON.stringify(config, null, 2);

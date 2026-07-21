@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.19 — 2026-07-21
+
+### Fix
+
+- **删除模型后清理陈旧默认路由**：`saveConfig` 会剔除已不存在的全局/客户端 `defaultModel` 与 Claude `modelMapping` 条目。
+- **Codex `model =` 自动回退**：`applyCodex` / `syncCodexModelArtifacts` 不再把已删除的 id（如 `codex-pool/gpt-5.6-luna`）写回 `~/.codex/config.toml`；无匹配时回退到当前目录中第一个可用模型，避免 Agent Desk / Codex CLI 报 `No route for model …`。
+
 ## 2.2.18 — 2026-07-20
 
 ### Fix

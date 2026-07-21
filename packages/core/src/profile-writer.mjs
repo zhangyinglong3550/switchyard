@@ -375,13 +375,47 @@ function modelMatchesId(model, id) {
   return model?.id === value || model?.upstreamModel === value || (model?.aliases || []).includes(value);
 }
 
+function enabledCodexModels(models = []) {
+  return (Array.isArray(models) ? models : []).filter((model) => model && model.enabled !== false);
+}
+
+/**
+ * Resolve Codex profile `model =` slug.
+ * Prefer the configured default when it still maps to a visible model; otherwise
+ * fall back to the first enabled catalog model. Never echo a deleted/orphaned id
+ * (that produces gateway "No route for model …" after provider removal).
+ */
 function codexDefaultModelForCatalog({ models = [], defaultModel } = {}) {
-  const value = String(defaultModel || "").trim();
-  if (!value) return null;
-  const list = Array.isArray(models) ? models : [];
+  const list = enabledCodexModels(models);
   const ambiguousUpstreams = ambiguousUpstreamNames(list);
-  const match = list.find((model) => modelMatchesId(model, value));
-  return match ? codexCatalogSlugForModel(match, { ambiguousUpstreams }) : value;
+  const value = String(defaultModel || "").trim();
+  if (value) {
+    // No models context (legacy apply paths / dry-run without catalog) → trust caller.
+    if (!list.length) return value;
+    const match = list.find((model) => modelMatchesId(model, value));
+    if (match) return codexCatalogSlugForModel(match, { ambiguousUpstreams });
+    // Orphaned default after provider/model deletion → fall through to first live model.
+  }
+  if (!list.length) return null;
+  return codexCatalogSlugForModel(list[0], { ambiguousUpstreams });
+}
+
+/** Read top-level `model = "..."` from a Codex-style TOML (ignores table bodies). */
+function readTopLevelTomlModel(text = "") {
+  const lines = String(text || "").split(/\r?\n/);
+  let seenTable = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (/^\[[^\]]+\]/.test(trimmed)) {
+      seenTable = true;
+      continue;
+    }
+    if (seenTable) continue;
+    const match = /^model\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(trimmed);
+    if (match) return String(match[1] ?? match[2] ?? match[3] ?? "").trim();
+  }
+  return "";
 }
 
 function codexCatalogModelFrom(model, index = 0, options = {}) {
@@ -573,7 +607,24 @@ export function inspectCodexSwitchyardProfile(configPath = codexConfigPath()) {
   };
 }
 
-export function syncCodexModelArtifacts({ models = [], defaultModel, force = false } = {}) {
+function hostPortFromCodexText(text = {}, fallbackHost = "127.0.0.1", fallbackPort = 17888) {
+  const source = typeof text === "string" ? text : "";
+  const baseUrl = topLevelTomlValue(source, "openai_base_url") || "";
+  const match = /https?:\/\/([^/:]+)(?::(\d+))?/i.exec(baseUrl);
+  if (!match) return { host: fallbackHost, port: fallbackPort };
+  return {
+    host: match[1] || fallbackHost,
+    port: match[2] ? Number(match[2]) : fallbackPort
+  };
+}
+
+export function syncCodexModelArtifacts({
+  models = [],
+  defaultModel,
+  force = false,
+  host,
+  port
+} = {}) {
   const profile = inspectCodexSwitchyardProfile();
   if (!force && !profile.active) {
     return { ok: false, skipped: true, reason: profile.reason, profile };
@@ -603,6 +654,47 @@ export function syncCodexModelArtifacts({ models = [], defaultModel, force = fal
     JSON.stringify(currentCache?.models || []) !== JSON.stringify(catalog.models);
   const cacheChanged = cacheNeedsRewrite ? writeJsonIfChanged(cachePath, cache) : false;
 
+  // Keep config.toml / ccswitch profile `model =` aligned with a still-routable slug.
+  // Catalog-only sync used to leave a deleted default (e.g. codex-pool/…) stuck in TOML.
+  const profileDefaultModel = codexDefaultModelForCatalog({ models, defaultModel });
+  let profileModelChanged = false;
+  if (profileDefaultModel) {
+    const knownSlugs = new Set(catalog.models.map((item) => item.slug));
+    const configPath = codexConfigPath();
+    const existingConfig = readText(configPath);
+    const currentModel = readTopLevelTomlModel(existingConfig);
+    const endpoint = hostPortFromCodexText(existingConfig, host || "127.0.0.1", port || 17888);
+    const resolvedHost = host || endpoint.host;
+    const resolvedPort = port || endpoint.port;
+    if (existingConfig && (!currentModel || !knownSlugs.has(currentModel))) {
+      const nextConfig = mergeCodexProfile(existingConfig, {
+        host: resolvedHost,
+        port: resolvedPort,
+        defaultModel: profileDefaultModel
+      });
+      if (nextConfig !== existingConfig) {
+        writeText(configPath, nextConfig);
+        profileModelChanged = true;
+      }
+    }
+    const ccSwitchPath = ccSwitchGatewayProfilePath();
+    const existingCc = readText(ccSwitchPath);
+    if (existingCc && /switchyard|17888|codex\/v1/i.test(existingCc)) {
+      const ccModel = readTopLevelTomlModel(existingCc);
+      if (!ccModel || !knownSlugs.has(ccModel)) {
+        const nextCc = renderCcSwitchGatewayProfile({
+          host: resolvedHost,
+          port: resolvedPort,
+          defaultModel: profileDefaultModel
+        });
+        if (nextCc !== existingCc) {
+          writeText(ccSwitchPath, nextCc);
+          profileModelChanged = true;
+        }
+      }
+    }
+  }
+
   return {
     ok: true,
     profile,
@@ -611,6 +703,8 @@ export function syncCodexModelArtifacts({ models = [], defaultModel, force = fal
     catalogChanged: catalogResults.some((item) => item.changed),
     cachePath,
     cacheChanged,
+    profileModelChanged,
+    profileDefaultModel: profileDefaultModel || null,
     cache
   };
 }
@@ -784,7 +878,9 @@ export function syncClientModelArtifacts({
     codex: syncCodexModelArtifacts({
       models: codexModels,
       defaultModel: codexDefaultModel,
-      force: forceCodex
+      force: forceCodex,
+      host,
+      port
     }),
     claudeCode: syncClaudeCodeModelArtifacts({
       host,

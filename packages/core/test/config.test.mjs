@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { mergeWithDefaults, validateConfig, listModelsForClient, publicModelsForClient, initConfig, loadConfig, saveConfig } from "../src/config.mjs";
+import { mergeWithDefaults, validateConfig, listModelsForClient, publicModelsForClient, initConfig, loadConfig, saveConfig, pruneOrphanedModelRefs } from "../src/config.mjs";
 import { resolveRoute } from "../src/router.mjs";
 
 test("mergeWithDefaults fills client filters", () => {
@@ -286,6 +286,52 @@ test("initConfig/loadConfig/saveConfig round trip in tempdir", () => {
     const again = loadConfig();
     assert.equal(again.providers.length, 1);
     assert.equal(again.models.length, 1);
+  } finally {
+    process.env.SWITCHYARD_CONFIG = prevEnv;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("pruneOrphanedModelRefs clears deleted defaultModel and mapping entries", () => {
+  const cfg = mergeWithDefaults({
+    defaultModel: "codex-pool/gpt-5.6-luna",
+    providers: [
+      { id: "wecode-gpt", name: "WeCode", apiFormat: "openai_chat", baseUrl: "http://x" },
+      { id: "token-gpt", name: "Token", apiFormat: "openai_chat", baseUrl: "http://y" }
+    ],
+    models: [
+      { id: "wecode-gpt/gpt-5.6-luna", providerId: "wecode-gpt", upstreamModel: "gpt-5.6-luna" },
+      { id: "token-gpt/gpt-5.6-sol", providerId: "token-gpt", upstreamModel: "gpt-5.6-sol", enabled: false }
+    ],
+    clients: {
+      codex: { enabled: true, allowedModels: ["*"], defaultModel: "codex-pool/gpt-5.6-luna" },
+      "claude-code": {
+        enabled: true,
+        allowedModels: ["*"],
+        defaultModel: null,
+        modelMapping: {
+          default: "wecode-gpt/gpt-5.6-luna",
+          fable: "codex-pool/gpt-5.6-sol"
+        }
+      }
+    }
+  });
+  pruneOrphanedModelRefs(cfg);
+  assert.equal(cfg.defaultModel, null);
+  assert.equal(cfg.clients.codex.defaultModel, null);
+  assert.equal(cfg.clients["claude-code"].modelMapping.default, "wecode-gpt/gpt-5.6-luna");
+  assert.equal(cfg.clients["claude-code"].modelMapping.fable, undefined);
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lls-cfg-prune-"));
+  const cfgPath = path.join(tmp, "config.json");
+  const prevEnv = process.env.SWITCHYARD_CONFIG;
+  process.env.SWITCHYARD_CONFIG = cfgPath;
+  try {
+    saveConfig(cfg, cfgPath);
+    const again = loadConfig(cfgPath);
+    assert.equal(again.clients.codex.defaultModel, null);
+    assert.equal(again.defaultModel, null);
+    assert.equal(again.clients["claude-code"].modelMapping.fable, undefined);
   } finally {
     process.env.SWITCHYARD_CONFIG = prevEnv;
     fs.rmSync(tmp, { recursive: true, force: true });

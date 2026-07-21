@@ -423,6 +423,87 @@ test("profile artifacts · syncs Codex and Claude Code model caches from visible
   assert.equal(claudeCache.models[0].display_name, "deepseek-v4-pro · DeepSeek");
 });
 
+test("codex profile · orphaned defaultModel falls back to first live catalog model", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    "# managed-by: managed-by-switchyard",
+    'model_provider = "custom"',
+    `model_catalog_json = "${pw.codexModelCatalogPath()}"`,
+    'openai_base_url = "http://127.0.0.1:17888/v1"',
+    'model = "codex-pool/gpt-5.6-luna"',
+    "",
+    "[model_providers.custom]",
+    'name = "Switchyard"',
+    'base_url = "http://127.0.0.1:17888/codex/v1"',
+    ""
+  ].join("\n"), "utf8");
+  fs.mkdirSync(path.dirname(pw.ccSwitchGatewayProfilePath()), { recursive: true });
+  fs.writeFileSync(pw.ccSwitchGatewayProfilePath(), [
+    "# >>> switchyard-managed ccswitch-gateway >>>",
+    'model_provider = "custom"',
+    'model = "codex-pool/gpt-5.6-luna"',
+    'openai_base_url = "http://127.0.0.1:17888/v1"',
+    ""
+  ].join("\n"), "utf8");
+
+  const models = [
+    {
+      id: "wecode-gpt/gpt-5.6-luna",
+      providerId: "wecode-gpt",
+      providerName: "WeCode GPT",
+      upstreamModel: "gpt-5.6-luna",
+      displayName: "GPT-5.6 Luna"
+    },
+    {
+      id: "token-gpt/gpt-5.6-sol",
+      providerId: "token-gpt",
+      providerName: "Token GPT",
+      upstreamModel: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol"
+    }
+  ];
+
+  const applied = pw.applyCodex({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "codex-pool/gpt-5.6-luna",
+    models
+  });
+  const profile = fs.readFileSync(applied.path, "utf8");
+  assert.match(profile, /model = "wecode-gpt\/gpt-5\.6-luna"/);
+  assert.doesNotMatch(profile, /codex-pool/);
+
+  // Re-seed orphan model line then sync (catalog path used on config:save)
+  fs.writeFileSync(file, [
+    "# managed-by: managed-by-switchyard",
+    'model_provider = "custom"',
+    `model_catalog_json = "${pw.codexModelCatalogPath()}"`,
+    'openai_base_url = "http://127.0.0.1:17888/v1"',
+    'model = "codex-pool/gpt-5.6-sol"',
+    "",
+    "[model_providers.custom]",
+    'name = "Switchyard"',
+    'base_url = "http://127.0.0.1:17888/codex/v1"',
+    ""
+  ].join("\n"), "utf8");
+
+  const synced = pw.syncCodexModelArtifacts({
+    host: "127.0.0.1",
+    port: 17888,
+    defaultModel: "codex-pool/gpt-5.6-luna",
+    models
+  });
+  assert.equal(synced.ok, true);
+  assert.equal(synced.profileModelChanged, true);
+  assert.equal(synced.profileDefaultModel, "wecode-gpt/gpt-5.6-luna");
+  const afterSync = fs.readFileSync(file, "utf8");
+  assert.match(afterSync, /model = "wecode-gpt\/gpt-5\.6-luna"/);
+  assert.doesNotMatch(afterSync, /codex-pool/);
+  const cc = fs.readFileSync(pw.ccSwitchGatewayProfilePath(), "utf8");
+  assert.match(cc, /model = "wecode-gpt\/gpt-5\.6-luna"/);
+});
+
 test("codex profile · model catalog display names include provider to disambiguate duplicates", () => {
   const catalog = pw.buildCodexModelCatalog({
     models: [
