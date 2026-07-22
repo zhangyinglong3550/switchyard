@@ -124,6 +124,8 @@ const state = {
   importSelection: { providers: new Set(), models: new Set() },
   textEditor: null,
   sessionRaw: "",
+  sessionRename: null,
+  sessionHandoff: null,
   skillLink: null,
   skillHub: { items: [], install: null, detail: null },
   plugins: { sources: [], marketplaces: [], installed: [], available: [] },
@@ -4083,6 +4085,7 @@ async function refreshAgentSessions() {
       <td class="mono">${escapeHtml(formatDate(row.mtime))}</td>
       <td class="actions-cell">
         <button class="btn" data-session-rename="${escapeHtml(row.id)}" data-session-name="${escapeHtml(row.name || "")}">命名</button>
+        ${row.agentId === "claude-code" ? `<button class="btn primary" data-session-handoff="${escapeHtml(row.id)}">接力到 Codex</button>` : ""}
         <button class="btn" data-session-view="${escapeHtml(row.id)}">查看</button>
         <button class="btn danger" data-session-delete="${escapeHtml(row.id)}">删除</button>
       </td>
@@ -4338,6 +4341,36 @@ function openSessionRenameDialog({ id, name = "" } = {}) {
   document.getElementById("session-rename-wrap")?.classList.add("open");
 }
 
+async function openSessionHandoffDialog(id) {
+  if (!id) return;
+  const preview = await invoke("agent:sessions:handoff-preview", { id });
+  state.sessionHandoff = preview;
+
+  const title = document.getElementById("session-handoff-title");
+  if (title) title.value = preview.title || "";
+  const meta = document.getElementById("session-handoff-meta");
+  if (meta) meta.textContent = `Claude Code → Codex · ${preview.sourcePath || ""}`;
+  const summary = document.getElementById("session-handoff-summary");
+  if (summary) summary.textContent = `${preview.messageCount} 条对话：用户 ${preview.userCount} 条，助手 ${preview.assistantCount} 条；忽略 ${preview.ignoredCount} 条工具、附件或非正文记录。`;
+
+  const warning = document.getElementById("session-handoff-warning");
+  const confirmButton = document.getElementById("btn-session-handoff-confirm");
+  if (preview.alreadyImported) {
+    if (warning) {
+      warning.style.display = "";
+      warning.textContent = `该版本已接力到 Codex thread ${preview.existingTargetThreadId}，不会重复导入。Claude 新增消息后可创建新的独立分支。`;
+    }
+    if (confirmButton) confirmButton.disabled = true;
+  } else {
+    if (warning) {
+      warning.style.display = "none";
+      warning.textContent = "";
+    }
+    if (confirmButton) confirmButton.disabled = false;
+  }
+  document.getElementById("session-handoff-wrap")?.classList.add("open");
+}
+
 async function submitSessionRename(title) {
   const id = state.sessionRename?.id;
   if (!id) return;
@@ -4352,11 +4385,14 @@ async function submitSessionRename(title) {
 }
 
 document.getElementById("sessions-tbody")?.addEventListener("click", async (event) => {
+  const handoff = event.target.closest("[data-session-handoff]");
   const view = event.target.closest("[data-session-view]");
   const rename = event.target.closest("[data-session-rename]");
   const del = event.target.closest("[data-session-delete]");
   try {
-    if (view) {
+    if (handoff) {
+      await openSessionHandoffDialog(handoff.dataset.sessionHandoff);
+    } else if (view) {
       const row = await invoke("agent:sessions:read", { id: view.dataset.sessionView });
       openSessionViewer(row);
     } else if (rename) {
@@ -4373,6 +4409,36 @@ document.getElementById("sessions-tbody")?.addEventListener("click", async (even
     }
   } catch (err) {
     toast(`会话操作失败：${err.message}`);
+  }
+});
+
+document.getElementById("btn-session-handoff-confirm")?.addEventListener("click", async () => {
+  const preview = state.sessionHandoff;
+  if (!preview?.sourceSessionId) return;
+  const button = document.getElementById("btn-session-handoff-confirm");
+  if (button) button.disabled = true;
+  try {
+    const result = await invoke("agent:sessions:handoff-to-codex", {
+      id: preview.sourceSessionId,
+      title: document.getElementById("session-handoff-title")?.value || preview.title
+    });
+    document.getElementById("session-handoff-wrap")?.classList.remove("open");
+    state.sessionHandoff = null;
+    toast(`复制接力完成：已创建 Codex 会话 ${result.targetThreadId}`);
+    await refreshAgentSessions();
+  } catch (err) {
+    toast(`会话接力失败：${err.message}`);
+  } finally {
+    if (button && state.sessionHandoff && !state.sessionHandoff.alreadyImported) button.disabled = false;
+  }
+});
+
+document.getElementById("session-handoff-title")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    document.getElementById("btn-session-handoff-confirm")?.click();
+  } else if (event.key === "Escape") {
+    document.getElementById("session-handoff-wrap")?.classList.remove("open");
   }
 });
 

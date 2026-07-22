@@ -624,6 +624,25 @@
   </div>
 </div>
 
+<div class="dialog-overlay" id="session-handoff-wrap">
+  <div class="dialog">
+    <h2>接力到 Codex</h2>
+    <div class="tiny muted" id="session-handoff-meta">-</div>
+    <label>Codex 会话名称
+      <input class="field" id="session-handoff-title" maxlength="200" autocomplete="off">
+    </label>
+    <div class="callout compact">
+      这是复制接力：Claude Code 原会话不会被修改，仍可继续使用。Codex 会创建一个独立的新会话分支，后续不会与 Claude 自动同步。
+    </div>
+    <div class="tiny muted" id="session-handoff-summary"></div>
+    <div class="callout compact" id="session-handoff-warning" style="display:none;"></div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-handoff-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-session-handoff-confirm">创建 Codex 会话</button>
+    </div>
+  </div>
+</div>
+
 <div class="dialog-overlay" id="skill-link-wrap">
   <div class="dialog">
     <h2>复制 Skill 到其他 Agent</h2>

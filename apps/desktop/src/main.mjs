@@ -50,6 +50,7 @@ import {
   saveAgentCoreFile
 } from "./agent-resources.mjs";
 import { listAgentPlugins, addPluginSource, removePluginSource, installPlugin, uninstallPlugin } from "./agent-plugins.mjs";
+import { previewSessionHandoffToCodex, handoffSessionToCodex } from "./session-handoff.mjs";
 import { importProviders } from "../../../packages/core/src/importers/ccswitch.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import {
@@ -1205,6 +1206,21 @@ ipcMain.handle("logs:open-file", async () => {
 ipcMain.handle("agent:sessions:list", (_e, filters = {}) => listAgentSessions(filters));
 ipcMain.handle("agent:sessions:read", (_e, { id }) => readAgentSession(id));
 ipcMain.handle("agent:sessions:rename", (_e, { id, title } = {}) => renameAgentSession(id, title));
+ipcMain.handle("agent:sessions:handoff-preview", (_e, { id } = {}) => {
+  const { memory: _memory, ...preview } = previewSessionHandoffToCodex(id);
+  return preview;
+});
+ipcMain.handle("agent:sessions:handoff-to-codex", async (_e, { id, title } = {}) => {
+  const result = await handoffSessionToCodex(id, { title });
+  appendLog({
+    level: "info",
+    msg: "claude session handed off to codex",
+    sourceSessionId: id,
+    targetThreadId: result.targetThreadId,
+    messageCount: result.messageCount
+  });
+  return result;
+});
 ipcMain.handle("agent:sessions:delete", async (_e, { id }) => {
   const resource = resolveAgentResource(id, "session");
   if (resource.source === "hermes-state-db") {

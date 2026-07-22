@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.20 — 2026-07-22
+
+### Feat
+
+- **Claude Code → Codex 会话复制接力**：Sessions 页可预览并将 Claude Code 用户/助手正文复制到独立 Codex thread；Claude 原会话保持不变且仍可继续使用，两边后续不自动同步。
+- **接力安全与恢复机制**：完整读取源 JSONL（默认 16 MB 上限）、fingerprint/checkpoint 防重复、每批最多 200 条注入；Codex rollout 修改前备份并原子替换，失败时恢复并归档新建 thread。
+- **Codex app-server 接入**：通过 `thread/start`、`thread/inject_items`、`thread/name/set`、`thread/read` 创建可继续对话的新会话，并补齐 Codex Desktop 对话生命周期投影。
+
 ## 2.2.19 — 2026-07-21
 
 ### Fix
