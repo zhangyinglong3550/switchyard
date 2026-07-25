@@ -80,6 +80,30 @@ export function rectifyUpstreamRequest({ apiFormat = "openai_chat", body, payloa
   // error, so the generic classifier cannot identify it from the response.
   // Retry once with the same tools expressed through the conservative OpenAI
   // function-schema subset instead of making users choose a compat option.
+  if (!errorClass && isOversizedToolManifestBodyReadFailure(payload, status, body, ctx)) {
+    const retryStage = Number(ctx?.runtimeRectifierAttempt || 0);
+    if (retryStage > 0) {
+      return actionResult(minimalOversizedToolManifest(body), {
+        id: "oversized-tool-manifest-minimal",
+        label: "Oversized tool manifest minimal rectifier",
+        errorClass: "tool.manifest-body-unreadable",
+        changes: [
+          "removed tool and schema descriptions",
+          `limited the retry manifest to ${MAX_RETRY_TOOL_COUNT} tools after the compact retry also failed`
+        ]
+      });
+    }
+    return actionResult(compactOpenCodeToolManifest(body), {
+      id: "oversized-tool-manifest",
+      label: "Oversized tool manifest rectifier",
+      errorClass: "tool.manifest-body-unreadable",
+      changes: [
+        "compacted a large tool manifest to the conservative OpenAI function-schema subset",
+        "trimmed tool and schema descriptions before retrying the compatibility upstream"
+      ]
+    });
+  }
+
   if (!errorClass && isOpenCodeGoToolManifestFailure(payload, status, body, ctx)) {
     const retryStage = Number(ctx?.runtimeRectifierAttempt || 0);
     if (retryStage > 0) {
@@ -235,6 +259,24 @@ function disableThinking(body) {
   if (next.reasoning_split !== undefined) next.reasoning_split = false;
   if (next.reasoning && typeof next.reasoning === "object") next.reasoning = { ...next.reasoning, effort: "none" };
   return next;
+}
+
+const MAX_RETRY_TOOL_COUNT = 64;
+
+function isOversizedToolManifestBodyReadFailure(payload, status, body, ctx) {
+  if (!Array.isArray(body?.tools) || body.tools.length < 80) return false;
+  if (![400, 413, 422].includes(Number(status))) return false;
+  // This fallback is intentionally scoped to the observed compatibility
+  // upstream.  A first-party OpenAI/Codex endpoint returning a 400 must retain
+  // its original validation error rather than silently losing optional tools.
+  if (String(ctx?.provider?.id || "").toLowerCase() !== "9m8m-code") return false;
+  return /failed to read request body|request body.*(?:too large|invalid)|invalid_request_error/i
+    .test(errorText(payload));
+}
+
+function minimalOversizedToolManifest(body) {
+  const minimal = minimalOpenCodeToolManifest(body);
+  return { ...minimal, tools: minimal.tools.slice(0, MAX_RETRY_TOOL_COUNT) };
 }
 
 function isOpenCodeGoToolManifestFailure(payload, status, body, ctx) {

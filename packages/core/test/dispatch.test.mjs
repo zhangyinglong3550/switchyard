@@ -878,3 +878,82 @@ test("dispatchChat → anthropic_messages does not invent thinking without reaso
   assert.equal(received.thinking, undefined);
   assert.equal(received.output_config, undefined);
 });
+
+test("dispatchChat → retries a 9m8m Codex oversized tool manifest after body-read failures", async (t) => {
+  resetPatches();
+  let calls = 0;
+  const received = [];
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    received.push(data);
+    if (calls < 3) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        error: { message: "Failed to read request body", type: "invalid_request_error" }
+      }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n");
+  });
+  t.after(() => close(up));
+  const provider = { id: "9m8m-code", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  const tools = Array.from({ length: 100 }, (_, index) => ({
+    type: "function",
+    function: {
+      name: `tool_${index}`,
+      description: "tool description ".repeat(100),
+      parameters: {
+        type: "object",
+        properties: {
+          input: { type: ["string", "null"], description: "input description ".repeat(100) }
+        },
+        required: ["input"]
+      }
+    }
+  }));
+
+  const result = await dispatchChat(provider, "gpt-5.6-terra", {
+    stream: true,
+    messages: [{ role: "user", content: "go" }],
+    tools
+  });
+
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.ok, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(result.rectifiers.map((item) => item.id), [
+    "oversized-tool-manifest",
+    "oversized-tool-manifest-minimal"
+  ]);
+  assert.equal(received[0].tools.length, 100);
+  assert.equal(received[1].tools.length, 100);
+  assert.equal(received[1].tools[0].function.description.length, 480);
+  assert.equal(received[2].tools.length, 64);
+  assert.equal(received[2].tools[0].function.description, undefined);
+  assert.equal(received[2].tools[0].function.parameters.properties.input.description, undefined);
+  assert.match(await result.upstream.text(), /data: \[DONE\]/);
+});
+
+test("dispatchChat → does not trim an oversized manifest for unrelated providers", async (t) => {
+  resetPatches();
+  let calls = 0;
+  const up = await spawnUpstream((_req, res) => {
+    calls += 1;
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "Failed to read request body", type: "invalid_request_error" } }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "ordinary-compatible", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  const result = await dispatchChat(provider, "model", {
+    stream: true,
+    messages: [{ role: "user", content: "go" }],
+    tools: Array.from({ length: 80 }, (_, index) => ({ type: "function", function: { name: `tool_${index}`, parameters: { type: "object" } } }))
+  });
+
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.status, 400);
+  assert.equal(calls, 1);
+  assert.deepEqual(result.rectifiers, []);
+});
