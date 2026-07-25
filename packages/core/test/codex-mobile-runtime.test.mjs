@@ -70,6 +70,112 @@ function fakeRuntimeClient(handler) {
   };
 }
 
+test("Codex app-server falls back to stdio when the Desktop proxy cannot initialize", async () => {
+  const children = [];
+  const spawnedArgs = [];
+  const client = new CodexAppServerClient({
+    resolveDaemonSocket: () => "/tmp/stale-codex.sock",
+    spawnProcess: (_binary, args) => {
+      const child = fakeChild();
+      children.push(child);
+      spawnedArgs.push(args);
+      queueMicrotask(() => {
+        if (args.includes("proxy")) {
+          child.emit("close", 1);
+          return;
+        }
+        const initialize = JSON.parse(child.stdin.writes[0]);
+        child.stdout.emit("data", `${JSON.stringify({ id: initialize.id, result: { userAgent: "codex-test" } })}\n`);
+      });
+      return child;
+    }
+  });
+
+  await client.connect();
+  assert.deepEqual(spawnedArgs, [
+    ["app-server", "proxy", "--sock", "/tmp/stale-codex.sock"],
+    ["app-server", "--stdio"]
+  ]);
+  assert.equal(client.usingProxy, false);
+  assert.equal(client.child, children[1]);
+  client.close();
+});
+
+test("Codex app-server can explicitly reconnect its current transport", async () => {
+  const children = [];
+  const client = new CodexAppServerClient({
+    resolveDaemonSocket: () => null,
+    spawnProcess: (_binary, args) => {
+      const child = fakeChild();
+      children.push({ child, args });
+      queueMicrotask(() => {
+        const initialize = JSON.parse(child.stdin.writes[0]);
+        child.stdout.emit("data", `${JSON.stringify({ id: initialize.id, result: {} })}\n`);
+      });
+      return child;
+    }
+  });
+
+  await client.connect();
+  await client.reconnect();
+  assert.deepEqual(children.map((item) => item.args), [
+    ["app-server", "--stdio"],
+    ["app-server", "--stdio"]
+  ]);
+  assert.equal(client.child, children[1].child);
+  client.close();
+});
+
+test("Codex app-server reconnects lazily after its child exits", async () => {
+  const children = [];
+  const client = new CodexAppServerClient({
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      queueMicrotask(() => {
+        const initialize = JSON.parse(child.stdin.writes[0]);
+        child.stdout.emit("data", `${JSON.stringify({ id: initialize.id, result: { userAgent: "codex-test" } })}\n`);
+      });
+      return child;
+    }
+  });
+
+  await client.connect();
+  assert.equal(children.length, 1);
+  children[0].emit("close", 1);
+
+  const requested = client.request("thread/start", { cwd: "/tmp/demo" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(children.length, 2);
+  const request = JSON.parse(children[1].stdin.writes.at(-1));
+  assert.equal(request.method, "thread/start");
+  children[1].stdout.emit("data", `${JSON.stringify({ id: request.id, result: { thread: { id: "t-new" } } })}\n`);
+  assert.deepEqual(await requested, { thread: { id: "t-new" } });
+  client.close();
+});
+
+test("Codex app-server coalesces concurrent lazy connections", async () => {
+  const child = fakeChild();
+  let spawns = 0;
+  const client = new CodexAppServerClient({
+    spawnProcess: () => {
+      spawns += 1;
+      return child;
+    }
+  });
+  const first = client.request("thread/list", {});
+  const second = client.request("thread/read", { threadId: "t1" });
+  assert.equal(spawns, 1);
+  const initialize = JSON.parse(child.stdin.writes[0]);
+  child.stdout.emit("data", `${JSON.stringify({ id: initialize.id, result: {} })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const requests = child.stdin.writes.slice(2).map((line) => JSON.parse(line));
+  assert.deepEqual(requests.map((row) => row.method), ["thread/list", "thread/read"]);
+  for (const request of requests) child.stdout.emit("data", `${JSON.stringify({ id: request.id, result: {} })}\n`);
+  await Promise.all([first, second]);
+  client.close();
+});
+
 test("Codex runtime lists and reads native threads with mobile capabilities", async () => {
   const client = fakeRuntimeClient((method) => {
     if (method === "thread/list") {
@@ -224,18 +330,156 @@ test("Codex app-server turns accept mobile image input as a data URL", async () 
   });
 });
 
-test("Codex runtime resumes a Desktop-owned local rollout through the native CLI", async () => {
+test("Codex runtime reconnects app-server before resuming a Desktop-owned thread", async () => {
+  const sharedCalls = [];
+  let reads = 0;
+  let reconnects = 0;
+  let nativeSpawns = 0;
+  const client = {
+    async request(method, params) {
+      sharedCalls.push({ method, params });
+      if (method === "thread/resume") {
+        reads += 1;
+        if (reads === 1) throw new Error("thread not found: desktop-thread");
+        return { thread: { id: "desktop-thread" } };
+      }
+      if (method === "turn/start") return { turn: { id: "turn-desktop" } };
+      return {};
+    },
+    async reconnect() {
+      reconnects += 1;
+    },
+    subscribe() {
+      return () => {};
+    }
+  };
+  const runtime = createCodexRuntime({
+    client,
+    scanSessions: () => [{
+      sessionId: "desktop-thread",
+      cwd: "/tmp/codex-desktop-smoke",
+      filePath: "/missing-rollout.jsonl",
+      title: "桌面任务",
+      originator: "Codex Desktop",
+      mtimeMs: 1
+    }],
+    spawnProcess: () => {
+      nativeSpawns += 1;
+      return fakeChild();
+    }
+  });
+
+  assert.deepEqual(await runtime.sendMessage("desktop-thread", { text: "继续" }), {
+    accepted: true,
+    turnId: "turn-desktop"
+  });
+  assert.equal(reconnects, 1);
+  assert.equal(nativeSpawns, 0);
+  assert.deepEqual(sharedCalls.map((call) => call.method), [
+    "thread/resume",
+    "thread/resume",
+    "turn/start"
+  ]);
+  assert.deepEqual(sharedCalls[1].params, {
+    threadId: "desktop-thread",
+    excludeTurns: true
+  });
+});
+
+test("Codex runtime reports an unavailable Desktop thread without starting a native owner", async () => {
+  let nativeSpawns = 0;
+  let reconnects = 0;
+  const client = {
+    async request() {
+      throw new Error("thread not found: desktop-thread");
+    },
+    async reconnect() {
+      reconnects += 1;
+    },
+    subscribe() {
+      return () => {};
+    }
+  };
+  const runtime = createCodexRuntime({
+    client,
+    scanSessions: () => [{
+      sessionId: "desktop-thread",
+      cwd: "/tmp/codex-desktop-smoke",
+      filePath: "/missing-rollout.jsonl",
+      title: "桌面任务",
+      originator: "Codex Desktop",
+      mtimeMs: 1
+    }],
+    spawnProcess: () => {
+      nativeSpawns += 1;
+      return fakeChild();
+    }
+  });
+
+  await assert.rejects(
+    runtime.sendMessage("desktop-thread", { text: "继续" }),
+    /Codex Desktop 会话暂时不可连接/
+  );
+  assert.equal(reconnects, 1);
+  assert.equal(nativeSpawns, 0);
+});
+
+test("Codex runtime never switches a Desktop image turn to the native CLI", async () => {
+  let nativeSpawns = 0;
+  const client = {
+    async request(method) {
+      if (method === "thread/resume") return { thread: { id: "desktop-image-thread" } };
+      throw new Error("historical thread rejected image input");
+    },
+    async reconnect() {},
+    subscribe() {
+      return () => {};
+    }
+  };
+  const runtime = createCodexRuntime({
+    client,
+    scanSessions: () => [{
+      sessionId: "desktop-image-thread",
+      cwd: "/tmp/codex-desktop-smoke",
+      filePath: "/missing-rollout.jsonl",
+      title: "桌面图片任务",
+      originator: "Codex Desktop",
+      mtimeMs: 1
+    }],
+    spawnProcess: () => {
+      nativeSpawns += 1;
+      return fakeChild();
+    }
+  });
+
+  await assert.rejects(
+    runtime.sendMessage("desktop-image-thread", {
+      text: "看图",
+      attachments: [{
+        kind: "image",
+        name: "screen.png",
+        mimeType: "image/png",
+        data: "aW1hZ2U="
+      }]
+    }),
+    /historical thread rejected image input/
+  );
+  assert.equal(nativeSpawns, 0);
+});
+
+test("Codex runtime resumes a CLI-owned local rollout through the native CLI", async () => {
   const calls = [];
   const child = fakeChild();
   const client = fakeRuntimeClient((method) => {
-    if (method === "turn/start") throw new Error("Desktop thread must not be sent to mobile app-server");
+    if (method === "turn/start") throw new Error("CLI thread must not be sent to mobile app-server");
     return {};
   });
   const scanSessions = () => [{
-    sessionId: "desktop-thread",
+    sessionId: "cli-thread",
     cwd: "/tmp/codex-native-smoke",
     filePath: "/missing-rollout.jsonl",
-    title: "桌面任务",
+    title: "CLI 任务",
+    originator: "codex_cli_rs",
     mtimeMs: 1
   }];
   const runtime = createCodexRuntime({
@@ -256,17 +500,17 @@ test("Codex runtime resumes a Desktop-owned local rollout through the native CLI
   });
   const events = [];
   runtime.subscribe((event) => events.push(event));
-  await runtime.setModel("desktop-thread", "deepseek/deepseek-v4", "low");
-  await runtime.setSettings("desktop-thread", {
+  await runtime.setModel("cli-thread", "deepseek/deepseek-v4", "low");
+  await runtime.setSettings("cli-thread", {
     effort: "low",
     permissionMode: "read-only"
   });
-  assert.deepEqual(await runtime.sendMessage("desktop-thread", {
+  assert.deepEqual(await runtime.sendMessage("cli-thread", {
     text: "继续",
     attachments: [{ kind: "text", name: "note.md", text: "上下文" }]
   }), { accepted: true });
   assert.deepEqual(calls[0], [
-    "exec", "resume", "desktop-thread", "--json", "--skip-git-repo-check",
+    "exec", "resume", "cli-thread", "--json", "--skip-git-repo-check",
     "--model", "deepseek/deepseek-v4",
     "-c", 'model_reasoning_effort="low"',
     "-c", 'sandbox_mode="read-only"',
@@ -286,10 +530,11 @@ test("Codex native resume materializes image attachments, passes --image and rem
   const runtime = createCodexRuntime({
     client: fakeRuntimeClient(() => ({})),
     scanSessions: () => [{
-      sessionId: "desktop-image-thread",
+      sessionId: "cli-image-thread",
       cwd: "/tmp/codex-native-smoke",
       filePath: "/missing-rollout.jsonl",
-      title: "桌面图片任务",
+      title: "CLI 图片任务",
+      originator: "codex_cli_rs",
       mtimeMs: 1
     }],
     command: "codex-test",
@@ -307,7 +552,7 @@ test("Codex native resume materializes image attachments, passes --image and rem
     }
   });
 
-  await runtime.sendMessage("desktop-image-thread", {
+  await runtime.sendMessage("cli-image-thread", {
     text: "看图",
     attachments: [{
       kind: "image",

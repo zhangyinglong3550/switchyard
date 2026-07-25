@@ -31,10 +31,11 @@ function resolveCodexDaemonSocket(home = os.homedir()) {
 }
 
 export class CodexAppServerClient {
-  constructor({ binary = resolveCodexBinary(), env, spawnProcess = spawn } = {}) {
+  constructor({ binary = resolveCodexBinary(), env, spawnProcess = spawn, resolveDaemonSocket = resolveCodexDaemonSocket } = {}) {
     this.binary = binary;
     this.env = env;
     this.spawnProcess = spawnProcess;
+    this.resolveDaemonSocket = resolveDaemonSocket;
     this.child = null;
     this.buffer = "";
     this.stderr = [];
@@ -42,17 +43,47 @@ export class CodexAppServerClient {
     this.pending = new Map();
     this.subscribers = new Set();
     this.usingProxy = false;
+    this.connectPromise = null;
   }
 
-  async connect() {
+  async connect({ force = false } = {}) {
+    if (this.connectPromise) return this.connectPromise;
+    if (force && this.child) this.disposeChild();
     if (this.child) return;
-    // 优先通过 proxy 接入已有 Desktop daemon（共享线程状态），
-    // 无 daemon socket 时退回独立 --stdio 进程。
-    const daemonSock = resolveCodexDaemonSocket(os.homedir());
-    const args = daemonSock
-      ? ["app-server", "proxy", "--sock", daemonSock]
-      : ["app-server", "--stdio"];
-    this.usingProxy = Boolean(daemonSock);
+    this.connectPromise = this.connectOnce();
+    try {
+      await this.connectPromise;
+    } catch (error) {
+      const child = this.child;
+      this.child = null;
+      try { child?.kill(); } catch {}
+      throw error;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  async connectOnce() {
+    // A socket file can survive while its Desktop daemon is no longer
+    // accepting app-server proxy traffic. Try the shared daemon first so
+    // Desktop threads remain available, but fall back to a private stdio
+    // server when the proxy cannot complete initialization.
+    const daemonSock = this.resolveDaemonSocket(os.homedir());
+    if (daemonSock) {
+      try {
+        await this.startTransport(["app-server", "proxy", "--sock", daemonSock], true, 5_000);
+        return;
+      } catch {
+        this.disposeChild();
+      }
+    }
+    await this.startTransport(["app-server", "--stdio"], false, 30_000);
+  }
+
+  async startTransport(args, usingProxy, initializeTimeoutMs) {
+    this.buffer = "";
+    this.stderr = [];
+    this.usingProxy = usingProxy;
     const child = this.spawnProcess(this.binary, args, {
       env: { ...process.env, HOME: os.homedir(), ...(this.env || {}) }
     });
@@ -63,18 +94,30 @@ export class CodexAppServerClient {
       this.stderr = this.stderr.slice(-8);
     });
     child.on("error", (error) => {
+      if (this.child !== child) return;
       this.rejectAll(new Error(`无法启动 Codex app-server：${error.message}`));
       this.child = null;
     });
     child.on("close", (code) => {
+      if (this.child !== child) return;
       if (this.pending.size) this.rejectAll(new Error(`Codex app-server 已退出（${code}）${this.stderr.length ? `：${this.stderr.join(" | ")}` : ""}`));
       this.child = null;
     });
     await this.call("initialize", {
       clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.20" },
       capabilities: { experimentalApi: true, requestAttestation: false }
-    });
+    }, initializeTimeoutMs);
     this.notify("initialized");
+  }
+
+  disposeChild() {
+    const child = this.child;
+    this.child = null;
+    this.rejectAll(new Error("Codex app-server 连接不可用"));
+    try { child?.kill(); } catch {}
+    this.buffer = "";
+    this.stderr = [];
+    this.usingProxy = false;
   }
 
   onStdout(chunk) {
@@ -122,8 +165,17 @@ export class CodexAppServerClient {
     });
   }
 
-  request(method, params = {}, timeoutMs = 30000) {
+  async request(method, params = {}, timeoutMs = 30000) {
+    // The mobile service is allowed to start while Codex Desktop is still
+    // booting. Reconnect lazily on the first operation, and again after an
+    // app-server/proxy child exits, instead of surfacing a permanent
+    // "尚未连接" error until the whole mobile service is restarted.
+    await this.connect();
     return this.call(method, params, timeoutMs);
+  }
+
+  async reconnect() {
+    await this.connect({ force: true });
   }
 
   notify(method, params) {
@@ -164,6 +216,7 @@ export class CodexAppServerClient {
     this.rejectAll(new Error("Codex app-server 已关闭"));
     this.child.kill();
     this.child = null;
+    this.connectPromise = null;
     this.usingProxy = false;
   }
 }

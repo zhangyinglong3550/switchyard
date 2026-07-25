@@ -283,6 +283,31 @@ export function createCodexRuntime({
   const nativeSession = (sessionId) => scanSessions({ limit: 1000 })
     .find((row) => row.sessionId === String(sessionId));
   const readNativeFallback = (sessionId) => nativeSession(sessionId);
+  const isDesktopOwned = (session) => String(session?.originator || "").trim().toLowerCase() === "codex desktop";
+  const desktopUnavailable = (error) => new Error(
+    `Codex Desktop 会话暂时不可连接：${error?.message || String(error)}`
+  );
+  const resumeDesktopThread = async (sessionId) => {
+    const resume = async () => {
+      const result = await client.request("thread/resume", {
+        threadId: String(sessionId),
+        excludeTurns: true
+      }, 30_000);
+      if (!result?.thread?.id && !result?.id) throw new Error(`thread not found: ${sessionId}`);
+      return result;
+    };
+    try {
+      return await resume();
+    } catch (firstError) {
+      if (typeof client.reconnect !== "function") throw desktopUnavailable(firstError);
+      try {
+        await client.reconnect();
+        return await resume();
+      } catch (retryError) {
+        throw desktopUnavailable(retryError);
+      }
+    }
+  };
 
   client.subscribe((frame) => {
     const params = frame.params || {};
@@ -410,11 +435,17 @@ export function createCodexRuntime({
       ...(sandboxPolicy(permission) ? { sandboxPolicy: sandboxPolicy(permission) } : {})
     };
     const local = readNativeFallback(sid);
+    if (isDesktopOwned(local)) {
+      await resumeDesktopThread(sid);
+      const result = await client.request("turn/start", turnParams, 60_000);
+      const turnId = String(result?.turn?.id || result?.id || "");
+      if (turnId) activeTurns.set(sid, turnId);
+      return { accepted: true, turnId };
+    }
     if (local) {
-      // Desktop-owned rollouts may not be registered in this mobile
-      // app-server process. Probe the shared thread first; only a confirmed
-      // thread may use turn/start. Otherwise resume the exact rollout with
-      // the native CLI, preserving the desktop Codex thread id.
+      // CLI-owned rollouts may not be registered in this app-server process.
+      // Probe app-server first, then resume the exact CLI rollout only when
+      // the app-server does not know it.
       try {
         const probe = await client.request("thread/read", { threadId: sid, includeTurns: false }, 15_000);
         if (!probe?.thread?.id && !probe?.id) return sendNativeMessage(sid, local, { text, attachments });
