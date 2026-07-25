@@ -218,6 +218,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       return withAccountMeta({
         kind: "stream",
         upstream: normalizedUpstream,
+        compatContext: ctx,
         rectifiers: rectifiedStream.rectifiers,
         errorClass: rectifiedStream.errorClass,
         requestOverrides: requestOverrideSummary(requestOverrides)

@@ -123,8 +123,10 @@ import { reasoningStatePatch } from "./patches/reasoning-state.mjs";
 import { strictToolSchemaPatch } from "./patches/strict-tool-schema.mjs";
 import { aigoChatPatch } from "./patches/aigo-chat.mjs";
 import { grokProtocolStrictPatch } from "./patches/grok-protocol-strict.mjs";
+import { missingToolNameRecoverPatch } from "./patches/missing-tool-name-recover.mjs";
 
 export const BUILTIN_PATCHES = [
+  missingToolNameRecoverPatch,
   toolNameNormalizePatch,
   toolHistoryAdjacentPatch,
   roleNormalizePatch,

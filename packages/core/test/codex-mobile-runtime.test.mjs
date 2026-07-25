@@ -330,6 +330,88 @@ test("Codex app-server turns accept mobile image input as a data URL", async () 
   });
 });
 
+test("Codex app-server turns describe arbitrary uploaded files by their private local path", async () => {
+  const client = fakeRuntimeClient((method) => method === "turn/start" ? { turn: { id: "turn-file" } } : {});
+  const runtime = createCodexRuntime({ client, scanSessions: () => [] });
+  await runtime.sendMessage("t-file", {
+    text: "检查附件",
+    attachments: [{
+      kind: "file",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      path: "/tmp/switchyard/report.pdf"
+    }]
+  });
+  const input = client.calls.at(-1).params.input;
+  assert.equal(input.length, 1);
+  assert.match(input[0].text, /report\.pdf/);
+  assert.match(input[0].text, /\/tmp\/switchyard\/report\.pdf/);
+});
+
+test("Codex runtime exposes app-server approval requests and can answer them", () => {
+  const responses = [];
+  const client = fakeRuntimeClient(() => ({}));
+  client.respond = (requestId, result) => responses.push({ requestId, result });
+  const runtime = createCodexRuntime({ client, scanSessions: () => [] });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+
+  client.emit({
+    kind: "request",
+    id: 77,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "thread-approval",
+      turnId: "turn-approval",
+      command: "git status --short",
+      reason: "需要读取仓库状态"
+    }
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "approval");
+  assert.equal(events[0].requestId, 77);
+  assert.equal(events[0].request.method, "item/commandExecution/requestApproval");
+  assert.equal(events[0].request.command, "git status --short");
+
+  runtime.respond(77, { decision: "accept" });
+  assert.deepEqual(responses, [{
+    requestId: 77,
+    result: { decision: "accept" }
+  }]);
+});
+
+test("Codex mobile @ mentions use native plugin UserInput entries", async () => {
+  const client = fakeRuntimeClient((method) => {
+    if (method === "plugin/installed") return {
+      marketplaces: [{ plugins: [{
+        name: "chrome", installed: true, enabled: true,
+        source: { type: "local", path: "/plugins/chrome" },
+        interface: { shortDescription: "Control Chrome" }
+      }] }]
+    };
+    if (method === "turn/start") return { turn: { id: "turn-mention" } };
+    return {};
+  });
+  const runtime = createCodexRuntime({ client, scanSessions: () => [], command: "/missing-codex" });
+
+  assert.deepEqual(await runtime.listMentions({ cwd: "/tmp/project" }), [{
+    name: "chrome", description: "Control Chrome"
+  }]);
+  await runtime.sendMessage("t-mention", { text: "用 @chrome 检查页面" });
+
+  assert.deepEqual(client.calls.at(-1), {
+    method: "turn/start",
+    params: {
+      threadId: "t-mention",
+      input: [
+        { type: "text", text: "用 @chrome 检查页面", text_elements: [] },
+        { type: "mention", name: "chrome", path: "/plugins/chrome" }
+      ]
+    }
+  });
+});
+
 test("Codex runtime reconnects app-server before resuming a Desktop-owned thread", async () => {
   const sharedCalls = [];
   let reads = 0;

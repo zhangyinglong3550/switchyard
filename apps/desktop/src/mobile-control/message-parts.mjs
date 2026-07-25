@@ -29,6 +29,44 @@ function parseArguments(value) {
   try { return JSON.parse(value); } catch { return value; }
 }
 
+function toolFiles(value, activity) {
+  const rows = [];
+  const seen = new Set();
+  const visit = (input, key = "") => {
+    if (!input || rows.length >= 20) return;
+    if (Array.isArray(input)) {
+      for (const item of input) visit(item, key);
+      return;
+    }
+    if (typeof input !== "object") {
+      if (!/(?:^|_)(?:file_?)?path$/i.test(key) && !/^path$/i.test(key)) return;
+      const filePath = String(input || "").trim();
+      if (!filePath || /^[a-z][a-z0-9+.-]*:\/\//i.test(filePath) || seen.has(filePath)) return;
+      seen.add(filePath);
+      rows.push({ path: filePath, activity });
+      return;
+    }
+    for (const [name, item] of Object.entries(input)) visit(item, name);
+  };
+  const state = value.state && typeof value.state === "object" ? value.state : {};
+  visit(value.input ?? value.arguments ?? value.args ?? value.rawInput ?? state.input ?? value.action ?? null);
+  visit(value.changes);
+  visit(value.fileChanges);
+  return rows;
+}
+
+export function toolActivity(value = {}) {
+  const state = value.state && typeof value.state === "object" ? value.state : {};
+  const input = value.input ?? value.arguments ?? value.args ?? value.rawInput ?? state.input ?? value.action ?? "";
+  const text = [value.activity, value.name, value.tool, value.toolName, value.kind?.tool_type, value.type, value.title, value.command, textValue(input, 8_000)]
+    .filter(Boolean).join(" ").toLowerCase();
+  if (/\b(read|read_file|readfile|cat|head|tail|sed)\b|读取|查看文件/.test(text)) return "read";
+  if (/\b(grep|rg|glob|find|search|websearch|web_search|web-search)\b|搜索|检索|查找/.test(text)) return "search";
+  if (/\b(edit|write|apply_patch|file_change|filechange|notebookedit|str_replace|create_file)\b|编辑|写入|修改文件/.test(text)) return "edit";
+  if (/\b(bash|shell|terminal|exec|run_command|execute|command_execution|commandexecution)\b|执行命令|运行命令/.test(text)) return "command";
+  return "other";
+}
+
 export function toolFrom(value = {}, fallbackStatus = "completed") {
   const state = value.state && typeof value.state === "object" ? value.state : {};
   const input = value.input ?? value.arguments ?? value.args ?? value.rawInput ?? state.input ?? value.action ?? null;
@@ -39,15 +77,18 @@ export function toolFrom(value = {}, fallbackStatus = "completed") {
   const error = value.error ?? state.error ?? "";
   const name = value.name || value.tool || value.toolName || value.kind?.tool_type || value.type || "工具调用";
   const title = value.title || state.title || state.input?.title || state.metadata?.description || "";
+  const activity = toolActivity(value);
   return {
     id: String(value.callId || value.call_id || value.callID || value.toolCallId || value.tool_call_id || value.id || ""),
     name: String(name || "工具调用"),
     title: String(title || ""),
+    activity,
     command: textValue(command, 8_000),
     arguments: textValue(parsed, 12_000),
     status: toolStatus(state.status || value.status, error ? "failed" : fallbackStatus),
     output: textValue(output, 20_000),
-    error: textValue(error, 8_000)
+    error: textValue(error, 8_000),
+    files: toolFiles(value, activity)
   };
 }
 

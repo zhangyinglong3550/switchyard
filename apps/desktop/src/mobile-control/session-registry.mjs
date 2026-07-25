@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { projectMobileEvent, projectMobileSession } from "./dto.mjs";
 import { classifyMobileApproval } from "./approval-policy.mjs";
+import { createMobileCommandCatalog } from "./command-catalog.mjs";
 
 export function encodeMobileSessionId(agentId, nativeId) {
   const payload = Buffer.from(JSON.stringify({
@@ -41,15 +42,62 @@ function visibleModels(config, agentId) {
     }));
 }
 
-function projectMessages(messages = []) {
-  return messages.slice(-500).map((message) => ({
+function enrichToolFiles(tool, { store, sessionId, workspaceRoot } = {}) {
+  if (!tool || typeof tool !== "object") return tool;
+  const files = [];
+  for (const item of Array.isArray(tool.files) ? tool.files : []) {
+    try {
+      const filePath = path.resolve(String(workspaceRoot || ""), String(item?.path || ""));
+      files.push(store.registerWorkspaceFile({
+        sessionId,
+        workspaceRoot,
+        filePath,
+        activity: item?.activity || tool.activity || "other"
+      }));
+    } catch {}
+  }
+  return { ...tool, ...(files.length ? { files } : {}) };
+}
+
+function projectMessages(messages = [], {
+  store,
+  sessionId = "",
+  workspaceRoot = "",
+  mobileMessages = []
+} = {}) {
+  const rows = messages.slice(-500).map((message) => ({
     id: message.id ? String(message.id).slice(0, 240) : null,
     role: ["user", "assistant", "tool", "system"].includes(message.role) ? message.role : "assistant",
     text: String(message.text || "").slice(0, 20_000),
     kind: String(message.kind || "message"),
     timestamp: message.timestamp || null,
-    tool: projectMobileEvent({ type: "tool", tool: message.tool }).tool
+    ...(Array.isArray(message.attachments) ? {
+      attachments: projectMobileEvent({ type: "message", attachments: message.attachments }).attachments
+    } : {}),
+    tool: projectMobileEvent({
+      type: "tool",
+      tool: enrichToolFiles(message.tool, { store, sessionId, workspaceRoot })
+    }).tool
   }));
+  let cursor = 0;
+  for (const mobile of mobileMessages) {
+    const text = String(mobile.text || "");
+    let index = rows.findIndex((row, rowIndex) => rowIndex >= cursor
+      && row.role === "user"
+      && !row.attachments?.length
+      && (!text || row.text === text || row.text.startsWith(text)));
+    if (index < 0) {
+      index = rows.findIndex((row, rowIndex) => rowIndex >= cursor && row.role === "user" && !row.attachments?.length);
+    }
+    if (index < 0) continue;
+    rows[index] = {
+      ...rows[index],
+      ...(mobile.messageId ? { id: String(mobile.messageId).slice(0, 240) } : {}),
+      attachments: projectMobileEvent({ type: "message", attachments: mobile.attachments }).attachments
+    };
+    cursor = index + 1;
+  }
+  return rows;
 }
 
 function normalizeAttachments(value) {
@@ -68,9 +116,9 @@ function normalizeAttachments(value) {
     if (allowedImageTypes.has(mimeType)) return { name, mimeType, data, kind: "image", byteLength };
     if (allowedTextTypes.has(mimeType) || /\.(md|txt|json|ya?ml|js|jsx|ts|tsx|py|go|rs|java|c|cc|cpp|h|html|css|sql|sh)$/i.test(name)) {
       const text = Buffer.from(data, "base64").toString("utf8");
-      return { name, mimeType, text: text.slice(0, 200_000), kind: "text", byteLength };
+      return { name, mimeType, data, text: text.slice(0, 200_000), kind: "text", byteLength };
     }
-    throw new Error(`暂不支持直接发送 ${name}；请使用图片或文本/代码文件`);
+    return { name, mimeType, data, kind: "file", byteLength };
   });
 }
 
@@ -87,6 +135,8 @@ export function createSessionRegistry({
   const runtimeMap = new Map(runtimes.map((runtime) => [runtime.id, runtime]));
   const runtimeErrors = new Map();
   const pendingApprovals = new Map();
+  const sessionDirectories = new Map();
+  const commandCatalog = createMobileCommandCatalog();
   // Listing sessions scans each Agent's local history and (for Codex) talks to
   // its app-server. Doing that serially on every request made the phone UI wait
   // seconds per tap, so scan in parallel, bound each runtime, and cache briefly.
@@ -176,7 +226,12 @@ export function createSessionRegistry({
         type: event.type,
         summary: event.summary,
         role: event.role,
-        tool: event.tool
+        attachments: event.attachments,
+        tool: enrichToolFiles(event.tool, {
+          store,
+          sessionId: mobileSessionId,
+          workspaceRoot: sessionDirectories.get(mobileSessionId) || ""
+        })
       }));
       if (["completed", "failed", "cancelled", "canceled"].includes(String(event.summary || "").toLowerCase())) {
         // 租约自然过期是兜底；运行时明确终态时不强行猜测 owner。
@@ -252,6 +307,8 @@ export function createSessionRegistry({
           model: overlay.model || defaultModelFor(runtime.id) || row.model,
           capabilities: row.capabilities || runtime.capabilities
         }, overlay);
+        const directory = String(row.directory || row.cwd || "");
+        if (directory) sessionDirectories.set(id, directory);
         if (overlay?.hidden) continue;
         if (projected.archived === Boolean(archived)) rows.push(projected);
       }
@@ -275,6 +332,8 @@ export function createSessionRegistry({
     if (cached && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) return cached.detail;
     const { runtime, nativeId } = runtimeFor(mobileSessionId);
     const detail = await runtime.readSession(nativeId);
+    const workspaceRoot = String(detail.directory || detail.cwd || "");
+    if (workspaceRoot) sessionDirectories.set(mobileSessionId, workspaceRoot);
     const projected = {
       ...projectMobileSession({
         ...detail,
@@ -283,7 +342,12 @@ export function createSessionRegistry({
         model: store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id) || detail.model,
         capabilities: detail.capabilities || runtime.capabilities
       }, store.getOverlay(mobileSessionId)),
-      messages: projectMessages(detail.messages || []),
+      messages: projectMessages(detail.messages || [], {
+        store,
+        sessionId: mobileSessionId,
+        workspaceRoot,
+        mobileMessages: store.listMobileMessages?.(mobileSessionId) || []
+      }),
       settings: runtime.getSettings?.(nativeId) || null
     };
     // Running turns must always be fresh; finished conversations are stable on
@@ -300,6 +364,23 @@ export function createSessionRegistry({
     const rows = visibleModels(readConfig(), key);
     modelsCache.set(key, { at: Date.now(), rows });
     return rows;
+  };
+
+  const listCommands = async (agentId, { cwd = "", sessionId = "" } = {}) => {
+    const key = String(agentId || "");
+    const runtime = runtimeMap.get(key);
+    if (!runtime) return [];
+    let directory = "";
+    if (sessionId) {
+      const resolved = runtimeFor(String(sessionId));
+      if (resolved.runtime.id !== key) throw new Error("会话与 Agent 不匹配");
+      const detail = await resolved.runtime.readSession(resolved.nativeId);
+      directory = String(detail.directory || detail.cwd || "");
+    } else if (cwd) {
+      directory = await assertWorkspacePath(cwd);
+    }
+    const mentions = key === "codex" ? await runtime.listMentions?.({ cwd: directory }) || [] : [];
+    return commandCatalog.list(key, runtime.listCommands?.() || [], { mentions });
   };
 
   const defaultModelFor = (agentId) => {
@@ -519,6 +600,25 @@ export function createSessionRegistry({
         messageId: payload.messageId
       });
       if (remembered.duplicate) return { accepted: true, duplicate: true };
+      const storedAttachments = attachments.map((attachment, index) => store.putAttachment({
+        sessionId: mobileSessionId,
+        messageId: payload.messageId,
+        index,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        kind: attachment.kind,
+        data: attachment.data
+      }));
+      const runtimeAttachments = attachments.map((attachment, index) => ({
+        ...attachment,
+        path: store.resolveAsset(storedAttachments[index].id)?.path || ""
+      }));
+      store.rememberMobileMessage({
+        sessionId: mobileSessionId,
+        messageId: payload.messageId,
+        text,
+        attachments: storedAttachments
+      });
       acquire(mobileSessionId, ownerId);
       const effectiveModel = store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id);
       if (effectiveModel && typeof runtime.setModel === "function") {
@@ -526,13 +626,19 @@ export function createSessionRegistry({
       }
       // HTTP 只确认已受理。Agent 的连接、首个 turn/start 或 ACP 初始化可能较慢，
       // 它们不能阻塞手机端的输入反馈。
-      const label = attachments.length ? `${text}${text ? "\n" : ""}📎 ${attachments.map((item) => item.name).join("、")}` : text;
-      ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: label });
+      detailCache.delete(mobileSessionId);
+      ledger.append({
+        sessionId: mobileSessionId,
+        type: "message",
+        role: "user",
+        summary: text,
+        ...(storedAttachments.length ? { attachments: storedAttachments } : {})
+      });
       ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
       void Promise.resolve()
         .then(() => runtime.sendMessage(nativeId, {
           text,
-          ...(attachments.length ? { attachments } : {}),
+          ...(runtimeAttachments.length ? { attachments: runtimeAttachments } : {}),
           messageId: payload.messageId
         }))
         .catch((error) => {
@@ -628,6 +734,7 @@ export function createSessionRegistry({
     const title = String(payload.title || "").trim() || promptText.slice(0, 24) || "新会话";
     const result = await runtime.createSession({ ...payload, ...(model ? { model } : {}), title });
     const id = encodeMobileSessionId(runtime.id, result.sessionId);
+    if (payload.cwd) sessionDirectories.set(id, String(payload.cwd));
     acquire(id, ownerId);
     store.patchOverlay(id, { title, ...(model ? { model } : {}) });
     // A newly created native thread must be visible immediately instead of
@@ -639,13 +746,13 @@ export function createSessionRegistry({
   };
 
   const listApprovals = () => [...pendingApprovals.values()]
-    .filter((approval) => approval.mobileAllowed)
     .map((approval) => ({
       id: approval.id,
       sessionId: approval.sessionId,
-      title: "低风险操作审批",
+      title: approval.mobileAllowed ? "操作审批" : "需要桌面审批",
       summary: approval.summary,
       risk: approval.risk,
+      requiresDesktop: approval.requiresDesktop,
       actions: [...approval.actions],
       createdAt: approval.createdAt
     }));
@@ -653,15 +760,25 @@ export function createSessionRegistry({
   const resolveApproval = async (approvalId, decision) => {
     const approval = pendingApprovals.get(String(approvalId || ""));
     if (!approval || !approval.mobileAllowed) throw new Error("审批不存在或必须在桌面处理");
-    const optionId = decision === "allow_once"
-      ? approval.allowOptionId
-      : decision === "deny_once"
-        ? approval.rejectOptionId
-        : null;
-    if (!optionId) throw new Error("审批决定无效");
-    approval.runtime.respond?.(approval.requestId, {
-      outcome: { outcome: "selected", optionId }
-    });
+    if (approval.protocol === "codex") {
+      const codexDecision = decision === "allow_once"
+        ? "accept"
+        : decision === "deny_once"
+          ? "decline"
+          : "";
+      if (!codexDecision) throw new Error("审批决定无效");
+      approval.runtime.respond?.(approval.requestId, { decision: codexDecision });
+    } else {
+      const optionId = decision === "allow_once"
+        ? approval.allowOptionId
+        : decision === "deny_once"
+          ? approval.rejectOptionId
+          : null;
+      if (!optionId) throw new Error("审批决定无效");
+      approval.runtime.respond?.(approval.requestId, {
+        outcome: { outcome: "selected", optionId }
+      });
+    }
     pendingApprovals.delete(approval.id);
     ledger.append({
       sessionId: approval.sessionId,
@@ -676,6 +793,7 @@ export function createSessionRegistry({
     readSession,
     createSession,
     availableModels,
+    listCommands,
     recentWorkspaces,
     browseWorkspaces,
     createWorkspaceDirectory,
@@ -686,6 +804,7 @@ export function createSessionRegistry({
     perform,
     listApprovals,
     resolveApproval,
+    resolveAsset: (assetId) => store.resolveAsset?.(assetId) || null,
     listEvents: (filters) => ledger.list(filters),
     subscribeEvents: (handler) => ledger.subscribe(handler),
     agents: () => runtimes.map((runtime) => ({

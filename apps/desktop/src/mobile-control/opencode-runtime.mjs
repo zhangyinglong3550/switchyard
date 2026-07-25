@@ -2,11 +2,31 @@ import { spawn as spawnChild } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { createAcpClient } from "./acp-client.mjs";
 import { toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
 
 const STORAGE_ROOT = path.join(os.homedir(), ".local", "share", "opencode", "storage");
+
+function openCodeCapabilityConfig() {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".switchyard", "config.json"), "utf8"));
+    const models = {};
+    for (const model of Array.isArray(config.models) ? config.models : Object.values(config.models || {})) {
+      const id = String(model?.id || "").trim();
+      if (!id) continue;
+      const images = Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || model?.visionFallbackModelId);
+      models[id] = {
+        attachment: images,
+        modalities: { input: images ? ["text", "image"] : ["text"], output: ["text"] }
+      };
+    }
+    return JSON.stringify({ provider: { switchyard: { models } } });
+  } catch {
+    return "";
+  }
+}
 
 function localOpenCodeRows(root = path.join(STORAGE_ROOT, "message")) {
   if (!fs.existsSync(root)) return [];
@@ -158,7 +178,20 @@ function runJson(binary, args, { cwd, env, spawnProcess }) {
  */
 export function createOpenCodeRuntime({ client, overlay, command, env, spawnProcess = spawnChild, storageRoot = STORAGE_ROOT } = {}) {
   const binary = command || process.env.SWITCHYARD_OPENCODE_BINARY || "opencode";
-  const acp = client || createAcpClient({ command: binary, args: ["acp", "--pure"], env });
+  const runtimeEnv = () => {
+    const capabilityConfig = openCodeCapabilityConfig();
+    return {
+      ...process.env,
+      HOME: os.homedir(),
+      ...(env || {}),
+      ...(capabilityConfig ? { OPENCODE_CONFIG_CONTENT: capabilityConfig } : {})
+    };
+  };
+  // Do not use `--pure`: OpenCode's pure ACP mode skips the normal plugin
+  // environment, including Switchyard's generated model-capability bridge.
+  // Without it ACP silently downgrades vision models and rewrites images into
+  // "model does not support image input" text before the gateway sees them.
+  const acp = client || createAcpClient({ command: binary, args: ["acp"], env: runtimeEnv() });
   const capabilities = {
     sendMessage: true, setModel: true, setEffort: false, cancel: true,
     rename: Boolean(overlay?.rename), archive: Boolean(overlay?.archive), unarchive: Boolean(overlay?.unarchive),
@@ -168,6 +201,11 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
   const sessions = new Map();
   const selectedModels = new Map();
   const active = new Map();
+  const nativeSessions = new Set();
+  const nativeSessionIds = new Map();
+  const acpSessions = new Map();
+  const publicSessions = new Map();
+  let dynamicCommands = [];
 
   const emit = (event) => {
     for (const listener of subscribers) {
@@ -179,6 +217,48 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
     sessions.set(session.id, session);
     return session;
   };
+  const publicSessionId = (sessionId) => publicSessions.get(String(sessionId)) || String(sessionId);
+  const contentText = (content) => typeof content === "string" ? content : String(content?.text || content?.content || "");
+
+  acp.subscribe?.((frame) => {
+    if (frame.kind !== "notification" || frame.method !== "session/update") return;
+    const params = frame.params || {};
+    const update = params.update || {};
+    const sid = publicSessionId(params.sessionId);
+    const kind = String(update.sessionUpdate || "");
+    const text = contentText(update.content);
+    if (kind === "available_commands_update") {
+      const rows = update.availableCommands || update.commands || update.content?.commands || [];
+      dynamicCommands = (Array.isArray(rows) ? rows : []).map((item) => typeof item === "string"
+        ? { name: item.replace(/^\//, ""), description: "OpenCode 命令" }
+        : { name: String(item?.name || item?.command || "").replace(/^\//, ""), description: item?.description || item?.title || "OpenCode 命令" })
+        .filter((item) => item.name);
+    } else if (kind === "agent_message_chunk" && text) {
+      const rows = runtimeMessages.get(sid) || [];
+      const last = rows.at(-1);
+      if (last?.role === "assistant" && last.kind === "text") last.text += text;
+      else rows.push({ role: "assistant", text, kind: "text" });
+      runtimeMessages.set(sid, rows.slice(-500));
+      emit({ sessionId: sid, type: "message", role: "assistant", summary: text, runtimeEvent: "opencode/acp-text" });
+    } else if ((kind === "agent_thought_chunk" || kind === "agent_thought") && text) {
+      const rows = runtimeMessages.get(sid) || [];
+      const last = rows.at(-1);
+      if (last?.kind === "thinking") last.text += text;
+      else rows.push({ role: "assistant", text, kind: "thinking" });
+      runtimeMessages.set(sid, rows.slice(-500));
+      emit({ sessionId: sid, type: "thinking", role: "assistant", summary: text, runtimeEvent: "opencode/acp-thinking" });
+    } else if (kind === "tool_call" || kind === "tool_call_update") {
+      const tool = toolFrom({
+        id: update.toolCallId,
+        name: update.toolName || update.kind || update.title || "工具调用",
+        title: update.title,
+        input: update.rawInput,
+        output: update.rawOutput,
+        status: update.status || (kind === "tool_call" ? "running" : "completed")
+      }, kind === "tool_call" ? "running" : "completed");
+      emit({ sessionId: sid, type: "tool", role: "tool", summary: tool.title || tool.name, tool, runtimeEvent: "opencode/acp-tool" });
+    }
+  });
   const listSessions = async ({ cwd } = {}) => {
     const local = localOpenCodeRows(path.join(storageRoot, "message"));
     // New OpenCode releases keep the active session index outside the historic
@@ -199,6 +279,11 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
     }
     const byId = new Map(local.map((row) => [row.sessionId, row]));
     for (const row of native) byId.set(row.sessionId, { ...byId.get(row.sessionId), ...row });
+    nativeSessions.clear();
+    // Local message folders can outlive OpenCode's resumable session index
+    // (notably sessions created by older ACP builds). Keep those rows visible
+    // as history, but only pass --session for IDs confirmed by the CLI.
+    for (const row of native) nativeSessions.add(row.sessionId);
     return [...byId.values()]
       .filter((row) => !cwd || row.cwd === cwd)
       .sort((a, b) => Number(b.created || Date.parse(b.updatedAt || 0)) - Number(a.created || Date.parse(a.updatedAt || 0)))
@@ -222,13 +307,41 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
   };
 
   const createSession = async ({ cwd, model } = {}) => {
-    await acp.connect();
-    const result = await acp.request("session/new", { cwd: String(cwd || process.cwd()), mcpServers: [] }, 60_000);
-    const sessionId = String(result?.sessionId || "");
-    if (!sessionId) throw new Error("OpenCode 未返回 session id");
-    remember({ sessionId, cwd: String(cwd || process.cwd()), model: model || result?.models?.currentModelId || "" });
-    if (model) selectedModels.set(sessionId, String(model));
+    // OpenCode 1.18 ACP stores a stale model capability snapshot and rejects
+    // images before plugins or the gateway can see them. Allocate a stable
+    // mobile id now; the first native `opencode run` creates and binds the real
+    // OpenCode session id while preserving this public id in the phone UI.
+    const sessionId = `mobile-opencode-${crypto.randomUUID()}`;
+    remember({ sessionId, cwd: String(cwd || process.cwd()), model: model || "" });
+    if (model) {
+      selectedModels.set(sessionId, String(model));
+    }
     return { sessionId };
+  };
+
+  const sendAcpMessage = async (sid, acpSessionId, { text, attachments }) => {
+    const rows = runtimeMessages.get(sid) || [];
+    rows.push({ role: "user", text: String(text || ""), kind: "text" });
+    runtimeMessages.set(sid, rows.slice(-500));
+    const request = acp.request("session/prompt", {
+      sessionId: acpSessionId,
+      prompt: [
+        ...(text ? [{ type: "text", text: String(text) }] : []),
+        ...attachments.map((attachment) => attachment.kind === "image"
+          ? { type: "image", data: attachment.data, mimeType: attachment.mimeType }
+          : { type: "resource", resource: { uri: `attachment://${encodeURIComponent(attachment.name)}`, mimeType: attachment.mimeType, text: attachment.text } })
+      ]
+    }, 24 * 60 * 60 * 1000);
+    active.set(sid, { transport: "acp", sessionId: acpSessionId, request });
+    request.then((result) => {
+      active.delete(sid);
+      emit({ sessionId: sid, type: "status", summary: String(result?.stopReason || "completed"), runtimeEvent: "opencode/acp-completed" });
+    }).catch((error) => {
+      active.delete(sid);
+      emit({ sessionId: sid, type: "error", summary: error?.message || String(error), runtimeEvent: "opencode/acp-error" });
+    });
+    await Promise.resolve();
+    return { accepted: true };
   };
 
   const sendMessage = async (sessionId, { text, attachments = [] } = {}) => {
@@ -244,19 +357,22 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       : selected;
     const materialized = materializeImageAttachments(attachments);
     try {
-      const args = ["run", "--session", sid, "--dir", cwd, "--format", "json"];
+      const nativeSessionId = nativeSessionIds.get(sid) || (nativeSessions.has(sid) ? sid : "");
+      const args = ["run"];
+      if (nativeSessionId) args.push("--session", nativeSessionId);
+      args.push("--dir", cwd, "--format", "json");
       if (model) args.push("--model", model);
       const attachmentText = attachments.filter((attachment) => attachment.kind !== "image")
         .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text}\n</attachment>`).join("");
-      // 消息文本必须在 --file 之前推入：yargs [array] 选项是贪婪的，
-      // 若先推 --file 再推消息，消息会被当成另一个文件路径。
       args.push(`${String(text || "")}${attachmentText}`);
-      for (const image of materialized.files) args.push("--file", image.path);
+      // --file is an array option in OpenCode. The equals form keeps yargs
+      // from consuming the positional user message as another file path.
+      for (const image of materialized.files) args.push(`--file=${image.path}`);
       const currentMessages = runtimeMessages.get(sid) || [];
       runtimeMessages.set(sid, [...currentMessages, { role: "user", text: String(text || ""), kind: "text" }].slice(-500));
       const child = spawnProcess(binary, args, {
         cwd,
-        env: { ...process.env, HOME: os.homedir(), ...(env || {}) },
+        env: runtimeEnv(),
         stdio: ["ignore", "pipe", "pipe"]
       });
       active.set(sid, child);
@@ -265,6 +381,11 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       child.stdout?.on("data", splitLines((line) => {
         try {
           const frame = JSON.parse(line);
+          const discoveredSessionId = String(frame.sessionID || frame.part?.sessionID || "");
+          if (!nativeSessionId && discoveredSessionId) {
+            nativeSessionIds.set(sid, discoveredSessionId);
+            nativeSessions.add(discoveredSessionId);
+          }
           const part = frame.part || {};
           if ((frame.type === "reasoning" || part.type === "reasoning") && part.text) {
             const rows = runtimeMessages.get(sid) || [];
@@ -325,8 +446,16 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
     readSession,
     createSession,
     sendMessage,
-    async setModel(sessionId, modelId) { selectedModels.set(String(sessionId), String(modelId)); },
-    async cancel(sessionId) { active.get(String(sessionId))?.kill("SIGTERM"); },
+    listCommands() { return dynamicCommands.map((item) => ({ ...item })); },
+    async setModel(sessionId, modelId) {
+      const sid = String(sessionId); const value = String(modelId);
+      selectedModels.set(sid, value);
+    },
+    async cancel(sessionId) {
+      const sid = String(sessionId); const running = active.get(sid);
+      if (running?.transport === "acp") acp.notify("session/cancel", { sessionId: running.sessionId });
+      else running?.kill?.("SIGTERM");
+    },
     rename: overlay?.rename ? (id, title) => overlay.rename(String(id), String(title || "").trim().slice(0, 200)) : undefined,
     archive: overlay?.archive ? (id) => overlay.archive(String(id)) : undefined,
     unarchive: overlay?.unarchive ? (id) => overlay.unarchive(String(id)) : undefined,
@@ -347,6 +476,8 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       });
       sessions.delete(sid);
       selectedModels.delete(sid);
+      acpSessions.delete(sid);
+      nativeSessionIds.delete(sid);
     },
     subscribe(handler) { subscribers.add(handler); return () => subscribers.delete(handler); },
     close() { for (const child of active.values()) child.kill("SIGTERM"); active.clear(); acp.close?.(); }

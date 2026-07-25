@@ -12,6 +12,7 @@ import { parseCodexRollout, cleanCodexUserPart } from "../../../apps/desktop/src
 import { createGrokRuntime, parseGrokChatHistory, cleanGrokUserText } from "../../../apps/desktop/src/mobile-control/grok-runtime.mjs";
 import { createOpenCodeRuntime } from "../../../apps/desktop/src/mobile-control/opencode-runtime.mjs";
 import { materializeImageAttachments } from "../../../apps/desktop/src/mobile-control/temp-attachments.mjs";
+import { toolFrom } from "../../../apps/desktop/src/mobile-control/message-parts.mjs";
 
 function fakeChild() {
   const child = new EventEmitter();
@@ -201,9 +202,10 @@ test("ACP runtime lists, loads, prompts, cancels, switches model, forks and dele
   client.emit({
     kind: "notification",
     method: "session/update",
-    params: { sessionId: "s1", update: { sessionUpdate: "available_commands_update" } }
+    params: { sessionId: "s1", update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "review", description: "Review changes" }] } }
   });
   assert.equal(events.some((event) => event.summary === "available_commands_update"), false);
+  assert.deepEqual(runtime.listCommands(), [{ name: "review", description: "Review changes" }]);
   assert.deepEqual(client.calls.map((call) => call.method), [
     "session/list",
     "session/load",
@@ -235,6 +237,25 @@ test("ACP runtimes preserve mobile images as native image prompt blocks", async 
     { type: "text", text: "描述图片" },
     { type: "image", data: "aW1hZ2U=", mimeType: "image/webp" }
   ]);
+});
+
+test("ACP runtimes describe arbitrary uploaded files with a readable local path", async () => {
+  const client = fakeClient();
+  const runtime = createAcpRuntime({ id: "grok", label: "Grok", client });
+  await runtime.createSession({ cwd: "/tmp/demo" });
+  await runtime.sendMessage("s1", {
+    text: "检查附件",
+    attachments: [{
+      kind: "file",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      path: "/tmp/switchyard/report.pdf"
+    }]
+  });
+  const prompt = client.calls.find((call) => call.method === "session/prompt").params.prompt;
+  assert.equal(prompt.length, 1);
+  assert.match(prompt[0].text, /report\.pdf/);
+  assert.match(prompt[0].text, /\/tmp\/switchyard\/report\.pdf/);
 });
 
 test("Claude, Grok and OpenCode wrappers expose overlay session management without shell access", () => {
@@ -296,7 +317,105 @@ test("OpenCode uses native run transport for historical sessions when ACP load i
   assert.equal((await runtime.readSession("ses-history")).messages.at(-1).text, "继续成功");
 });
 
-test("OpenCode materializes mobile images and passes them with --file", async () => {
+test("OpenCode exposes ACP available commands without rendering chat events", () => {
+  const client = fakeClient();
+  const runtime = createOpenCodeRuntime({
+    client,
+    storageRoot: "/missing-opencode-storage"
+  });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+
+  client.emit({
+    kind: "notification",
+    method: "session/update",
+    params: {
+      sessionId: "s1",
+      update: {
+        sessionUpdate: "available_commands_update",
+        commands: [{ name: "review", description: "Review changes" }]
+      }
+    }
+  });
+
+  assert.deepEqual(runtime.listCommands(), [
+    { name: "review", description: "Review changes" }
+  ]);
+  assert.equal(events.length, 0);
+});
+
+test("OpenCode creates mobile sessions lazily through native run and binds the real session id", async () => {
+  const client = fakeClient();
+  const spawned = [];
+  const child = fakeChild();
+  const runtime = createOpenCodeRuntime({
+    client,
+    storageRoot: "/missing-opencode-storage",
+    spawnProcess: (_command, args) => {
+      spawned.push(args);
+      queueMicrotask(() => {
+        child.stdout.emit("data", `${JSON.stringify({ type: "text", sessionID: "ses-native-new", part: { type: "text", text: "识图成功" } })}\n`);
+        child.emit("close", 0);
+      });
+      return child;
+    }
+  });
+  const created = await runtime.createSession({ cwd: "/tmp/demo", model: "switchyard/hus-claude/claude-sonnet-5" });
+  await runtime.sendMessage(created.sessionId, {
+    text: "图片是什么内容",
+    attachments: [{
+      kind: "image",
+      name: "screen.jpg",
+      mimeType: "image/jpeg",
+      data: "aW1hZ2U="
+    }]
+  });
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].slice(0, 6), ["run", "--dir", "/tmp/demo", "--format", "json", "--model"]);
+  assert.ok(spawned[0].some((arg) => arg.startsWith("--file=")));
+  assert.deepEqual(client.calls, []);
+});
+
+test("OpenCode keeps stale local history visible but starts a replacement session instead of returning Session not found", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-opencode-stale-"));
+  const staleId = "ses_stale_local";
+  fs.mkdirSync(path.join(root, "message", staleId), { recursive: true });
+  fs.writeFileSync(path.join(root, "message", staleId, "msg-1.json"), JSON.stringify({
+    id: "msg-1", sessionID: staleId, role: "user", time: { created: 1 },
+    path: { cwd: "/tmp/demo", root: "/tmp/demo" }
+  }));
+  const spawned = [];
+  try {
+    const runtime = createOpenCodeRuntime({
+      client: fakeClient(),
+      storageRoot: root,
+      spawnProcess: (_command, args) => {
+        spawned.push(args);
+        const child = fakeChild();
+        queueMicrotask(() => {
+          if (args[0] === "session") child.stdout.emit("data", "[]");
+          else child.stdout.emit("data", `${JSON.stringify({ type: "text", sessionID: "ses-replacement", part: { type: "text", text: "继续成功" } })}\n`);
+          child.emit("close", 0);
+        });
+        return child;
+      }
+    });
+    const listed = await runtime.listSessions();
+    assert.equal(listed.some((row) => row.id === staleId), true);
+    await runtime.sendMessage(staleId, {
+      text: "继续",
+      attachments: [{ kind: "image", name: "screen.png", mimeType: "image/png", data: "aW1hZ2U=" }]
+    });
+    const runArgs = spawned.find((args) => args[0] === "run");
+    assert.ok(runArgs);
+    assert.equal(runArgs.includes("--session"), false);
+    assert.ok(runArgs.some((arg) => arg.startsWith("--file=")));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("OpenCode materializes mobile images and passes them with unambiguous --file= arguments", async () => {
   const filePaths = [];
   const child = fakeChild();
   const runtime = createOpenCodeRuntime({
@@ -309,9 +428,11 @@ test("OpenCode materializes mobile images and passes them with --file", async ()
           child.emit("close", 0);
           return;
         }
-        const fileIndex = args.indexOf("--file");
-        assert.notEqual(fileIndex, -1);
-        filePaths.push(args[fileIndex + 1]);
+        assert.equal(args.includes("--file"), false);
+        const fileArg = args.find((arg) => arg.startsWith("--file="));
+        assert.ok(fileArg);
+        filePaths.push(fileArg.slice("--file=".length));
+        assert.equal(args.at(-2), "描述图片");
         assert.equal(fs.existsSync(filePaths[0]), true);
         child.stdout.emit("data", `${JSON.stringify({ type: "step_finish", part: { reason: "stop" } })}\n`);
         child.emit("close", 0);
@@ -333,16 +454,14 @@ test("OpenCode materializes mobile images and passes them with --file", async ()
   assert.equal(fs.existsSync(filePaths[0]), false);
 });
 
-test("Claude Code sends image content through stream-json stdin", async () => {
-  const calls = [];
+test("Claude Code sends native image blocks in a complete stream-json user envelope", async () => {
   const child = fakeChild();
   const runtime = createClaudeRuntime({
     command: "claude-test",
+    scanSessions: () => [{ sessionId: "claude-history", cwd: "/tmp/demo", mtimeMs: 1 }],
     spawnProcess: (_command, args) => {
-      calls.push(args);
-      assert.equal(args.includes("--input-format"), true);
+      assert.deepEqual(args.slice(0, 4), ["-p", "--verbose", "--resume", "claude-history"]);
       assert.equal(args[args.indexOf("--input-format") + 1], "stream-json");
-      assert.equal(args.includes("--add-dir"), false);
       queueMicrotask(() => {
         child.stdout.emit("data", `${JSON.stringify({ type: "result", is_error: false, result: "ok" })}\n`);
         child.emit("close", 0);
@@ -350,8 +469,7 @@ test("Claude Code sends image content through stream-json stdin", async () => {
       return child;
     }
   });
-  const created = await runtime.createSession({ cwd: "/tmp/demo", title: "图片任务" });
-  await runtime.sendMessage(created.sessionId, {
+  await runtime.sendMessage("claude-history", {
     text: "图片里是什么？",
     attachments: [{
       kind: "image",
@@ -361,10 +479,10 @@ test("Claude Code sends image content through stream-json stdin", async () => {
     }]
   });
   const payload = JSON.parse(child.stdin.writes[0]);
-  assert.equal(payload.role, "user");
-  assert.equal(payload.content[0].type, "text");
-  assert.equal(payload.content[0].text, "图片里是什么？");
-  assert.deepEqual(payload.content[1], {
+  assert.equal(payload.type, "user");
+  assert.equal(payload.message.role, "user");
+  assert.equal(payload.message.content[0].text, "图片里是什么？");
+  assert.deepEqual(payload.message.content[1], {
     type: "image",
     source: { type: "base64", media_type: "image/gif", data: "aW1hZ2U=" }
   });
@@ -477,4 +595,34 @@ test("agent histories preserve structured tool details and collapsible reasoning
   assert.equal(claude[0].tool.name, "Bash");
   assert.equal(claude[0].tool.command, "npm test");
   assert.equal(claude[0].tool.output, "passed");
+});
+
+test("Codex, Claude Code, OpenCode and Grok tools share mobile activity categories", () => {
+  const rows = {
+    codex: toolFrom({ type: "command_execution", command: "npm test" }),
+    claude: toolFrom({ name: "Read", input: { file_path: "/tmp/app.js" } }),
+    opencode: toolFrom({ toolName: "grep", rawInput: { pattern: "tool", path: "apps/mobile" } }),
+    grok: toolFrom({ kind: { tool_type: "str_replace" }, action: { path: "/tmp/app.js" } })
+  };
+  assert.deepEqual(Object.fromEntries(Object.entries(rows).map(([agent, tool]) => [agent, tool.activity])), {
+    codex: "command",
+    claude: "read",
+    opencode: "search",
+    grok: "edit"
+  });
+});
+
+test("tool normalization extracts file paths for mobile file links", () => {
+  const tool = toolFrom({
+    name: "Write",
+    input: {
+      file_path: "/tmp/demo/src/app.js",
+      path: "/tmp/demo/src/other.js",
+      content: "secret source text"
+    }
+  });
+  assert.deepEqual(tool.files, [
+    { path: "/tmp/demo/src/app.js", activity: "edit" },
+    { path: "/tmp/demo/src/other.js", activity: "edit" }
+  ]);
 });

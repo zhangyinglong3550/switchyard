@@ -15,6 +15,7 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   const registry = {
     agents: () => [{ id: "codex", name: "Codex", available: true, capabilities: { sendMessage: true } }],
     availableModels: () => [{ id: "p/m", name: "Model", provider: "P", contextWindow: 1000, capabilities: {} }],
+    listCommands: async () => [{ id: "skill:review", kind: "skill", name: "review", description: "Review code", insertText: "$review ", source: "installed" }],
     recentWorkspaces: async () => [{ id: "/approved/demo", name: "demo", agent: "codex" }],
     browseWorkspaces: async (directory) => ({ path: directory || "/Users/alice", name: "alice", parent: "/Users", directories: [{ path: "/Users/alice/demo", name: "demo" }] }),
     createWorkspaceDirectory: async (parent, name) => ({ path: `${parent}/${name}`, name }),
@@ -44,8 +45,12 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
     resolveApproval: async (id, decision, owner) => {
       calls.push(["approval", id, decision, owner]);
       return { ok: true };
-    }
+    },
+    resolveAsset: (id) => id === "asset_image"
+      ? { id, name: "screen.png", mimeType: "image/png", kind: "image", path: path.join(root, "screen.png") }
+      : null
   };
+  fs.writeFileSync(path.join(root, "screen.png"), "image-data");
   const server = createMobileControlServer({
     host: "127.0.0.1",
     port: 0,
@@ -80,6 +85,9 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   const sessions = await fetch(`${base}/mobile/v1/sessions`, { headers });
   assert.equal(sessions.status, 200);
   assert.deepEqual(await sessions.json(), [{ id: "ms_one", agent: "codex", title: "任务", state: "completed" }]);
+  const commands = await fetch(`${base}/mobile/v1/commands?agent=codex`, { headers });
+  assert.equal(commands.status, 200);
+  assert.equal((await commands.json())[0].insertText, "$review ");
   const workspaces = await fetch(`${base}/mobile/v1/workspaces`, { headers });
   assert.equal(workspaces.status, 200);
   assert.equal((await workspaces.json())[0].name, "demo");
@@ -108,7 +116,13 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   const created = await fetch(`${base}/mobile/v1/sessions`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ agent: "codex", cwd: "/approved/demo", prompt: "开始", model: "p/m" })
+    body: JSON.stringify({
+      agent: "codex",
+      cwd: "/approved/demo",
+      prompt: "开始",
+      model: "p/m",
+      attachments: [{ name: "note.txt", mimeType: "text/plain", data: Buffer.from("hello").toString("base64") }]
+    })
   });
   assert.equal(created.status, 201);
   assert.deepEqual(await created.json(), { sessionId: "ms_new" });
@@ -144,8 +158,14 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
     body: JSON.stringify({ decision: "allow_once" })
   });
   assert.equal(approvalResult.status, 200);
+  const asset = await fetch(`${base}/mobile/v1/assets/asset_image`, { headers });
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get("content-type"), "image/png");
+  assert.equal(await asset.text(), "image-data");
+  assert.equal((await fetch(`${base}/mobile/v1/assets/asset_image`)).status, 401);
   assert.equal(calls[0][0], "create");
   assert.equal(calls[1][0], "perform");
+  assert.equal(calls[1][3].attachments[0].name, "note.txt");
   assert.equal(calls[2][0], "model");
   assert.equal(calls[3][0], "settings");
   assert.equal(calls[4][0], "approval");

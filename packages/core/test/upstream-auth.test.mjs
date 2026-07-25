@@ -49,6 +49,19 @@ test("provider auth · api_key and none modes remain isolated", async () => {
   );
 });
 
+test("client headers · strips inbound body encoding after decoding compressed requests", async () => {
+  const mod = await import(`../src/upstream/clients.mjs?v=${Date.now()}`);
+  assert.deepEqual(
+    mod.extractForwardableClientHeaders({
+      "content-encoding": "zstd",
+      "content-length": "123",
+      "content-type": "application/json",
+      "x-codex-parent-thread-id": "thread-1"
+    }),
+    { "x-codex-parent-thread-id": "thread-1" }
+  );
+});
+
 test("codex oauth auth · provider is ready only when codex login token exists", async () => {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-codex-ready-"));
   const prevHome = process.env.HOME;

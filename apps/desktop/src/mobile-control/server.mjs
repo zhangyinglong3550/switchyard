@@ -131,11 +131,37 @@ export function createMobileControlServer({
       if (!originAllowed(req)) return json(res, 403, { error: "origin_not_allowed" });
       const device = authenticate(req);
 
+      const assetMatch = pathname.match(/^\/mobile\/v1\/assets\/([^/]+)$/);
+      if (req.method === "GET" && assetMatch) {
+        const asset = registry.resolveAsset?.(decodeURIComponent(assetMatch[1]));
+        if (!asset?.path || !fs.existsSync(asset.path)) return json(res, 404, { error: "not_found" });
+        const body = fs.readFileSync(asset.path);
+        const disposition = asset.kind === "image" || asset.mimeType === "application/pdf" || String(asset.mimeType || "").startsWith("text/")
+          ? "inline"
+          : "attachment";
+        const filename = String(asset.name || "file").replace(/["\r\n]/g, "_");
+        res.writeHead(200, {
+          "content-type": asset.mimeType || "application/octet-stream",
+          "content-length": body.length,
+          "content-disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`,
+          "cache-control": "private, no-store",
+          "x-content-type-options": "nosniff"
+        });
+        res.end(body);
+        return;
+      }
+
       if (req.method === "GET" && pathname === "/mobile/v1/agents") {
         return json(res, 200, registry.agents());
       }
       if (req.method === "GET" && pathname === "/mobile/v1/models") {
         return json(res, 200, registry.availableModels(url.searchParams.get("agent") || ""));
+      }
+      if (req.method === "GET" && pathname === "/mobile/v1/commands") {
+        return json(res, 200, await registry.listCommands(url.searchParams.get("agent") || "", {
+          cwd: url.searchParams.get("cwd") || "",
+          sessionId: url.searchParams.get("session") || ""
+        }));
       }
       if (req.method === "GET" && pathname === "/mobile/v1/workspaces") {
         return json(res, 200, await registry.recentWorkspaces());
@@ -170,6 +196,7 @@ export function createMobileControlServer({
           // deliberately queued so a slow Agent connection cannot leave the phone waiting.
           void registry.perform(created.sessionId, "sendMessage", {
             text: body.prompt,
+            attachments: body.attachments,
             messageId: body.messageId || randomUUID()
           }, device.id).catch(() => {});
         }

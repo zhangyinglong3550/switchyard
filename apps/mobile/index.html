@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f4ef">
   <title>Switchyard</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/styles.css?v=33">
+  <link rel="stylesheet" href="/styles.css?v=39">
 </head>
 <body>
   <div class="app-shell">
@@ -32,7 +32,7 @@
           <div class="form-block"><label>工作目录</label><div id="workspace-list" class="workspace-list"></div><button id="workspace-other" type="button" class="text-button">浏览并选择本机文件夹</button></div>
           <div class="form-block"><label for="model-select">下一轮模型</label><div class="select-wrap"><select id="model-select" required></select><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></div></div>
           <div id="new-agent-settings" class="form-block runtime-settings" hidden></div>
-          <div class="form-block"><label for="prompt">交代任务</label><textarea id="prompt" required rows="5" placeholder="例如：继续排查移动端会话，验证 Claude Code、Grok 与 OpenCode。"></textarea></div>
+          <div class="form-block"><label for="prompt">交代任务</label><textarea id="prompt" rows="5" placeholder="例如：继续排查移动端会话，验证 Claude Code、Grok 与 OpenCode。"></textarea><div id="new-attachment-preview" class="attachment-preview new-attachment-preview" hidden></div><input id="new-attachment-input" type="file" multiple hidden><button id="new-attach-control" class="new-attach-control" type="button">＋ 添加图片或文件</button></div>
           <button class="primary-button" id="new-submit" type="submit">开始对话 <svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-5-5-2Z"/><path d="m12 12 3-3"/></svg></button>
         </form>
       </section>
@@ -43,14 +43,16 @@
         <header class="chat-header"><button id="back" class="icon-control" aria-label="返回会话"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button><div class="chat-identity"><strong id="detail-title">会话</strong><span><i id="chat-state-dot"></i><span id="detail-meta"></span></span></div><button id="more" class="icon-control" aria-label="会话操作"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button></header>
         <div id="session-menu" class="session-menu" hidden><button data-action="rename">重命名</button><button data-action="archive">归档会话</button><button data-action="fork">从这里分支</button><button data-action="cancel">停止生成</button><button data-action="delete" class="danger-text">删除会话</button></div>
         <div id="messages" class="messages" aria-live="polite"></div>
-        <form id="composer" class="composer"><div id="attachment-preview" class="attachment-preview" hidden></div><input id="attachment-input" type="file" accept="image/*,.txt,.md,.markdown,.json,.yaml,.yml,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cc,.cpp,.h,.html,.css,.sql,.sh" hidden><button id="open-model-sheet" class="runtime-shortcut" type="button" aria-label="切换模型与对话设置"><span><strong>模型与对话设置</strong><small id="composer-runtime-summary">点击切换模型、权限与思考程度</small></span><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button><button id="attach-control" class="attach-control" type="button" aria-label="添加图片或文件"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><textarea id="message" rows="1" placeholder="继续这项工作" aria-label="输入消息"></textarea><button id="send" class="send-button" type="submit" aria-label="发送"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-5-5-2Z"/><path d="m12 12 3-3"/></svg></button></form>
+        <form id="composer" class="composer"><div id="attachment-preview" class="attachment-preview" hidden></div><input id="attachment-input" type="file" multiple accept="image/*,.txt,.md,.markdown,.json,.yaml,.yml,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cc,.cpp,.h,.html,.css,.sql,.sh" hidden><button id="open-model-sheet" class="runtime-shortcut" type="button" aria-label="切换模型与对话设置"><span><strong>模型与对话设置</strong><small id="composer-runtime-summary">点击切换模型、权限与思考程度</small></span><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button><button id="attach-control" class="attach-control" type="button" aria-label="添加图片或文件"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><textarea id="message" rows="1" placeholder="继续这项工作" aria-label="输入消息"></textarea><button id="send" class="send-button" type="submit" aria-label="发送"><svg viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-5-5-2Z"/><path d="m12 12 3-3"/></svg></button></form>
       </section>
     </main>
     <nav class="tabbar"><button data-nav="sessions" data-tab="sessions"><svg viewBox="0 0 24 24"><path d="M7 18.5A7.5 7.5 0 1 1 19 12.5"/><path d="M7 18.5 3 21v-4.5"/></svg><span>会话</span></button><button data-nav="new" class="new-tab" data-tab="new" aria-label="新对话"><span>+</span></button><button data-nav="settings" data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 21c.6-4 3-6 7-6s6.4 2 7 6"/></svg><span>我的</span></button></nav>
   </div>
   <div id="workspace-sheet" class="bottom-sheet-backdrop" hidden aria-hidden="true" style="display:none"><div class="bottom-sheet workspace-sheet"><div class="sheet-handle"></div><div class="sheet-title"><div><strong>选择工作目录</strong><span id="workspace-path">正在读取…</span></div><button id="close-workspace-sheet" class="icon-control" aria-label="关闭">×</button></div><div class="workspace-browser-actions"><button id="workspace-parent" class="text-button" type="button">返回上级</button><button id="workspace-create" class="text-button" type="button">新建文件夹</button></div><button id="workspace-choose" class="workspace-use-current" type="button">在此文件夹开始</button><div id="workspace-browser-list" class="workspace-browser-list"></div></div></div>
   <div id="model-sheet" class="bottom-sheet-backdrop" hidden aria-hidden="true" style="display:none"><div class="bottom-sheet"><div class="sheet-handle"></div><div class="sheet-title"><div><strong>对话设置</strong><span>模型、权限和思考程度在下一轮生效</span></div><button id="close-model-sheet" class="icon-control" aria-label="关闭">×</button></div><div id="session-runtime-settings" class="runtime-settings"></div><div class="sheet-section-label">切换模型</div><div id="session-model-list" class="model-list"></div></div></div>
+  <div id="attachment-viewer" class="attachment-viewer" hidden aria-hidden="true"><div class="attachment-viewer-panel"><header><strong id="attachment-viewer-title">文件预览</strong><button id="close-attachment-viewer" type="button" aria-label="关闭预览">×</button></header><div id="attachment-viewer-content" class="attachment-viewer-content"></div><a id="attachment-viewer-download" class="attachment-viewer-download" download>下载文件</a></div></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=33"></script>
+  <div id="command-picker" class="command-picker" hidden role="listbox" aria-label="命令与 Skills"></div>
+  <script type="module" src="/app.js?v=39"></script>
 </body>
 </html>

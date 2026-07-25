@@ -698,3 +698,53 @@ test("v0.4-patches · all builtin patches registered simultaneously do not inter
 
   resetPatches();
 });
+
+test("missing-tool-name-recover · restores blank parallel Grok tool names from arguments", async () => {
+  resetPatches();
+  try {
+    const { missingToolNameRecoverPatch } = await import("../src/compat/patches/missing-tool-name-recover.mjs");
+    registerPatch(missingToolNameRecoverPatch.id, missingToolNameRecoverPatch);
+    const ctx = { provider: { id: "xiaoyi-grok" }, model: { id: "xiaoyi-grok/grok-4.5" }, clientId: "grok" };
+    applyOutbound({
+      tools: [
+        { type: "function", function: { name: "run_terminal_command", parameters: { type: "object", properties: { command: { type: "string" }, description: { type: "string" } }, required: ["command", "description"] } } },
+        { type: "function", function: { name: "read_file", parameters: { type: "object", properties: { target_file: { type: "string" }, limit: { type: "number" } }, required: ["target_file"] } } }
+      ],
+      messages: []
+    }, ctx);
+
+    const first = applyStreamLine('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","function":{"name":"","arguments":"{\\"command\\":\\"git status\\",\\"description\\":\\"status\\"}"}},{"index":1,"id":"call_1","function":{"name":"","arguments":"{\\"target_file\\":\\"README.md\\",\\"limit\\":80}"}}]}}]}', ctx);
+    const parsed = JSON.parse(first.slice(6));
+    assert.equal(parsed.choices[0].delta.tool_calls[0].function.name, "run_terminal_command");
+    assert.equal(parsed.choices[0].delta.tool_calls[1].function.name, "read_file");
+
+    const partial = applyStreamLine('data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_2","function":{"name":"","arguments":"{\\"target_"}}]}}]}', ctx);
+    assert.equal(JSON.parse(partial.slice(6)).choices[0].delta.tool_calls[0].function.name, "");
+    const completed = applyStreamLine('data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"name":"","arguments":"file\\":\\"README.md\\"}"}}]}}]}', ctx);
+    assert.equal(JSON.parse(completed.slice(6)).choices[0].delta.tool_calls[0].function.name, "read_file");
+
+    const next = applyOutbound({
+      messages: [{ role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "", arguments: "{\"target_file\":\"README.md\"}" } }] }]
+    }, ctx);
+    assert.equal(next.messages[0].tool_calls[0].function.name, "read_file");
+  } finally {
+    resetPatches();
+  }
+});
+
+test("missing-tool-name-recover · leaves ambiguous blank tool names untouched", async () => {
+  resetPatches();
+  try {
+    const { missingToolNameRecoverPatch } = await import("../src/compat/patches/missing-tool-name-recover.mjs");
+    registerPatch(missingToolNameRecoverPatch.id, missingToolNameRecoverPatch);
+    const ctx = { provider: { id: "p" }, model: { id: "p/m" }, clientId: "grok" };
+    applyOutbound({ tools: [
+      { type: "function", function: { name: "one", parameters: { type: "object", properties: { q: { type: "string" } } } } },
+      { type: "function", function: { name: "two", parameters: { type: "object", properties: { q: { type: "string" } } } } }
+    ] }, ctx);
+    const line = 'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"","arguments":"{\\"q\\":\\"x\\"}"}}]}}]}';
+    assert.equal(applyStreamLine(line, ctx), line);
+  } finally {
+    resetPatches();
+  }
+});

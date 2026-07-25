@@ -90,6 +90,14 @@ function requestEvent(frame) {
   };
 }
 
+function availableCommands(update = {}) {
+  const rows = update.availableCommands || update.commands || update.content?.commands || [];
+  return (Array.isArray(rows) ? rows : []).map((item) => typeof item === "string"
+    ? { name: item.replace(/^\//, ""), description: "Agent 命令" }
+    : { name: String(item?.name || item?.command || "").replace(/^\//, ""), description: item?.description || item?.title || "Agent 命令" })
+    .filter((item) => item.name);
+}
+
 function normalizeSession(row, capabilities) {
   const cwd = String(row.cwd || "");
   return {
@@ -128,9 +136,15 @@ export function createAcpRuntime({
   const messages = new Map();
   const pendingPrompts = new Map();
   const loadedSessions = new Set();
+  let dynamicCommands = [];
 
   client.subscribe((frame) => {
     if (frame.kind === "notification" && frame.method === "session/update") {
+      const update = frame.params?.update || {};
+      if (String(update.sessionUpdate || "") === "available_commands_update") {
+        dynamicCommands = availableCommands(update);
+        return;
+      }
       const event = updateEvent(frame);
       if (["message", "thinking"].includes(event.type) && event.summary) {
         const rows = messages.get(event.sessionId) || [];
@@ -255,10 +269,13 @@ export function createAcpRuntime({
       sessionId: sid,
       ...(messageId ? { messageId: String(messageId) } : {}),
       prompt: [
-        ...(text ? [{ type: "text", text: String(text) }] : []),
-        ...attachments.map((attachment) => attachment.kind === "image"
-          ? { type: "image", data: attachment.data, mimeType: attachment.mimeType }
-          : { type: "resource", resource: { uri: `attachment://${encodeURIComponent(attachment.name)}`, mimeType: attachment.mimeType, text: attachment.text } })
+        ...(() => {
+          const files = attachments.filter((attachment) => attachment.kind !== "image")
+            .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text || `本地文件路径：${attachment.path || "不可用"}`}\n</attachment>`).join("");
+          const promptText = `${String(text || "")}${files}`;
+          return promptText ? [{ type: "text", text: promptText }] : [];
+        })(),
+        ...attachments.filter((attachment) => attachment.kind === "image").map((attachment) => ({ type: "image", data: attachment.data, mimeType: attachment.mimeType }))
       ]
     }, 24 * 60 * 60 * 1000);
     pendingPrompts.set(sid, prompt);
@@ -353,6 +370,7 @@ export function createAcpRuntime({
       : undefined,
     fork,
     delete: remove,
+    listCommands() { return dynamicCommands.map((item) => ({ ...item })); },
     respond(requestId, result, error) {
       client.respond(requestId, result, error);
     },

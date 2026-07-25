@@ -1040,6 +1040,32 @@ test("opencode profile · always writes limit.context + limit.output", () => {
   assert.deepEqual(map["d/both"].limit, { context: 200000, output: 16000 });
 });
 
+test("opencode profile · exposes Switchyard image capabilities to ACP and CLI", () => {
+  const map = pw.buildOpenCodeModelsMap([
+    { id: "vision/model", capabilities: { images: true, multimodal: true } },
+    { id: "fallback/model", visionFallbackModelId: "vision/model" },
+    { id: "text/model", capabilities: { text: true } }
+  ]);
+  assert.equal(map["vision/model"].attachment, true);
+  assert.deepEqual(map["vision/model"].modalities, { input: ["text", "image"], output: ["text"] });
+  assert.equal(map["fallback/model"].attachment, true);
+  assert.deepEqual(map["fallback/model"].modalities.input, ["text", "image"]);
+  assert.equal(map["text/model"].attachment, false);
+  assert.deepEqual(map["text/model"].modalities, { input: ["text"], output: ["text"] });
+});
+
+test("opencode profile · emits a capability plugin for OpenCode 1.18 config migration", () => {
+  const source = pw.renderOpenCodeCapabilityPlugin([
+    { id: "vision/model", capabilities: { tools: true, images: true } },
+    { id: "text/model", capabilities: { tools: true } }
+  ]);
+  assert.match(source, /managed-by-switchyard/);
+  assert.match(source, /"vision\/model"/);
+  assert.match(source, /"image"/);
+  assert.match(source, /models\[id\]\.modalities/);
+  assert.match(source, /input\.model\.capabilities\.input\.image/);
+});
+
 test("opencode profile · auto-refresh models when already managed", () => {
   const file = pw.openCodeConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1061,6 +1087,8 @@ test("opencode profile · auto-refresh models when already managed", () => {
   assert.equal(refreshed.skipped, undefined);
   assert.equal(refreshed.changed, true);
   assert.equal(refreshed.modelCount, 2);
+  assert.equal(refreshed.capabilityPlugin.changed, true);
+  assert.equal(fs.existsSync(pw.openCodeCapabilityPluginPath()), true);
 
   const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.ok(cfg.provider.switchyard.models["b/m2"]);

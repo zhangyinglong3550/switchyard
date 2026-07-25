@@ -199,6 +199,82 @@ test("registry accepts messages immediately, records visible state and runs the 
   ]);
 });
 
+test("registry persists image and arbitrary-file attachments across final history reloads", async (t) => {
+  const { registry, runtime, calls, ledger } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  runtime.readSession = async () => ({
+    id: "native-1",
+    agentId: "codex",
+    name: "任务",
+    state: "completed",
+    model: "p1/m1",
+    directory: "/Users/a/code/demo",
+    capabilities: runtime.capabilities,
+    messages: [
+      { role: "user", text: "看附件" },
+      { role: "assistant", text: "已收到" }
+    ]
+  });
+
+  await registry.perform(sessionId, "sendMessage", {
+    text: "看附件",
+    messageId: "m-files",
+    attachments: [
+      { name: "screen.png", mimeType: "image/png", data: Buffer.from("png").toString("base64") },
+      { name: "report.pdf", mimeType: "application/pdf", data: Buffer.from("%PDF-demo").toString("base64") }
+    ]
+  }, "phone-1");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const sent = calls.find((call) => call[0] === "sendMessage")[2];
+  assert.equal(sent.attachments[0].kind, "image");
+  assert.equal(sent.attachments[1].kind, "file");
+  assert.equal(fs.readFileSync(sent.attachments[1].path, "utf8"), "%PDF-demo");
+  const event = ledger.list({ after: 0 }).find((row) => row.type === "message");
+  assert.deepEqual(event.attachments.map((item) => item.name), ["screen.png", "report.pdf"]);
+
+  const detail = await registry.readSession(sessionId);
+  assert.deepEqual(detail.messages[0].attachments.map((item) => item.name), ["screen.png", "report.pdf"]);
+  assert.equal(detail.messages[1].attachments, undefined);
+  const resolved = registry.resolveAsset(detail.messages[0].attachments[0].id);
+  assert.equal(fs.readFileSync(resolved.path, "utf8"), "png");
+});
+
+test("registry converts tool file paths into safe clickable file references", async (t) => {
+  const { registry, runtime } = fixture(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-tool-files-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "src", "app.js");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "export const ok = true;\n");
+  runtime.readSession = async () => ({
+    id: "native-1",
+    agentId: "codex",
+    name: "任务",
+    state: "completed",
+    model: "p1/m1",
+    directory: root,
+    capabilities: runtime.capabilities,
+    messages: [{
+      role: "tool",
+      kind: "tool",
+      text: "写入完成",
+      tool: {
+        id: "tool-write",
+        name: "Write",
+        activity: "edit",
+        status: "completed",
+        files: [{ path: file, activity: "edit" }]
+      }
+    }]
+  });
+
+  const detail = await registry.readSession(encodeMobileSessionId("codex", "native-1"));
+  assert.equal(detail.messages[0].tool.files[0].name, "app.js");
+  assert.doesNotMatch(JSON.stringify(detail), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(registry.resolveAsset(detail.messages[0].tool.files[0].id).path, file);
+});
+
 test("registry validates and stores agent-native next-turn settings", async (t) => {
   const { registry, calls } = fixture(t);
   const sessionId = encodeMobileSessionId("codex", "native-1");
@@ -274,4 +350,42 @@ test("registry exposes only low-risk one-shot approvals to mobile", async (t) =>
     { outcome: { outcome: "selected", optionId: "allow" } }
   ]);
   assert.equal(registry.listApprovals().length, 0);
+});
+
+test("registry exposes Codex one-shot approvals and keeps desktop-only approvals visible", async (t) => {
+  const { registry, runtime, calls } = fixture(t);
+  runtime.emit({
+    sessionId: "native-1",
+    type: "approval",
+    requestId: 51,
+    request: {
+      method: "item/commandExecution/requestApproval",
+      command: "git status --short",
+      reason: "查看仓库状态"
+    }
+  });
+  runtime.emit({
+    sessionId: "native-1",
+    type: "approval",
+    requestId: 52,
+    request: {
+      method: "item/permissions/requestApproval",
+      reason: "请求更高权限"
+    }
+  });
+
+  const approvals = registry.listApprovals();
+  assert.equal(approvals.length, 2);
+  assert.deepEqual(approvals[0].actions, ["allow_once", "deny_once"]);
+  assert.equal(approvals[0].requiresDesktop, false);
+  assert.deepEqual(approvals[1].actions, []);
+  assert.equal(approvals[1].requiresDesktop, true);
+
+  await registry.resolveApproval(approvals[0].id, "allow_once");
+  assert.deepEqual(calls.at(-1), [
+    "respond",
+    51,
+    { decision: "accept" }
+  ]);
+  assert.equal(registry.listApprovals().length, 1);
 });

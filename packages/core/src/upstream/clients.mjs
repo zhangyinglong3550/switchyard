@@ -280,7 +280,7 @@ export function extractForwardableClientHeaders(incoming = {}) {
     "host", "connection", "content-length", "transfer-encoding", "keep-alive",
     "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
     // 请求体/协商类头必须由 Switchyard 自己写，避免覆盖上游 Content-Type 导致 xAI 等返回 415
-    "content-type", "accept", "accept-encoding", "accept-language",
+    "content-type", "content-encoding", "accept", "accept-encoding", "accept-language",
     "authorization", "x-api-key", "x-goog-api-key",
     "cookie", "set-cookie",
     "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto", "x-forwarded-for", "forwarded",

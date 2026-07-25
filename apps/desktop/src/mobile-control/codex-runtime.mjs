@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn as spawnChild } from "node:child_process";
+import { spawn as spawnChild, spawnSync } from "node:child_process";
 import { scanCodexSessions } from "./local-session-scan.mjs";
 import { mergeTool, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
@@ -269,6 +269,8 @@ export function createCodexRuntime({
   const selectedModels = new Map();
   const selectedEfforts = new Map();
   const selectedPermissions = new Map();
+  const mentionPaths = new Map();
+  let mentionCache = { at: 0, cwd: "", rows: [] };
 
   const emit = (event) => {
     for (const subscriber of subscribers) {
@@ -327,6 +329,10 @@ export function createCodexRuntime({
       summary: eventSummary(frame),
       runtimeEvent: frame.method,
       turnId: turnId || null,
+      ...(type === "approval" && frame.kind === "request" ? {
+        requestId: frame.id,
+        request: { ...params, method: String(frame.method || "") }
+      } : {}),
       ...(type === "tool" ? { tool: toolFrom(toolSource, String(frame.method || "").includes("completed") ? "completed" : "running") } : {})
     };
     for (const subscriber of subscribers) {
@@ -415,16 +421,67 @@ export function createCodexRuntime({
     return { sessionId };
   };
 
+  const listMentions = async ({ cwd = "" } = {}) => {
+    const directory = String(cwd || "");
+    if (mentionCache.cwd === directory && Date.now() - mentionCache.at < 60_000) {
+      return mentionCache.rows.map((row) => ({ ...row }));
+    }
+    const result = await client.request("plugin/installed", {
+      ...(directory ? { cwds: [directory] } : {})
+    }, 30_000);
+    const rows = [];
+    const localPaths = new Map();
+    const listed = spawnSync(command, ["plugin", "list", "--json"], {
+      encoding: "utf8", timeout: 5_000, maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, HOME: os.homedir(), ...(env || {}) }
+    });
+    try {
+      const local = JSON.parse(listed.stdout || "{}");
+      for (const plugin of local.installed || []) {
+        const name = String(plugin?.name || plugin?.pluginId || "").split("@")[0];
+        const pluginPath = String(plugin?.source?.path || "");
+        if (name && pluginPath && plugin?.installed && plugin?.enabled !== false) localPaths.set(name, pluginPath);
+      }
+    } catch {}
+    mentionPaths.clear();
+    for (const marketplace of result?.marketplaces || []) {
+      for (const plugin of marketplace?.plugins || []) {
+        if (!plugin?.installed || plugin?.enabled === false) continue;
+        const name = String(plugin.name || plugin.id || "").trim();
+        const pluginPath = String(plugin?.source?.path || localPaths.get(name) || "").trim();
+        if (!name || !pluginPath) continue;
+        mentionPaths.set(name, pluginPath);
+        rows.push({
+          name,
+          description: String(plugin?.interface?.shortDescription || plugin?.interface?.displayName || "Codex 插件")
+        });
+      }
+    }
+    mentionCache = { at: Date.now(), cwd: directory, rows };
+    return rows.map((row) => ({ ...row }));
+  };
+
+  const mentionInputs = (text) => {
+    const names = new Set();
+    const matcher = /(^|\s)@([a-zA-Z0-9_.:-]+)/g;
+    let match;
+    while ((match = matcher.exec(String(text || "")))) names.add(match[2]);
+    return [...names].map((name) => mentionPaths.has(name)
+      ? { type: "mention", name, path: mentionPaths.get(name) }
+      : null).filter(Boolean);
+  };
+
   const sendMessage = async (sessionId, { text, attachments = [] } = {}) => {
     const sid = String(sessionId);
     const attachmentText = attachments.filter((attachment) => attachment.kind !== "image")
-      .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text}\n</attachment>`).join("");
+      .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text || `本地文件路径：${attachment.path || "不可用"}`}\n</attachment>`).join("");
     const promptText = `${String(text || "")}${attachmentText}`;
     const permission = selectedPermissions.get(sid);
     const turnParams = {
       threadId: sid,
       input: [
         ...(promptText ? [{ type: "text", text: promptText, text_elements: [] }] : []),
+        ...mentionInputs(promptText),
         ...attachments.filter((attachment) => attachment.kind === "image").map((attachment) => ({
           type: "image",
           url: `data:${attachment.mimeType};base64,${attachment.data}`
@@ -475,7 +532,7 @@ export function createCodexRuntime({
     const materialized = materializeImageAttachments(attachments);
     try {
       const attachmentText = attachments.filter((attachment) => attachment.kind !== "image")
-        .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text}\n</attachment>`).join("");
+        .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text || `本地文件路径：${attachment.path || "不可用"}`}\n</attachment>`).join("");
       const args = ["exec", "resume", sid, "--json", "--skip-git-repo-check"];
       const model = selectedModels.get(sid);
       const effort = selectedEfforts.get(sid);
@@ -570,6 +627,7 @@ export function createCodexRuntime({
     },
     readSession,
     createSession,
+    listMentions,
     sendMessage,
     setModel,
     async setSettings(sessionId, { effort, permissionMode } = {}) {
@@ -616,6 +674,9 @@ export function createCodexRuntime({
       return { sessionId: String(result?.thread?.id || result?.id || "") };
     },
     compact: (sessionId) => client.request("thread/compact/start", { threadId: String(sessionId) }),
+    respond(requestId, result, error) {
+      client.respond?.(requestId, result, error);
+    },
     subscribe(handler) {
       if (typeof handler !== "function") throw new TypeError("subscriber 必须是函数");
       subscribers.add(handler);

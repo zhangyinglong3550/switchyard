@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes as cryptoRandomBytes, timingSafeEqual } from "node:crypto";
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const MAX_REMEMBERED_MESSAGES = 2000;
+const MAX_MOBILE_MESSAGES_PER_SESSION = 200;
 
 function iso(now) {
   return new Date(now).toISOString();
@@ -20,7 +21,9 @@ function emptyState() {
     devices: {},
     overlays: {},
     leases: {},
-    messages: {}
+    messages: {},
+    assets: {},
+    mobileMessages: {}
   };
 }
 
@@ -36,7 +39,9 @@ function loadState(file) {
       devices: parsed.devices && typeof parsed.devices === "object" ? parsed.devices : {},
       overlays: parsed.overlays && typeof parsed.overlays === "object" ? parsed.overlays : {},
       leases: parsed.leases && typeof parsed.leases === "object" ? parsed.leases : {},
-      messages: parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {}
+      messages: parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {},
+      assets: parsed.assets && typeof parsed.assets === "object" ? parsed.assets : {},
+      mobileMessages: parsed.mobileMessages && typeof parsed.mobileMessages === "object" ? parsed.mobileMessages : {}
     };
   } catch {
     return emptyState();
@@ -68,6 +73,53 @@ function publicDevice(device) {
     lastSeenAt: device.lastSeenAt || null,
     revokedAt: device.revokedAt || null
   };
+}
+
+function publicAsset(asset) {
+  if (!asset) return null;
+  return {
+    id: asset.id,
+    name: asset.name,
+    mimeType: asset.mimeType,
+    kind: asset.kind,
+    byteLength: Number(asset.byteLength || 0),
+    ...(asset.activity ? { activity: asset.activity } : {})
+  };
+}
+
+function safeName(value) {
+  return String(value || "附件").replace(/[\\/\0]/g, "_").slice(0, 160) || "附件";
+}
+
+function mimeTypeForFile(file) {
+  const extension = path.extname(file).toLowerCase();
+  return ({
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".json": "application/json",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript",
+    ".mjs": "text/javascript",
+    ".cjs": "text/javascript",
+    ".ts": "text/typescript",
+    ".tsx": "text/typescript",
+    ".html": "text/html",
+    ".css": "text/css",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp"
+  })[extension] || "application/octet-stream";
+}
+
+function within(candidate, root) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 function pruneMessages(state) {
@@ -237,6 +289,107 @@ export function createMobileControlStore({
     return { duplicate: false, acceptedAt };
   };
 
+  const putAttachment = ({
+    sessionId,
+    messageId,
+    index = 0,
+    name,
+    mimeType = "application/octet-stream",
+    kind = "file",
+    data
+  } = {}) => {
+    const session = String(sessionId || "").trim();
+    const message = String(messageId || "").trim();
+    const encoded = String(data || "");
+    if (!session || !message || !encoded) throw new Error("附件参数不完整");
+    const bytes = Buffer.from(encoded, "base64");
+    const id = `asset_${sha256(`${session}\0${message}\0${index}\0${name}`).slice(0, 32)}`;
+    const directory = path.join(path.dirname(file), "attachments");
+    const target = path.join(directory, `${id}.bin`);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(target, bytes, { mode: 0o600 });
+    try { fs.chmodSync(target, 0o600); } catch {}
+    state.assets[id] = {
+      id,
+      sessionId: session,
+      name: safeName(name),
+      mimeType: String(mimeType || "application/octet-stream").slice(0, 160),
+      kind: ["image", "text", "file"].includes(kind) ? kind : "file",
+      byteLength: bytes.length,
+      storage: "upload",
+      path: target,
+      createdAt: iso(now())
+    };
+    save();
+    return publicAsset(state.assets[id]);
+  };
+
+  const rememberMobileMessage = ({ sessionId, messageId, text = "", attachments = [] } = {}) => {
+    const session = String(sessionId || "").trim();
+    const message = String(messageId || "").trim();
+    if (!session || !message) throw new Error("sessionId 和 messageId 不能为空");
+    const rows = Array.isArray(state.mobileMessages[session]) ? state.mobileMessages[session] : [];
+    const entry = {
+      messageId: message,
+      text: String(text || "").slice(0, 20_000),
+      createdAt: iso(now()),
+      attachments: attachments.map((asset) => publicAsset(asset)).filter(Boolean)
+    };
+    const previous = rows.findIndex((row) => row.messageId === message);
+    if (previous >= 0) rows.splice(previous, 1);
+    rows.push(entry);
+    state.mobileMessages[session] = rows.slice(-MAX_MOBILE_MESSAGES_PER_SESSION);
+    save();
+    return {
+      ...entry,
+      attachments: entry.attachments.map((asset) => ({ ...asset }))
+    };
+  };
+
+  const listMobileMessages = (sessionId) => {
+    const rows = state.mobileMessages[String(sessionId || "")] || [];
+    return rows.map((row) => ({
+      messageId: String(row.messageId || ""),
+      text: String(row.text || ""),
+      createdAt: String(row.createdAt || ""),
+      attachments: (row.attachments || []).map((asset) => ({ ...asset }))
+    }));
+  };
+
+  const registerWorkspaceFile = ({
+    sessionId,
+    workspaceRoot,
+    filePath,
+    activity = "other"
+  } = {}) => {
+    const rootPath = path.resolve(String(workspaceRoot || ""));
+    const target = path.resolve(String(filePath || ""));
+    if (!rootPath || !target || !within(target, rootPath)) throw new Error("文件不在当前工作目录内");
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error("文件不存在或不可读取");
+    const stat = fs.statSync(target);
+    const id = `asset_${sha256(`${sessionId}\0${target}`).slice(0, 32)}`;
+    state.assets[id] = {
+      id,
+      sessionId: String(sessionId || ""),
+      name: safeName(path.basename(target)),
+      mimeType: mimeTypeForFile(target),
+      kind: "workspace_file",
+      byteLength: stat.size,
+      activity: ["read", "search", "edit", "command", "other"].includes(activity) ? activity : "other",
+      storage: "workspace",
+      path: target,
+      createdAt: iso(now())
+    };
+    save();
+    return publicAsset(state.assets[id]);
+  };
+
+  const resolveAsset = (assetId) => {
+    const asset = state.assets[String(assetId || "")];
+    if (!asset?.path || !fs.existsSync(asset.path) || !fs.statSync(asset.path).isFile()) return null;
+    return { ...publicAsset(asset), path: asset.path };
+  };
+
   return {
     file,
     createChallenge,
@@ -248,6 +401,11 @@ export function createMobileControlStore({
     patchOverlay,
     acquireLease,
     releaseLease,
-    rememberMessage
+    rememberMessage,
+    putAttachment,
+    rememberMobileMessage,
+    listMobileMessages,
+    registerWorkspaceFile,
+    resolveAsset
   };
 }

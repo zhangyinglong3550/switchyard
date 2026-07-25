@@ -61,6 +61,74 @@ test("mobile store rejects expired challenge and duplicate message ids", (t) => 
   assert.equal(store.rememberMessage({ sessionId: "s1", messageId: "m1" }).duplicate, true);
 });
 
+test("mobile store persists uploaded attachments and user-message metadata", (t) => {
+  const root = tempRoot(t);
+  const store = createMobileControlStore({ root });
+  const attachment = store.putAttachment({
+    sessionId: "s1",
+    messageId: "m1",
+    index: 0,
+    name: "screen.png",
+    mimeType: "image/png",
+    kind: "image",
+    data: Buffer.from("image-bytes").toString("base64")
+  });
+  store.rememberMobileMessage({
+    sessionId: "s1",
+    messageId: "m1",
+    text: "看图",
+    attachments: [attachment]
+  });
+
+  assert.match(attachment.id, /^asset_/);
+  assert.equal(attachment.name, "screen.png");
+  assert.equal(fs.readFileSync(store.resolveAsset(attachment.id).path, "utf8"), "image-bytes");
+  assert.equal(fs.statSync(store.resolveAsset(attachment.id).path).mode & 0o777, 0o600);
+  const messages = store.listMobileMessages("s1");
+  assert.match(messages[0].createdAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(messages.map(({ createdAt, ...message }) => message), [{
+    messageId: "m1",
+    text: "看图",
+    attachments: [attachment]
+  }]);
+
+  const reloaded = createMobileControlStore({ root });
+  assert.equal(reloaded.resolveAsset(attachment.id).name, "screen.png");
+  assert.equal(reloaded.listMobileMessages("s1")[0].attachments[0].id, attachment.id);
+});
+
+test("mobile store exposes only workspace files through opaque references", (t) => {
+  const root = tempRoot(t);
+  const workspace = path.join(root, "workspace");
+  const file = path.join(workspace, "src", "app.js");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "console.log('ok')\n");
+  const store = createMobileControlStore({ root: path.join(root, "store") });
+
+  const reference = store.registerWorkspaceFile({
+    sessionId: "s1",
+    workspaceRoot: workspace,
+    filePath: file,
+    activity: "edit"
+  });
+  assert.match(reference.id, /^asset_/);
+  assert.deepEqual(reference, {
+    id: reference.id,
+    name: "app.js",
+    mimeType: "text/javascript",
+    kind: "workspace_file",
+    byteLength: fs.statSync(file).size,
+    activity: "edit"
+  });
+  assert.equal(store.resolveAsset(reference.id).path, file);
+  assert.throws(() => store.registerWorkspaceFile({
+    sessionId: "s1",
+    workspaceRoot: workspace,
+    filePath: path.join(root, "outside.txt"),
+    activity: "read"
+  }), /工作目录/);
+});
+
 test("mobile store overlays and write leases are scoped per session", (t) => {
   const root = tempRoot(t);
   let now = NOW;
@@ -149,6 +217,46 @@ test("mobile DTO only exposes allowlisted session and event fields", () => {
   });
 });
 
+test("mobile DTO keeps safe attachment and clickable-file metadata", () => {
+  const event = projectMobileEvent({
+    id: 10,
+    sessionId: "s1",
+    type: "tool",
+    summary: "修改文件",
+    attachments: [{
+      id: "asset_image",
+      name: "screen.png",
+      mimeType: "image/png",
+      kind: "image",
+      byteLength: 20,
+      path: "/Users/alice/private/screen.png"
+    }],
+    tool: {
+      id: "tool-1",
+      name: "Write",
+      status: "completed",
+      files: [{
+        id: "asset_file",
+        name: "app.js",
+        mimeType: "text/javascript",
+        kind: "workspace_file",
+        byteLength: 100,
+        activity: "edit",
+        path: "/Users/alice/project/app.js"
+      }]
+    }
+  });
+  assert.deepEqual(event.attachments, [{
+    id: "asset_image",
+    name: "screen.png",
+    mimeType: "image/png",
+    kind: "image",
+    byteLength: 20
+  }]);
+  assert.equal(event.tool.files[0].id, "asset_file");
+  assert.doesNotMatch(JSON.stringify(event), /\/Users\/alice/);
+});
+
 test("event ledger replays strictly after cursor without duplicates", (t) => {
   const root = tempRoot(t);
   const file = path.join(root, "events.jsonl");
@@ -218,10 +326,11 @@ test("mobile event DTO keeps safe structured tool fields and redacts secrets", a
   const event = projectMobileEvent({
     type: "tool",
     summary: "执行命令",
-    tool: { id: "call-1", name: "shell", command: "curl -H 'Authorization: Bearer secret-token' /Users/alice/demo", arguments: '{"token":"sk-secret123456"}', status: "running", output: "ok" }
+    tool: { id: "call-1", name: "shell", activity: "command", command: "curl -H 'Authorization: Bearer secret-token' /Users/alice/demo", arguments: '{"token":"sk-secret123456"}', status: "running", output: "ok" }
   });
   assert.equal(event.tool.id, "call-1");
   assert.equal(event.tool.status, "running");
+  assert.equal(event.tool.activity, "command");
   assert.doesNotMatch(event.tool.command, /secret-token|\/Users\/alice/);
   assert.doesNotMatch(event.tool.arguments, /sk-secret123456/);
 });

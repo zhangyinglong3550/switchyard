@@ -811,6 +811,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord) {
       }
       // openai_chat 直通：流结束后把 usage 落库
       return pipeStream(result.upstream, res, {
+        ...(result.compatContext || {}),
         provider: route.provider,
         model: route.model,
         clientId,

@@ -37,6 +37,10 @@ export function openCodeConfigPath() {
   return path.join(base, "opencode", "opencode.json");
 }
 
+export function openCodeCapabilityPluginPath() {
+  return path.join(path.dirname(openCodeConfigPath()), "plugin", "switchyard-capabilities.mjs");
+}
+
 /** Grok Build：~/.grok/config.toml（可用 GROK_HOME 覆盖） */
 export function grokConfigPath() {
   const home = process.env.GROK_HOME && String(process.env.GROK_HOME).trim()
@@ -1061,9 +1065,72 @@ export function buildOpenCodeModelsMap(models = []) {
     const output = openCodeOutputLimit(model) || openCodeDefaultOutputFromContext(context);
     // OpenCode 要求 limit.context + limit.output 成对出现，缺一即配置无效
     entry.limit = { context, output };
+    const supportsImages = Boolean(
+      model?.capabilities?.images
+      || model?.capabilities?.multimodal
+      || model?.visionFallbackModelId
+    );
+    // OpenCode checks attachment/modalities before it calls the provider. If
+    // these fields are omitted it rejects ACP/CLI image attachments locally,
+    // even when the Switchyard model itself supports vision.
+    entry.attachment = supportsImages;
+    entry.modalities = {
+      input: supportsImages ? ["text", "image"] : ["text"],
+      output: ["text"]
+    };
     out[id] = entry;
   }
   return out;
+}
+
+export function renderOpenCodeCapabilityPlugin(models = []) {
+  const capabilities = {};
+  for (const model of distinctModels(models)) {
+    const id = String(model?.id || "").trim();
+    if (!id) continue;
+    const supportsImages = Boolean(
+      model?.capabilities?.images
+      || model?.capabilities?.multimodal
+      || model?.visionFallbackModelId
+    );
+    capabilities[id] = {
+      tools: model?.capabilities?.tools !== false,
+      input: supportsImages ? ["text", "image"] : ["text"],
+      output: ["text"]
+    };
+  }
+  return `// managed-by-switchyard; regenerated automatically\n`
+    + `const capabilities = ${JSON.stringify(capabilities, null, 2)};\n\n`
+    + `export const SwitchyardCapabilities = async () => ({\n`
+    + `  config: async (config) => {\n`
+    + `    const models = config.provider?.switchyard?.models;\n`
+    + `    if (!models) return;\n`
+    + `    for (const [id, value] of Object.entries(capabilities)) {\n`
+    + `      if (!models[id]) continue;\n`
+    + `      models[id].tool_call = value.tools;\n`
+    + `      models[id].modalities = { input: value.input, output: value.output };\n`
+    + `    }\n`
+    + `  },\n`
+    + `  \"chat.params\": async (input) => {\n`
+    + `    const modelId = input.model?.id || input.model?.modelID;\n`
+    + `    const value = capabilities[modelId];\n`
+    + `    if (!value || !input.model.capabilities) return;\n`
+    + `    input.model.capabilities.attachment = value.input.includes(\"image\");\n`
+    + `    if (input.model.capabilities.input) {\n`
+    + `      input.model.capabilities.input.image = value.input.includes(\"image\");\n`
+    + `    }\n`
+    + `  }\n`
+    + `});\n`;
+}
+
+function syncOpenCodeCapabilityPlugin(models = []) {
+  const file = openCodeCapabilityPluginPath();
+  const nextText = renderOpenCodeCapabilityPlugin(models);
+  let prevText = "";
+  try { prevText = fs.readFileSync(file, "utf8"); } catch {}
+  if (prevText === nextText) return { path: file, changed: false };
+  const result = writeText(file, nextText);
+  return { path: result.path, backup: result.backup || null, changed: true };
 }
 
 export function renderOpenCodeProviderBlock({ host, port, models = [] } = {}) {
@@ -1152,6 +1219,7 @@ export function syncOpenCodeModelArtifacts({
     return { ok: true, skipped: true, reason: "not-managed", path: file, modelCount: 0 };
   }
   const merged = mergeOpenCodeProfile(existing, { host, port, models, defaultModel });
+  const capabilityPlugin = syncOpenCodeCapabilityPlugin(models);
   const nextText = jsonText(merged);
   let prevText = "";
   try { prevText = fs.readFileSync(file, "utf8"); } catch {}
@@ -1160,6 +1228,7 @@ export function syncOpenCodeModelArtifacts({
       ok: true,
       path: file,
       changed: false,
+      capabilityPlugin,
       modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
     };
   }
@@ -1169,6 +1238,7 @@ export function syncOpenCodeModelArtifacts({
     path: result.path,
     backup: result.backup || null,
     changed: true,
+    capabilityPlugin,
     modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
   };
 }

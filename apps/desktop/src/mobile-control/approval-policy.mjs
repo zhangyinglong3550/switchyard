@@ -29,6 +29,7 @@ function commandText(input = {}) {
 }
 
 export function classifyMobileApproval(input = {}) {
+  const method = String(input.method || input.runtimeEvent || "");
   const options = Array.isArray(input.options)
     ? input.options
     : Array.isArray(input.toolCall?.options)
@@ -39,17 +40,24 @@ export function classifyMobileApproval(input = {}) {
   const command = commandText(input);
   const dangerous = HIGH_RISK.some((pattern) => pattern.test(command));
   const lowRisk = Boolean(command) && LOW_RISK.some((pattern) => pattern.test(command));
-  const mobileAllowed = Boolean(allow?.optionId && reject?.optionId && lowRisk && !dangerous);
+  const codexCommand = method === "item/commandExecution/requestApproval";
+  const codexFileChange = method === "item/fileChange/requestApproval";
+  const acpAllowed = Boolean(allow?.optionId && reject?.optionId && lowRisk && !dangerous);
+  const codexAllowed = codexFileChange || (codexCommand && lowRisk && !dangerous);
+  const mobileAllowed = acpAllowed || codexAllowed;
   return {
     mobileAllowed,
     requiresDesktop: !mobileAllowed,
     risk: dangerous ? "high" : lowRisk ? "low" : "unknown",
     summary: dangerous
       ? "高风险操作，仅允许在桌面确认"
+      : codexFileChange
+        ? "Codex 请求修改工作区文件"
       : lowRisk
         ? "低风险只读或验证命令"
         : "无法确认风险，仅允许在桌面确认",
-    allowOptionId: mobileAllowed ? String(allow.optionId) : null,
+    protocol: codexCommand || codexFileChange ? "codex" : "acp",
+    allowOptionId: acpAllowed ? String(allow.optionId) : null,
     rejectOptionId: reject?.optionId ? String(reject.optionId) : null,
     permanentOptionId: null,
     actions: mobileAllowed ? ["allow_once", "deny_once"] : []

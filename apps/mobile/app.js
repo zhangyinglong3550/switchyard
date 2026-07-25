@@ -17,7 +17,13 @@ const collapsedGroups = new Set();
 let eventLoopStopped = false;
 let refreshTimer = null;
 let activeAttachments = [];
+let newAttachments = [];
+const assetObjectUrls = new Map();
+let viewerObjectUrl = "";
 let lastDetailFingerprint = "";
+const commandCache = new Map();
+let commandPickerState = null;
+let commandRequestSeq = 0;
 
 function escapeHtml(value) { return String(value || "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
 function agentKey(agent) { return String(agent || "").toLowerCase(); }
@@ -29,6 +35,84 @@ function stateLabel(state) { return ({ queued: "正在排队", running: "正在�
 function avatar(agent) { return `<span class="agent-avatar ${agentClass(agent)}">${escapeHtml(agentInitial(agent))}</span>`; }
 function icon(name) { return name === "folder" ? '<svg viewBox="0 0 24 24"><path d="M3 6.5h6l2 2h10v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6.5Z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>'; }
 function toast(message) { const el = $("#toast"); el.textContent = message; el.classList.add("toast-show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("toast-show"), 2900); }
+
+function commandAgentFor(input) { return input?.id === "message" ? current?.agent || "" : selectedAgent; }
+function commandTrigger(input, agent) {
+  const cursor = Number(input?.selectionStart ?? input?.value?.length ?? 0);
+  const before = String(input?.value || "").slice(0, cursor);
+  const match = before.match(/(^|\s)([/$@])([^\s]*)$/);
+  if (!match || (["$", "@"].includes(match[2]) && agent !== "codex")) return null;
+  return { prefix: match[2], query: match[3].toLowerCase(), start: cursor - match[2].length - match[3].length, end: cursor };
+}
+function commandContext(input, agent) {
+  if (agent !== "codex") return "";
+  if (input?.id === "message" && current?.id) return `session=${encodeURIComponent(current.id)}`;
+  if (input?.id === "prompt" && selectedWorkspace) return `cwd=${encodeURIComponent(selectedWorkspace)}`;
+  return "";
+}
+async function commandsFor(agent, input) {
+  if (!agent) return [];
+  const context = commandContext(input, agent);
+  const cacheKey = `${agent}:${context}`;
+  const cached = commandCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 60_000) return cached.rows;
+  const rows = await api(`/mobile/v1/commands?agent=${encodeURIComponent(agent)}${context ? `&${context}` : ""}`);
+  commandCache.set(cacheKey, { at: Date.now(), rows: Array.isArray(rows) ? rows : [] });
+  return Array.isArray(rows) ? rows : [];
+}
+function hideCommandPicker() { const picker = $("#command-picker"); picker.hidden = true; picker.innerHTML = ""; commandPickerState = null; }
+function positionCommandPicker(input) {
+  const picker = $("#command-picker"); const rect = input.getBoundingClientRect();
+  const width = Math.min(Math.max(rect.width, 280), window.innerWidth - 24);
+  picker.style.width = `${width}px`;
+  picker.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`;
+  const estimated = Math.min(picker.scrollHeight || 320, 360);
+  picker.style.top = `${Math.max(10, rect.top - estimated - 8)}px`;
+}
+function renderCommandPicker() {
+  const state = commandPickerState; const picker = $("#command-picker");
+  if (!state) return hideCommandPicker();
+  const groups = [
+    ["command", "命令", state.rows.filter((item) => item.kind === "command")],
+    ["skill", "Skills", state.rows.filter((item) => item.kind === "skill")],
+    ["mention", "插件与 App", state.rows.filter((item) => item.kind === "mention")]
+  ].filter(([, , rows]) => rows.length);
+  if (!groups.length) { picker.innerHTML = '<div class="command-empty">没有匹配的命令或 Skill</div>'; picker.hidden = false; positionCommandPicker(state.input); return; }
+  let itemIndex = 0;
+  picker.innerHTML = groups.map(([, label, rows]) => `<section class="command-group"><h3>${label}</h3>${rows.map((item) => { const index = itemIndex++; const glyph = item.kind === "skill" ? "S" : item.kind === "mention" ? "@" : "/"; return `<button type="button" role="option" class="command-option${index === state.selected ? " selected" : ""}" data-command-index="${index}"><span class="command-glyph">${glyph}</span><span><b>${escapeHtml(item.insertText.trim())}</b><small>${escapeHtml(item.description || "")}</small></span></button>`; }).join("")}</section>`).join("");
+  picker.hidden = false; positionCommandPicker(state.input);
+}
+async function updateCommandPicker(input) {
+  const agent = commandAgentFor(input); const trigger = commandTrigger(input, agent);
+  if (!trigger) return hideCommandPicker();
+  const seq = ++commandRequestSeq;
+  try {
+    const all = await commandsFor(agent, input); if (seq !== commandRequestSeq || document.activeElement !== input) return;
+    const allowedKind = (item) => trigger.prefix === "$" ? item.kind === "skill"
+      : trigger.prefix === "@" ? item.kind === "mention"
+        : agent === "codex" ? item.kind === "command" : ["command", "skill"].includes(item.kind);
+    const rows = all.filter((item) => allowedKind(item) && (!trigger.query || `${item.name} ${item.description || ""}`.toLowerCase().includes(trigger.query))).slice(0, 80);
+    commandPickerState = { input, agent, trigger, rows, selected: 0 };
+    renderCommandPicker();
+  } catch { hideCommandPicker(); }
+}
+function chooseCommand(index = commandPickerState?.selected || 0) {
+  const state = commandPickerState; const item = state?.rows?.[index]; if (!state || !item) return;
+  const input = state.input; const value = input.value;
+  input.value = `${value.slice(0, state.trigger.start)}${item.insertText}${value.slice(state.trigger.end)}`;
+  const cursor = state.trigger.start + item.insertText.length;
+  hideCommandPicker(); input.focus(); input.setSelectionRange(cursor, cursor); input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+function commandPickerKeydown(event) {
+  if (!commandPickerState || commandPickerState.input !== event.currentTarget) return;
+  if (event.key === "Escape") { event.preventDefault(); hideCommandPicker(); return; }
+  if (!["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === "Enter" || event.key === "Tab") return chooseCommand();
+  const count = commandPickerState.rows.length; if (!count) return;
+  commandPickerState.selected = (commandPickerState.selected + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+  renderCommandPicker(); $("#command-picker .command-option.selected")?.scrollIntoView({ block: "nearest" });
+}
 
 async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -48,6 +132,7 @@ function page(name) {
   $("#session-menu").hidden = true;
   hideModelSheet();
   workspaceSheet(false);
+  hideCommandPicker();
   // The list and settings pages share the document scroller with the chat.
   // Resetting it here prevents a just-opened list from inheriting the old
   // conversation's bottom scroll position.
@@ -146,7 +231,10 @@ function renderApprovalInbox() {
   $("#approval-inbox").innerHTML = pendingApprovals.map((approval) => {
     const session = sessions.find((item) => item.id === approval.sessionId);
     const title = session?.title || approval.title || "待审批任务";
-    return `<div class="approval-card"><div class="r1"><i></i>${escapeHtml(title)}</div><div class="r2">${escapeHtml(approval.summary)}</div><div class="approval-actions"><button data-approval="${escapeHtml(approval.id)}" data-decision="deny_once" type="button">拒绝</button><button class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once" type="button">允许一次</button></div></div>`;
+    const actions = approval.requiresDesktop
+      ? '<div class="approval-desktop">请在桌面端确认</div>'
+      : `<div class="approval-actions"><button data-approval="${escapeHtml(approval.id)}" data-decision="deny_once" type="button">拒绝</button><button class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once" type="button">允许一次</button></div>`;
+    return `<div class="approval-card"><div class="r1"><i></i>${escapeHtml(title)}</div><div class="r2">${escapeHtml(approval.summary)}</div>${actions}</div>`;
   }).join("");
 }
 
@@ -289,25 +377,133 @@ function messageKey(message, index = 0) { return message.id || `${message.role |
 function firstLine(value) { return String(value || "").split(/\n/).map((line) => line.trim()).filter(Boolean)[0] || ""; }
 function toolStatusLabel(status) { return ({ pending: "等待中", running: "执行中", waiting_for_approval: "待审批", completed: "已完成", failed: "失败", cancelled: "已取消" })[status] || "已完成"; }
 function toolDetailBlock(label, value, className = "") { const text = String(value || "").trim(); return text ? `<section class="tool-section ${className}"><b>${label}</b><pre>${escapeHtml(text)}</pre></section>` : ""; }
-function renderToolMessage(message, key) {
+function assetUrl(assetId) { return `/mobile/v1/assets/${encodeURIComponent(assetId)}`; }
+function attachmentIcon(asset) {
+  const extension = String(asset?.name || "").split(".").pop().slice(0, 5).toUpperCase();
+  return extension && extension !== String(asset?.name || "").toUpperCase() ? extension : "FILE";
+}
+function renderMessageAttachments(attachments = []) {
+  if (!attachments.length) return "";
+  return `<div class="message-attachments">${attachments.map((asset) => {
+    const image = asset.kind === "image" || String(asset.mimeType || "").startsWith("image/");
+    const open = asset.id ? `data-attachment-open="${escapeHtml(asset.id)}"` : asset.preview ? `data-attachment-preview="${escapeHtml(asset.preview)}"` : "";
+    const metadata = `data-asset-name="${escapeHtml(asset.name || "文件")}" data-asset-mime="${escapeHtml(asset.mimeType || "application/octet-stream")}" data-asset-kind="${escapeHtml(asset.kind || "file")}"`;
+    return image
+      ? `<button type="button" class="message-attachment image" ${open} ${metadata}><img ${asset.preview ? `src="${escapeHtml(asset.preview)}"` : ""} data-asset-image="${escapeHtml(asset.id || "")}" alt="${escapeHtml(asset.name || "图片")}"><span>${escapeHtml(asset.name || "图片")}</span></button>`
+      : `<button type="button" class="message-attachment file" ${open} ${metadata}><i>${escapeHtml(attachmentIcon(asset))}</i><span><strong>${escapeHtml(asset.name || "文件")}</strong><small>${asset.byteLength ? `${Math.ceil(asset.byteLength / 1024)} KB` : "点击打开"}</small></span></button>`;
+  }).join("")}</div>`;
+}
+async function fetchAssetObjectUrl(assetId) {
+  if (!assetId) return "";
+  if (assetObjectUrls.has(assetId)) return assetObjectUrls.get(assetId);
+  const promise = fetch(assetUrl(assetId), { headers: { authorization: `Bearer ${token}` } }).then(async (response) => {
+    if (!response.ok) throw new Error(`文件读取失败（${response.status}）`);
+    return URL.createObjectURL(await response.blob());
+  }).catch((error) => { assetObjectUrls.delete(assetId); throw error; });
+  assetObjectUrls.set(assetId, promise);
+  return promise;
+}
+async function hydrateAttachmentPreviews(root = document) {
+  const images = [...root.querySelectorAll("img[data-asset-image]:not([src])")];
+  await Promise.all(images.map(async (image) => {
+    const id = image.dataset.assetImage;
+    if (!id) return;
+    try { image.src = await fetchAssetObjectUrl(id); } catch { image.closest(".message-attachment")?.classList.add("asset-error"); }
+  }));
+}
+async function openAttachmentViewer(asset) {
+  const viewer = $("#attachment-viewer"); const content = $("#attachment-viewer-content");
+  $("#attachment-viewer-title").textContent = asset.name || "文件预览";
+  content.innerHTML = '<div class="viewer-loading">正在读取文件…</div>';
+  viewer.hidden = false; viewer.setAttribute("aria-hidden", "false");
+  try {
+    const url = asset.preview || await fetchAssetObjectUrl(asset.id);
+    viewerObjectUrl = asset.preview ? "" : url;
+    const image = asset.kind === "image" || String(asset.mimeType || "").startsWith("image/");
+    const pdf = asset.mimeType === "application/pdf";
+    const text = asset.kind === "text" || String(asset.mimeType || "").startsWith("text/") || /\.(md|json|ya?ml|js|ts|py|go|rs|java|c|cpp|h|css|html|sql|sh)$/i.test(asset.name || "");
+    if (image) content.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(asset.name || "图片")}">`;
+    else if (pdf) content.innerHTML = `<iframe src="${escapeHtml(url)}" title="${escapeHtml(asset.name || "PDF")}"></iframe>`;
+    else if (text) content.innerHTML = `<pre>${escapeHtml(await (await fetch(url)).text())}</pre>`;
+    else content.innerHTML = `<div class="viewer-file"><i>${escapeHtml(attachmentIcon(asset))}</i><strong>${escapeHtml(asset.name || "文件")}</strong><span>此文件类型不支持在线预览，可以下载后打开。</span></div>`;
+    const download = $("#attachment-viewer-download"); download.href = url; download.download = asset.name || "file"; download.hidden = image;
+  } catch (error) { content.innerHTML = `<div class="viewer-error">${escapeHtml(error.message)}</div>`; $("#attachment-viewer-download").hidden = true; }
+}
+function closeAttachmentViewer() {
+  const viewer = $("#attachment-viewer"); viewer.hidden = true; viewer.setAttribute("aria-hidden", "true");
+  $("#attachment-viewer-content").innerHTML = ""; viewerObjectUrl = "";
+}
+function renderToolFiles(files = []) {
+  if (!files.length) return "";
+  return `<section class="tool-section tool-files"><b>相关文件</b><div>${files.map((file) => `<button type="button" data-file-open="${escapeHtml(file.id)}" data-asset-name="${escapeHtml(file.name || "文件")}" data-asset-mime="${escapeHtml(file.mimeType || "application/octet-stream")}" data-asset-kind="${escapeHtml(file.kind || "workspace_file")}"><i>${escapeHtml(attachmentIcon(file))}</i><span>${escapeHtml(file.name || "文件")}</span><em>打开</em></button>`).join("")}</div></section>`;
+}
+function isToolMessage(message) { return message?.role === "tool" || message?.kind === "tool"; }
+function toolActivity(message) {
+  const tool = message?.tool || {};
+  if (["read", "search", "edit", "command", "other"].includes(tool.activity)) return tool.activity;
+  const value = `${tool.name || ""} ${tool.title || ""} ${tool.command || ""} ${tool.arguments || ""} ${message?.text || ""}`.toLowerCase();
+  if (/\b(read|readfile|cat|head|tail|sed)\b|读取|查看文件/.test(value)) return "read";
+  if (/\b(grep|rg|glob|find|search|websearch|web_search)\b|搜索|检索|查找/.test(value)) return "search";
+  if (/\b(edit|write|apply_patch|notebookedit|str_replace)\b|编辑|写入|修改文件/.test(value)) return "edit";
+  if (/\b(bash|shell|terminal|exec|run_command|execute)\b|执行命令|运行命令/.test(value)) return "command";
+  return "other";
+}
+function toolActivitySummary(messages = []) {
+  const counts = { read: 0, search: 0, edit: 0, command: 0, other: 0 };
+  for (const message of messages) counts[toolActivity(message)] += 1;
+  const parts = [];
+  if (counts.read) parts.push(`检查 ${counts.read} 个文件`);
+  if (counts.search) parts.push(`${counts.search} 次搜索`);
+  if (counts.edit) parts.push(`修改 ${counts.edit} 个文件`);
+  if (counts.command) parts.push(`运行 ${counts.command} 个命令`);
+  if (counts.other) parts.push(`完成 ${counts.other} 项操作`);
+  return `已${parts.join("，") || "完成工具调用"}`;
+}
+function renderToolItem(message, key, position = "") {
   const tool = message.tool || {}; const status = tool.status || "completed";
   const title = tool.title || tool.name || firstLine(message.text) || "工具调用";
   const command = tool.command || "";
   const argumentsText = tool.arguments && tool.arguments !== command ? tool.arguments : "";
-  const details = [toolDetailBlock("命令", command, "tool-command"), toolDetailBlock("参数", argumentsText), toolDetailBlock("输出", tool.output, "tool-output"), toolDetailBlock("错误", tool.error, "tool-error")].join("");
+  const details = [toolDetailBlock("命令", command, "tool-command"), toolDetailBlock("参数", argumentsText), toolDetailBlock("输出", tool.output, "tool-output"), toolDetailBlock("错误", tool.error, "tool-error"), renderToolFiles(tool.files)].join("");
+  return `<article class="tool-item status-${escapeHtml(status)}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}" data-tool-activity="${escapeHtml(toolActivity(message))}"><header><span class="tool-index">${escapeHtml(position)}</span><span class="tool-item-head"><b>${escapeHtml(title)}</b><small>${escapeHtml(tool.name && tool.name !== title ? tool.name : command || "未提供命令摘要")}</small></span><span class="tool-item-state">${escapeHtml(toolStatusLabel(status))}</span></header><div class="tool-item-detail">${details || '<div class="tool-empty">Agent 未提供命令或参数详情</div>'}</div></article>`;
+}
+function aggregateToolStatus(messages = []) {
+  const statuses = messages.map((message) => message.tool?.status || "completed");
+  return ["failed", "waiting_for_approval", "running", "pending", "cancelled"].find((status) => statuses.includes(status)) || "completed";
+}
+function toolGroupSubtitle(messages = []) {
+  const running = messages.filter((message) => ["running", "pending"].includes(message.tool?.status)).length;
+  const failed = messages.filter((message) => message.tool?.status === "failed").length;
+  if (failed) return `${failed} 个失败，点击查看详情`;
+  if (running) return `${running} 个执行中，点击查看详情`;
+  return "点击展开调用详情";
+}
+function renderToolGroup(messages, startIndex = 0) {
+  const status = aggregateToolStatus(messages);
   const open = status === "failed" || status === "waiting_for_approval";
-  return `<details class="tool status-${escapeHtml(status)}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}"${open ? " open" : ""}><summary><span class="ic">⌘</span><span class="tool-head"><b>${escapeHtml(title)}</b><small>${escapeHtml(tool.name && tool.name !== title ? tool.name : command || "点击查看详情")}</small></span><span class="tool-state">${escapeHtml(toolStatusLabel(status))}</span><span class="chevron">⌄</span></summary><div class="tool-detail">${details || '<div class="tool-empty">Agent 未提供命令或参数详情</div>'}</div></details>`;
+  const items = messages.map((message, offset) => renderToolItem(message, messageKey(message, startIndex + offset), offset + 1)).join("");
+  return `<details class="tool status-${escapeHtml(status)} tool-group" data-tool-count="${messages.length}"${open ? " open" : ""}><summary><span class="ic">‹/›</span><span class="tool-head"><b>${escapeHtml(toolActivitySummary(messages))}</b><small>${escapeHtml(toolGroupSubtitle(messages))}</small></span><span class="tool-state">${escapeHtml(toolStatusLabel(status))}</span><span class="chevron">›</span></summary><div class="tool-detail"><div class="tool-group-items">${items}</div></div></details>`;
 }
 function renderMessage(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考过程</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
-  if (message.role === "tool" || kind === "tool") return renderToolMessage(message, key);
-  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
+  if (isToolMessage(message)) return renderToolGroup([message], index);
+  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
   const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
-  return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div></div>`;
+  return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
-function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}`).join("\u001f"); }
-function renderMessages(rows = []) { $("#messages").innerHTML = rows.map((message, index) => renderMessage(message, "", index)).join(""); lastDetailFingerprint = messageFingerprint(rows); }
+function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}`).join("\u001f"); }
+function renderMessages(rows = []) {
+  const html = [];
+  for (let index = 0; index < rows.length;) {
+    if (!isToolMessage(rows[index])) { html.push(renderMessage(rows[index], "", index)); index += 1; continue; }
+    let end = index + 1;
+    while (end < rows.length && isToolMessage(rows[end])) end += 1;
+    html.push(renderToolGroup(rows.slice(index, end), index));
+    index = end;
+  }
+  $("#messages").innerHTML = html.join(""); lastDetailFingerprint = messageFingerprint(rows); void hydrateAttachmentPreviews($("#messages"));
+}
 function syncMessages(rows = []) {
   const fingerprint = messageFingerprint(rows);
   if (fingerprint === lastDetailFingerprint) return false;
@@ -397,14 +593,14 @@ function appendEvent(event) {
   if (!current || event.sessionId !== current.id) return;
   if (event.type === "message" && event.summary) {
     const role = event.role || "assistant"; const last = $("#messages").lastElementChild;
-    if (role === "user" && last?.classList.contains("me") && last.textContent === event.summary) return;
+    if (role === "user" && last?.classList.contains("me") && last.querySelector(".msg-body")?.textContent === event.summary) return;
     if (role === "assistant" && last?.classList.contains("ai")) {
       const body = last.querySelector(".msg-body"); const raw = last.dataset.raw || body.textContent || "";
       last.dataset.raw = `${raw}${event.summary}`;
       // Debounce rather than repainting for every token: Markdown becomes rich
       // during the stream without bringing back Grok's full-message flicker.
       scheduleStreamingRichText(last, ".msg-body");
-    } else $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role, text: event.summary }));
+    } else { $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role, text: event.summary, attachments: event.attachments || [] })); void hydrateAttachmentPreviews($("#messages")); }
     scrollMessages();
   }
   if (event.type === "thinking" && event.summary) { const last = $("#messages").lastElementChild; if (last?.classList.contains("think")) { const body = last.querySelector(".think-body"); const raw = last.dataset.raw || body.textContent || ""; last.dataset.raw = `${raw}${event.summary}`; scheduleStreamingRichText(last, ".think-body"); } else $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", kind: "thinking", text: event.summary })); scrollMessages(); }
@@ -416,14 +612,44 @@ function appendEvent(event) {
   }
   if (event.type === "error") { $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", text: `发送失败：${event.summary}` }, "failed")); toast("消息没有发送成功，请重试"); }
   if (event.type === "tool") {
-    const selector = event.tool?.id ? `.tool[data-tool-id="${CSS.escape(event.tool.id)}"]` : "";
+    const selector = event.tool?.id ? `.tool-item[data-tool-id="${CSS.escape(event.tool.id)}"]` : "";
     const existing = selector ? $("#messages").querySelector(selector) : null;
-    const expanded = existing?.open;
-    const html = renderMessage({ id: event.id, role: "tool", kind: "tool", text: event.summary || "正在使用工具", tool: event.tool || null });
-    if (existing) { existing.outerHTML = html; const updated = selector ? $("#messages").querySelector(selector) : null; if (updated && expanded) updated.open = true; }
-    else $("#messages").insertAdjacentHTML("beforeend", html);
+    const message = { id: event.id, role: "tool", kind: "tool", text: event.summary || "正在使用工具", tool: event.tool || null };
+    if (existing) {
+      const group = existing.closest(".tool-group");
+      existing.outerHTML = renderToolItem(message, messageKey(message));
+      refreshToolGroup(group);
+    } else {
+      const last = $("#messages").lastElementChild;
+      if (last?.classList.contains("tool-group")) {
+        last.querySelector(".tool-group-items")?.insertAdjacentHTML("beforeend", renderToolItem(message, messageKey(message)));
+        refreshToolGroup(last);
+      } else $("#messages").insertAdjacentHTML("beforeend", renderToolGroup([message]));
+    }
     scrollMessages();
   }
+}
+
+function refreshToolGroup(group) {
+  if (!group) return;
+  const items = [...group.querySelectorAll(":scope .tool-item")];
+  const messages = items.map((item) => ({ tool: { status: item.dataset.toolStatus || "completed" }, activity: item.dataset.toolActivity || "other" }));
+  const status = aggregateToolStatus(messages);
+  group.dataset.toolCount = String(items.length);
+  for (const name of ["failed", "waiting_for_approval", "running", "pending", "cancelled", "completed"]) group.classList.toggle(`status-${name}`, name === status);
+  const counts = { read: 0, search: 0, edit: 0, command: 0, other: 0 };
+  for (const item of items) counts[item.dataset.toolActivity || "other"] += 1;
+  const parts = [];
+  if (counts.read) parts.push(`检查 ${counts.read} 个文件`);
+  if (counts.search) parts.push(`${counts.search} 次搜索`);
+  if (counts.edit) parts.push(`修改 ${counts.edit} 个文件`);
+  if (counts.command) parts.push(`运行 ${counts.command} 个命令`);
+  if (counts.other) parts.push(`完成 ${counts.other} 项操作`);
+  group.querySelector("summary .tool-head b").textContent = `已${parts.join("，") || "完成工具调用"}`;
+  group.querySelector("summary .tool-head small").textContent = toolGroupSubtitle(messages);
+  group.querySelector("summary .tool-state").textContent = toolStatusLabel(status);
+  items.forEach((item, index) => { const marker = item.querySelector(".tool-index"); if (marker) marker.textContent = String(index + 1); });
+  if (["failed", "waiting_for_approval"].includes(status)) group.open = true;
 }
 
 function finalizeStreamingMessages() {
@@ -458,6 +684,9 @@ function closeWorkspaceMenus(except = null) {
 
 document.addEventListener("click", async (event) => {
   try {
+    const commandOption = event.target.closest("[data-command-index]");
+    if (commandOption) { chooseCommand(Number(commandOption.dataset.commandIndex)); return; }
+    if (!event.target.closest("#command-picker") && !event.target.matches("#message,#prompt")) hideCommandPicker();
     const workspaceMenuButton = event.target.closest("[data-workspace-menu]");
     if (workspaceMenuButton) {
       const menu = workspaceMenuButton.parentElement?.querySelector(".group-menu");
@@ -470,7 +699,7 @@ document.addEventListener("click", async (event) => {
     const nav = event.target.closest("[data-nav]"); if (nav) { page(nav.dataset.nav); if (nav.dataset.nav === "sessions") await Promise.all([loadSessions(), loadApprovals()]); if (nav.dataset.nav === "new") { await loadWorkspaces(); renderAgentPicker(); } return; }
     const filter = event.target.closest("[data-filter]"); if (filter) { selectedFilter = filter.dataset.filter; renderFilters(); renderSessionList(); return; }
     const group = event.target.closest("[data-group]"); if (group) { const name = group.dataset.group; collapsedGroups.has(name) ? collapsedGroups.delete(name) : collapsedGroups.add(name); renderSessionList(); return; }
-    const agent = event.target.closest("[data-agent]"); if (agent) { selectedAgent = agent.dataset.agent; renderAgentPicker(); await loadModels(); return; }
+    const agent = event.target.closest("[data-agent]"); if (agent) { selectedAgent = agent.dataset.agent; renderAgentPicker(); await loadModels(); if (document.activeElement === $("#prompt")) await updateCommandPicker($("#prompt")); return; }
     const workspaceManage = event.target.closest("[data-workspace-manage]"); if (workspaceManage) {
       const item = workspaceManage.closest(".swipe-item");
       const opening = !item?.classList.contains("open");
@@ -570,8 +799,12 @@ document.addEventListener("click", async (event) => {
     const model = event.target.closest("[data-model]"); if (model && current) { await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/model`, { method: "POST", body: JSON.stringify({ model: model.dataset.model }) }); current.model = model.dataset.model; $("#detail-meta").textContent = `${agentLabel(current.agent)} · ${current.model}`; renderRuntimeShortcut(); hideModelSheet(); toast("模型将在下一轮生效"); return; }
     const approval = event.target.closest("[data-approval]"); if (approval) { await api(`/mobile/v1/approvals/${encodeURIComponent(approval.dataset.approval)}/resolve`, { method: "POST", body: JSON.stringify({ decision: approval.dataset.decision }) }); return loadApprovals(); }
     const copy = event.target.closest("[data-copy-code]"); if (copy) { await navigator.clipboard?.writeText(decodeURIComponent(copy.dataset.copyCode)); toast("代码已复制"); return; }
+    const assetOpen = event.target.closest("[data-attachment-open],[data-attachment-preview],[data-file-open]");
+    if (assetOpen) { await openAttachmentViewer({ id: assetOpen.dataset.attachmentOpen || assetOpen.dataset.fileOpen, preview: assetOpen.dataset.attachmentPreview || "", name: assetOpen.dataset.assetName, mimeType: assetOpen.dataset.assetMime, kind: assetOpen.dataset.assetKind }); return; }
+    if (event.target.closest("#close-attachment-viewer") || event.target === $("#attachment-viewer")) { closeAttachmentViewer(); return; }
+    if (event.target.closest("#new-attach-control")) { $("#new-attachment-input").click(); return; }
     if (event.target.closest("#attach-control")) { $("#attachment-input").click(); return; }
-    const removeAttachment = event.target.closest("[data-remove-attachment]"); if (removeAttachment) { activeAttachments.splice(Number(removeAttachment.dataset.removeAttachment), 1); renderAttachments(); return; }
+    const removeAttachment = event.target.closest("[data-remove-attachment]"); if (removeAttachment) { const target = removeAttachment.dataset.attachmentTarget === "new" ? newAttachments : activeAttachments; const [removed] = target.splice(Number(removeAttachment.dataset.removeAttachment), 1); if (removed?.preview) URL.revokeObjectURL(removed.preview); renderComposerAttachments(target, removeAttachment.dataset.attachmentTarget === "new" ? $("#new-attachment-preview") : $("#attachment-preview"), removeAttachment.dataset.attachmentTarget || "active"); return; }
     const action = event.target.dataset.action; if (!action || !current) return;
     let body = {}; if (action === "rename") body.title = prompt("会话名称", current.title) || current.title; if (action === "delete" && !confirm("确认删除这个会话？\n\n部分 Agent 的桌面历史不能物理删除，会从手机列表隐藏。")) return;
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}${action === "delete" ? "" : `/${action}`}`, { method: action === "delete" ? "DELETE" : "POST", body: action === "delete" ? undefined : JSON.stringify(body) });
@@ -582,12 +815,52 @@ document.addEventListener("click", async (event) => {
 $("#refresh").addEventListener("click", () => Promise.all([loadSessions(), loadApprovals()]).catch((error) => toast(error.message)));
 $("#show-archive").addEventListener("click", async () => { archivedView = !archivedView; $("#show-archive").textContent = archivedView ? "最近" : "归档"; await loadSessions().catch((error) => toast(error.message)); });
 $("#search").addEventListener("input", renderSessionList);
+for (const input of [$("#message"), $("#prompt")]) {
+  input.addEventListener("input", () => updateCommandPicker(input));
+  input.addEventListener("click", () => updateCommandPicker(input));
+  input.addEventListener("keydown", commandPickerKeydown);
+  input.addEventListener("blur", () => setTimeout(() => { if (!$("#command-picker").matches(":hover")) hideCommandPicker(); }, 120));
+}
+// Mobile browsers dispatch blur before click; retain focus until selection has
+// inserted the command or Skill into the textarea.
+$("#command-picker").addEventListener("pointerdown", (event) => event.preventDefault());
+window.addEventListener("resize", () => { if (commandPickerState) positionCommandPicker(commandPickerState.input); });
 $("#back").addEventListener("click", async () => { current = null; page("sessions"); await loadSessions(); });
-$("#new-session").addEventListener("submit", async (event) => { event.preventDefault(); const submit = $("#new-submit"); submit.disabled = true; try { const cwd = selectedWorkspace; if (!selectedAgent) throw new Error("请选择 Agent"); if (!cwd) throw new Error("请选择或输入工作区"); const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: $("#prompt").value, messageId: crypto.randomUUID() }) }); await openSession(result.sessionId); } catch (error) { toast(error.message); } finally { submit.disabled = false; } });
-function renderAttachments() { const preview = $("#attachment-preview"); preview.hidden = !activeAttachments.length; preview.innerHTML = activeAttachments.map((file, index) => `<div class="attachment-chip">${file.kind === "image" ? `<img src="${file.preview}" alt="">` : "<span>FILE</span>"}<strong>${escapeHtml(file.name)}</strong><button type="button" data-remove-attachment="${index}" aria-label="移除附件">×</button></div>`).join(""); }
-async function selectAttachments(files) { const next = Array.from(files || []).slice(0, 4 - activeAttachments.length); for (const file of next) { if (file.size > 4 * 1024 * 1024) throw new Error(`${file.name} 超过 4MB 限制`); const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",").at(-1)); reader.onerror = reject; reader.readAsDataURL(file); }); activeAttachments.push({ name: file.name, mimeType: file.type || "text/plain", data, kind: file.type.startsWith("image/") ? "image" : "text", preview: file.type.startsWith("image/") ? URL.createObjectURL(file) : "" }); } renderAttachments(); }
+function renderComposerAttachments(items, preview, target = "active") {
+  preview.hidden = !items.length;
+  preview.innerHTML = items.map((file, index) => `<div class="attachment-chip">${file.kind === "image" ? `<img src="${escapeHtml(file.preview)}" alt="">` : `<span>${escapeHtml(attachmentIcon(file))}</span>`}<strong>${escapeHtml(file.name)}</strong><button type="button" data-remove-attachment="${index}" data-attachment-target="${target}" aria-label="移除附件">×</button></div>`).join("");
+}
+function renderAttachments() { renderComposerAttachments(activeAttachments, $("#attachment-preview")); }
+async function selectAttachments(files, target = activeAttachments, preview = $("#attachment-preview"), targetName = "active") {
+  const next = Array.from(files || []).slice(0, 8 - target.length);
+  for (const file of next) {
+    if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10MB 限制`);
+    const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",").at(-1)); reader.onerror = reject; reader.readAsDataURL(file); });
+    const image = file.type.startsWith("image/"); const text = file.type.startsWith("text/") || /\.(txt|md|json|ya?ml|js|ts|py|go|rs|java|c|cpp|h|css|html|sql|sh)$/i.test(file.name);
+    target.push({ name: file.name, mimeType: file.type || "application/octet-stream", data, kind: image ? "image" : text ? "text" : "file", preview: image ? URL.createObjectURL(file) : "" });
+  }
+  renderComposerAttachments(target, preview, targetName);
+}
 $("#attachment-input").addEventListener("change", async (event) => { try { await selectAttachments(event.target.files); } catch (error) { toast(error.message); } finally { event.target.value = ""; } });
-$("#composer").addEventListener("submit", async (event) => { event.preventDefault(); const input = $("#message"); const text = input.value.trim(); if ((!text && !activeAttachments.length) || !current) return; const id = crypto.randomUUID(); const sentAttachments = activeAttachments; input.value = ""; activeAttachments = []; renderAttachments(); $("#send").disabled = true; $("#messages").insertAdjacentHTML("beforeend", renderMessage({ id, role: "user", text: `${text}${text && sentAttachments.length ? "\n" : ""}${sentAttachments.map((file) => `📎 ${file.name}`).join("\n")}` })); $("#connection").textContent = "正在发送"; scrollMessages(); try { await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id }) }); $("#connection").textContent = "正在生成"; input.blur(); } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = text; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); } finally { $("#send").disabled = false; } });
+$("#new-attachment-input").addEventListener("change", async (event) => { try { await selectAttachments(event.target.files, newAttachments, $("#new-attachment-preview"), "new"); } catch (error) { toast(error.message); } finally { event.target.value = ""; } });
+$("#new-session").addEventListener("submit", async (event) => {
+  event.preventDefault(); const submit = $("#new-submit"); submit.disabled = true;
+  try {
+    const cwd = selectedWorkspace; const promptText = $("#prompt").value.trim();
+    if (!selectedAgent) throw new Error("请选择 Agent"); if (!cwd) throw new Error("请选择或输入工作区"); if (!promptText && !newAttachments.length) throw new Error("请输入任务或添加附件");
+    const sent = newAttachments;
+    const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: promptText, attachments: sent.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: crypto.randomUUID() }) });
+    newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview)); await openSession(result.sessionId);
+  } catch (error) { toast(error.message); } finally { submit.disabled = false; }
+});
+$("#composer").addEventListener("submit", async (event) => {
+  event.preventDefault(); const input = $("#message"); const text = input.value.trim(); if ((!text && !activeAttachments.length) || !current) return;
+  const id = crypto.randomUUID(); const sentAttachments = activeAttachments; input.value = ""; activeAttachments = []; renderAttachments(); $("#send").disabled = true;
+  $("#messages").insertAdjacentHTML("beforeend", renderMessage({ id, role: "user", text, attachments: sentAttachments })); $("#connection").textContent = "正在发送"; scrollMessages();
+  try { await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id }) }); $("#connection").textContent = "正在生成"; input.blur(); }
+  catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = text; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
+  finally { $("#send").disabled = false; }
+});
 $("#revoke").addEventListener("click", async () => { if (!confirm("确定撤销这台手机的访问权限？")) return; await api("/mobile/v1/devices/self/revoke", { method: "POST" }); eventLoopStopped = true; localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(CURSOR_KEY); token = ""; location.reload(); });
 
 function bindSwipe() {

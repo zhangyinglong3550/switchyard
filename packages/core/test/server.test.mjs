@@ -445,6 +445,94 @@ test("server streams Anthropic response when selected upstream is openai_respons
   assert.match(text, /hello from responses/);
 });
 
+test("server restores blank Grok stream tool names from the request tool schemas", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (chunk) => (buf += chunk));
+    req.on("end", () => {
+      assert.equal(req.url, "/v1/chat/completions");
+      const body = JSON.parse(buf);
+      assert.deepEqual(body.tools.map((tool) => tool.function.name), ["run_terminal_command", "read_file"]);
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end([
+        'data: {"id":"chatcmpl_grok","object":"chat.completion.chunk","created":1784976000,"model":"grok-4.5","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"","arguments":"{\\"target_file\\":\\"README.md\\",\\"limit\\":80}"}}]},"finish_reason":"tool_calls"}]}',
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"));
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{
+      id: "xiaoyi-grok",
+      apiFormat: "openai_chat",
+      baseUrl: `http://127.0.0.1:${upPort}/v1`
+    }],
+    models: [{
+      id: "xiaoyi-grok/grok-4.5",
+      providerId: "xiaoyi-grok",
+      upstreamModel: "grok-4.5"
+    }],
+    clients: { grok: { enabled: true, allowedModels: ["*"] } }
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`http://127.0.0.1:${port}/grok/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({
+      model: "xiaoyi-grok/grok-4.5",
+      stream: true,
+      messages: [{ role: "user", content: "读取 README" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "run_terminal_command",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                description: { type: "string" }
+              },
+              required: ["command", "description"]
+            }
+          }
+        },
+        {
+          type: "function",
+          function: {
+            name: "read_file",
+            parameters: {
+              type: "object",
+              properties: {
+                target_file: { type: "string" },
+                limit: { type: "number" }
+              },
+              required: ["target_file"]
+            }
+          }
+        }
+      ]
+    })
+  });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  assert.match(text, /"name":"read_file"/);
+  assert.doesNotMatch(text, /"name":""/);
+});
+
 test("server streams Anthropic tool_use input as json deltas for Claude Code", async (t) => {
   const upstream = http.createServer((req, res) => {
     req.resume();
