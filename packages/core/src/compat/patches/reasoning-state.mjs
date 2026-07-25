@@ -25,6 +25,15 @@ function targeted(ctx) {
   return TARGET_RE.test(haystack(ctx));
 }
 
+function requiresToolCallReasoningPlaceholder(ctx) {
+  // DeepSeek's multi-turn tool path validates historical assistant tool calls
+  // more strictly than its normal text path. In particular, OpenCode Go's
+  // DeepSeek bridge can turn the missing field into a generic Console Go 400.
+  // Keep the placeholder narrowly scoped: other Chat-compatible providers
+  // should not receive synthetic reasoning unless thinking is enabled.
+  return /deepseek/i.test(haystack(ctx));
+}
+
 function hasEnabledThinking(body) {
   if (body?.thinking && typeof body.thinking === "object") return body.thinking.type !== "disabled";
   if (body?.enable_thinking !== undefined) return Boolean(body.enable_thinking);
@@ -76,7 +85,7 @@ export const reasoningStatePatch = {
     "reasoning-state · backfills placeholder reasoning on bare tool_call assistant"
   ],
   match(ctx) { return targeted(ctx); },
-  outbound(body) {
+  outbound(body, ctx) {
     if (!body || !Array.isArray(body.messages)) return body;
     let attachedAny = false;
     let assistantCount = 0;
@@ -90,8 +99,11 @@ export const reasoningStatePatch = {
     if (assistantCount > 0 && hasEnabledThinking(next) && !attachedAny) {
       next = disableThinking(next);
     }
-    // thinking 仍启用时：tool_call 消息若仍无 reasoning，补占位，避免上游 400
-    if (hasEnabledThinking(next)) {
+    // DeepSeek 的多轮 tool-call 历史即使当前轮已为“无法回传历史思考”
+    // 而关闭 thinking，也要求每个 assistant tool_call 带非空 reasoning。
+    // 这正是 OpenCode Go / Console Go 在第二次工具结果后间歇性泛化为
+    // 400 的路径；无需暴露任何兼容选项给用户。
+    if (hasEnabledThinking(next) || requiresToolCallReasoningPlaceholder(ctx)) {
       next = {
         ...next,
         messages: next.messages.map((message) => ensureToolCallReasoningPlaceholder(message))
@@ -100,4 +112,3 @@ export const reasoningStatePatch = {
     return next;
   }
 };
-

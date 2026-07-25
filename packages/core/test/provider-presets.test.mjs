@@ -138,7 +138,7 @@ test("provider presets · KE uses OpenAI chat and preset models without /models"
   assert.equal(byId.get("GLM-5.2").capabilities.images, false);
 });
 
-test("provider presets · Antigravity CLI2API and Sub2API Codex local integrations", () => {
+test("provider presets · Antigravity CLI2API and Sub2API native import integrations", () => {
   const presets = listProviderPresets();
   const byId = new Map(presets.map((preset) => [preset.id, preset]));
 
@@ -153,9 +153,9 @@ test("provider presets · Antigravity CLI2API and Sub2API Codex local integratio
   const sub = byId.get("sub2api-codex");
   assert.ok(sub, "missing sub2api-codex preset");
   assert.equal(sub.apiFormat, "openai_responses");
-  assert.match(sub.baseUrl, /\/v1$/);
-  assert.equal(sub.defaultAuthMode, "api_key");
+  assert.equal(sub.baseUrl, "https://chatgpt.com/backend-api/codex");
+  assert.equal(sub.defaultAuthMode, "account_pool");
+  assert.equal(sub.poolKind, "codex_oauth");
   assert.ok(presetModelHints(sub).has("gpt-5.5"));
   assert.ok(presetModelHints(sub).has("gpt-5.4"));
 });
-

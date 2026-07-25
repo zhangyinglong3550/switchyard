@@ -607,6 +607,21 @@ export function inspectCodexSwitchyardProfile(configPath = codexConfigPath()) {
   };
 }
 
+/**
+ * Return the model currently selected in an active Switchyard-managed Codex
+ * profile.  This is deliberately read-only: Codex persists the selected model
+ * per task, while config.toml records the current replacement selection.
+ */
+export function activeCodexSwitchyardModel(configPath = codexConfigPath()) {
+  const profile = inspectCodexSwitchyardProfile(configPath);
+  if (!profile.active) return "";
+  try {
+    return readTopLevelTomlModel(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    return "";
+  }
+}
+
 function hostPortFromCodexText(text = {}, fallbackHost = "127.0.0.1", fallbackPort = 17888) {
   const source = typeof text === "string" ? text : "";
   const baseUrl = topLevelTomlValue(source, "openai_base_url") || "";

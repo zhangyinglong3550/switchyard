@@ -124,7 +124,7 @@
         <div class="card">
           <div class="table-scroll tall">
             <table class="data" id="providers-table">
-              <thead><tr><th data-col-width="120">标识</th><th data-col-width="120">名称</th><th data-col-width="180">协议</th><th data-col-width="280">Base URL</th><th data-col-width="120">API Key</th><th data-col-width="200">代理 / 兼容</th><th data-col-width="160">余额/用量</th><th data-col-width="72">模型数</th><th data-col-width="100"></th></tr></thead>
+              <thead><tr><th data-col-width="120">标识</th><th data-col-width="120">名称</th><th data-col-width="180">协议</th><th data-col-width="280">Base URL</th><th data-col-width="120">API Key</th><th data-col-width="160">余额/用量</th><th data-col-width="72">模型数</th><th data-col-width="100"></th></tr></thead>
               <tbody id="providers-tbody"></tbody>
             </table>
           </div>
@@ -147,7 +147,7 @@
         <div class="card">
           <div class="table-scroll tall">
             <table class="data" id="models-table">
-              <thead><tr><th data-col-width="220">模型 ID</th><th data-col-width="120">供应商</th><th data-col-width="200">上游</th><th data-col-width="160">别名</th><th data-col-width="200">能力</th><th data-col-width="100"></th></tr></thead>
+              <thead><tr><th data-col-width="220">模型 ID</th><th data-col-width="120">供应商</th><th data-col-width="200">上游</th><th data-col-width="160">别名</th><th data-col-width="100"></th></tr></thead>
               <tbody id="models-tbody"></tbody>
             </table>
           </div>
@@ -194,7 +194,7 @@
           <div class="hd"><h3>模型能力校准</h3><span class="sub" id="diagnostics-model-summary">-</span></div>
           <div class="table-scroll tall">
             <table class="data compact" id="diagnostics-models-table">
-              <thead><tr><th data-col-width="200">模型</th><th data-col-width="120">供应商</th><th data-col-width="180">能力</th><th data-col-width="220">兼容规则</th><th data-col-width="120">客户端可见</th><th data-col-width="100"></th></tr></thead>
+              <thead><tr><th data-col-width="200">模型</th><th data-col-width="120">供应商</th><th data-col-width="180">能力</th><th data-col-width="120">客户端可见</th><th data-col-width="100"></th></tr></thead>
               <tbody id="diagnostics-models-tbody"></tbody>
             </table>
           </div>
@@ -236,6 +236,7 @@
                   <option value="openai_chat">OpenAI Chat</option>
                   <option value="openai_responses">OpenAI Responses</option>
                   <option value="anthropic_messages">Anthropic Messages</option>
+                  <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
                 </select>
               </label>
             </div>
@@ -547,6 +548,54 @@
             </dl>
           </div>
         </div>
+        <div class="card" id="mobile-control-card">
+          <div class="hd">
+            <h3>手机端控制</h3>
+            <span class="sub" id="mobile-control-status">未启用</span>
+          </div>
+          <div class="bd mobile-control-grid">
+            <div>
+              <dl class="kv">
+                <dt>本机地址</dt><dd class="mono" id="mobile-control-url">http://127.0.0.1:17889</dd>
+                <dt>网络边界</dt><dd>仅监听 127.0.0.1，不开放局域网或公网端口。</dd>
+              </dl>
+              <label class="mobile-tailscale-base">Tailscale HTTPS 地址
+                <input class="field mono" id="mobile-tailscale-base" placeholder="https://你的设备.tailnet.ts.net">
+                <span class="tiny muted">仅用于生成手机配对链接；服务仍只监听本机。请不要使用 Funnel。</span>
+              </label>
+              <div class="actions mobile-control-actions">
+                <button class="btn primary" id="btn-mobile-control-toggle" type="button">启用手机端</button>
+                <button class="btn" id="btn-mobile-pair" type="button" disabled>生成配对链接</button>
+              </div>
+            </div>
+            <div class="callout compact">
+              <div class="callout-title">Tailscale Serve 安全连接</div>
+              <div class="callout-body">
+                启用后在终端运行 <code>tailscale serve --bg 17889</code>，把生成的 HTTPS 地址填到左侧，手机加入同一 Tailnet，
+                再使用 Tailscale 提供的 HTTPS 地址打开页面。不要使用 Funnel。
+              </div>
+            </div>
+            <div class="mobile-pairing" id="mobile-pairing" hidden>
+              <div class="tiny muted">一次性配对链接（10 分钟有效）</div>
+              <div class="input-with-button">
+                <input class="field mono" id="mobile-pairing-url" readonly>
+                <button class="btn" id="btn-mobile-pair-copy" type="button">复制</button>
+              </div>
+              <div class="tiny muted" id="mobile-pairing-hint">
+                已使用上方 Tailscale HTTPS 地址自动生成；若未填写则显示本机链接，仅可在电脑本机使用。
+              </div>
+            </div>
+            <div>
+              <div class="mobile-devices-head">
+                <strong>已配对设备</strong>
+                <button class="btn" id="btn-mobile-devices-refresh" type="button">刷新</button>
+              </div>
+              <div id="mobile-devices" class="mobile-device-list">
+                <div class="empty-state">启用后可管理配对设备</div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="card">
           <div class="hd">
             <h3>Agent 核心文件</h3>
@@ -746,6 +795,7 @@
           <option value="openai_chat">OpenAI Chat Completions（最通用）</option>
           <option value="openai_responses">OpenAI Responses（Codex / 新版 OpenAI）</option>
           <option value="anthropic_messages">Anthropic Messages（Claude / Claude Code）</option>
+          <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
         </select>
       </label>
       <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
@@ -779,18 +829,6 @@
         <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，该供应商下的模型只会出现在这些 Agent 的模型列表里。</div>
         <div class="capabilities client-scope-grid" id="provider-visible-clients"></div>
       </div>
-      <details class="callout-details compact">
-        <summary class="callout-title">Provider 兼容包</summary>
-        <div class="callout-body">兼容包会强制启用一组 provider/model 定向补丁；可在模型里继续单独补充。</div>
-        <div class="compat-pack-grid" id="provider-compat-packs"></div>
-      </details>
-      <details class="callout-details compact">
-        <summary class="callout-title">推荐兼容规则</summary>
-        <div class="callout-body">根据 provider id、Base URL、协议和已知厂商适配经验给出建议；点击应用后才会写入上面的兼容包选择。</div>
-        <div class="compat-recommendation-list" id="provider-compat-recommendations">
-          <div class="tiny muted">输入供应商信息后显示推荐</div>
-        </div>
-      </details>
       <div class="row" id="provider-key-fields">
         <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
         <label>Inline Key（本机保存）
@@ -802,6 +840,32 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-sub2api-panel" style="display:none;">
+        <div class="callout-title">Sub2API 账号备份导入</div>
+        <div class="callout-body">
+          直接把 <span class="mono">sub2api-data</span> 备份导入到 Switchyard 的本机 Codex 账号池，由 Switchyard 自己轮询、故障换号并调用模型。
+          <strong>不需要安装或运行 Sub2API，也不需要 API 地址、普通 API Key 或 Admin API Key。</strong>
+        </div>
+        <details class="callout-details compact" open style="margin-top:12px;">
+          <summary class="callout-title">批量导入 Sub2API 账号备份</summary>
+          <div class="callout-body">
+            选择一个或多个 JSON 后先在本机合并校验，再写入 <code>~/.switchyard/pools/</code>。
+            凭据不会写入供应商配置、请求日志或页面预览；支持 OpenAI OAuth 和 Agent Identity 账号。
+          </div>
+          <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+            <button class="btn" type="button" id="btn-sub2api-data-import-select">选择备份 JSON…</button>
+            <button class="btn" type="button" id="btn-sub2api-data-import-reselect" style="display:none;">重新选择</button>
+          </div>
+          <div class="import-summary" id="sub2api-data-import-summary"></div>
+          <div class="tiny muted">
+            导入后保存当前供应商即可。从 Sub2API 导出的代理配置不会被复用；如需代理，请在本供应商的「代理地址」单独配置。
+          </div>
+          <pre class="log-pane import-run-output" id="sub2api-data-import-output">尚未选择备份文件</pre>
+          <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+            <button class="btn primary" type="button" id="btn-sub2api-data-import-apply" disabled>导入到 Switchyard 账号池</button>
+          </div>
+        </details>
+      </div>
       <div class="callout" id="provider-codex-oauth-panel" style="display:none;">
         <div class="callout-title">Codex OAuth（本机 ChatGPT 登录）</div>
         <div class="callout-body">
@@ -1062,18 +1126,6 @@
         <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，会在供应商可见范围基础上进一步收窄。</div>
         <div class="capabilities client-scope-grid" id="model-visible-clients"></div>
       </div>
-      <details class="callout-details compact">
-        <summary class="callout-title">模型兼容包</summary>
-        <div class="callout-body">用于同一 Provider 下只有部分模型需要特殊补丁的场景。</div>
-        <div class="compat-pack-grid" id="model-compat-packs"></div>
-      </details>
-      <details class="callout-details compact">
-        <summary class="callout-title">推荐兼容规则</summary>
-        <div class="callout-body">根据供应商、上游模型名和协议给出模型级建议；点击应用后才会写入上面的兼容包选择。</div>
-        <div class="compat-recommendation-list" id="model-compat-recommendations">
-          <div class="tiny muted">选择供应商并填写模型后显示推荐</div>
-        </div>
-      </details>
       <div class="capabilities">
         <label><input type="checkbox" name="cap-text" checked> 文本</label>
         <label><input type="checkbox" name="cap-tools" checked> 工具调用</label>

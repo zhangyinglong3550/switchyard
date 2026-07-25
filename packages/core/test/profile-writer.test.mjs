@@ -1204,3 +1204,22 @@ test("grok profile · auto-refresh when managed; skip when not", () => {
   assert.match(text, /\[model\."sy-b--m2"\]/);
   assert.match(text, /default = "sy-a--m1"/);
 });
+
+test("codex profile · reads the active Switchyard model for deleted-task recovery", () => {
+  const file = pw.codexConfigPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, [
+    '# managed-by: managed-by-switchyard',
+    'model_provider = "custom"',
+    'model = "replacement/gpt-5.6-terra"',
+    '',
+    '[model_providers.custom]',
+    'name = "Switchyard"',
+    'base_url = "http://127.0.0.1:17888/codex/v1"',
+    ''
+  ].join("\n"), "utf8");
+  assert.equal(pw.activeCodexSwitchyardModel(), "replacement/gpt-5.6-terra");
+
+  fs.writeFileSync(file, 'model_provider = "openai"\nmodel = "other/model"\n', "utf8");
+  assert.equal(pw.activeCodexSwitchyardModel(), "");
+});

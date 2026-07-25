@@ -112,6 +112,44 @@ test("compat rules expose automatic and forced activation metadata", () => {
   resetPatches();
 });
 
+test("compat registry automatically applies matching patches without persisted compat packs", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const out = applyOutbound(
+    {
+      messages: [{ role: "developer", content: "Keep this instruction." }],
+      reasoning: { effort: "high" }
+    },
+    {
+      provider: { id: "deepseek", apiFormat: "openai_chat", baseUrl: "https://api.deepseek.com/v1" },
+      model: { id: "deepseek/deepseek-v4-pro", providerId: "deepseek", upstreamModel: "deepseek-v4-pro" },
+      clientId: "claude-code"
+    }
+  );
+  assert.equal(out.messages[0].role, "system");
+  assert.equal(out.thinking?.type, "enabled");
+  assert.equal(out.reasoning_effort, "high");
+  resetPatches();
+});
+
+test("provider presets activate their compatibility defaults automatically", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const active = activePatchDescriptors({
+    provider: {
+      id: "xai",
+      presetId: "xai",
+      apiFormat: "openai_chat",
+      baseUrl: "https://api.x.ai/v1"
+    },
+    model: { id: "xai/grok-4", providerId: "xai", upstreamModel: "grok-4" },
+    direction: "outbound"
+  });
+  const reasoning = active.find((rule) => rule.id === "reasoning-state");
+  assert.equal(reasoning?.source, "auto");
+  resetPatches();
+});
+
 test("tool-history-adjacent does not auto-activate for native Anthropic upstreams", () => {
   resetPatches();
   registerBuiltinPatches();

@@ -1,6 +1,7 @@
 // Google OAuth refresh（Antigravity）
-// client_id / client_secret 不进仓库：通过环境变量注入。
-// 与 CLIProxyAPI / Antigravity 桌面端使用同一公开 OAuth 应用时，请自行配置：
+// 常规 CPA 导入会优先复用 ~/.cli-proxy-api 中已刷新的 access token，
+// 不会走到这里，也不需要 OAuth client 配置。
+// 仅当用户导入了脱离 CPA 的原始 refresh_token 时，才可用自管 OAuth client：
 //   SWITCHYARD_ANTIGRAVITY_CLIENT_ID
 //   SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET
 import { ProxyAgent } from "undici";
@@ -43,7 +44,7 @@ export async function refreshGoogleTokens(refreshToken, {
   const csec = String(clientSecret || "").trim();
   if (!cid || !csec) {
     throw new Error(
-      "google token refresh: 请设置 SWITCHYARD_ANTIGRAVITY_CLIENT_ID / SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET（Antigravity 公开 OAuth client，见 docs/ACCOUNT-POOL-MVP.zh-CN.md）"
+      "google token refresh: 本机 Antigravity 凭证未提供可用 access token。请先在 Antigravity / CLIProxyAPI 重新登录并刷新本机凭证；只有脱离本机凭证独立托管 refresh_token 时，才需要设置 SWITCHYARD_ANTIGRAVITY_CLIENT_ID / SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET"
     );
   }
   const key = `${tokenEndpoint}::${rt}`;

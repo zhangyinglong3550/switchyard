@@ -39,6 +39,50 @@ export function accountFromAntigravityJson(raw, source = "cpa-antigravity") {
   });
 }
 
+/**
+ * 读取 CPA 正在维护的 Antigravity 凭证。
+ *
+ * Switchyard 的原生 Antigravity 池可以直接使用 CPA 已刷新过的 access token，
+ * 避免为同一批 Google refresh token 复制/硬编码 OAuth client_secret。
+ * 仅接受与当前池账号邮箱一致的文件，且不向调用方暴露原始 JSON。
+ */
+export function readAntigravityCpaCredential(account, {
+  authDir = process.env.SWITCHYARD_ANTIGRAVITY_AUTH_DIR || path.join(os.homedir(), ".cli-proxy-api")
+} = {}) {
+  const source = String(account?.source || "");
+  if (!source.startsWith("cpa-file:") && source !== "cpa-antigravity") return null;
+  const dir = expandHome(authDir);
+  const names = new Set();
+  const fromSource = path.basename(source.slice("cpa-file:".length));
+  if (fromSource && fromSource.endsWith(".json")) names.add(fromSource);
+  const email = String(account?.email || "").trim();
+  if (email) names.add(`antigravity-${email}.json`);
+
+  for (const name of names) {
+    const file = path.join(dir, name);
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (String(raw?.type || "").toLowerCase() !== "antigravity") continue;
+      const sourceEmail = String(raw.email || "").trim();
+      if (email && sourceEmail && sourceEmail.toLowerCase() !== email.toLowerCase()) continue;
+      const accessToken = String(raw.access_token || raw.accessToken || "").trim();
+      if (!accessToken) continue;
+      return {
+        accessToken,
+        refreshToken: String(raw.refresh_token || raw.refreshToken || "").trim(),
+        tokenType: String(raw.token_type || raw.tokenType || "Bearer").trim() || "Bearer",
+        expiresAt: raw.expired || raw.expires_at || raw.expiresAt || "",
+        projectId: String(raw.project_id || raw.projectId || "").trim(),
+        email: sourceEmail || email
+      };
+    } catch {
+      // 单个本地文件损坏不应阻断其他账号轮询。
+    }
+  }
+  return null;
+}
+
 /** 是否像 Codex/ChatGPT OAuth 凭证（排除 antigravity/xai 等同目录其它类型） */
 export function looksLikeCodexAuthJson(raw, fileName = "") {
   if (!raw || typeof raw !== "object") return false;
@@ -284,7 +328,10 @@ export function importAntigravityFromCpaDirs(providerId, {
   dirs = [path.join(os.homedir(), ".cli-proxy-api")],
   skipDuplicates = true,
   home,
-  syncToCliproxy = true
+  // Native CCA direct mode reads existing CPA credentials but never writes them
+  // back. Keep the opt-in switch solely for the explicit legacy CLIProxyAPI
+  // export action.
+  syncToCliproxy = false
 } = {}) {
   const files = collectJsonFiles(dirs, { prefix: "antigravity-" });
   const extra = collectJsonFiles(dirs).filter((f) => !path.basename(f).startsWith("antigravity-"));
@@ -381,8 +428,8 @@ export function importCodexFromPaths(providerId, {
 }
 
 /**
- * 把 Switchyard antigravity 池账号同步回 CLIProxyAPI auth-dir，供 8317 多号轮询。
- * Antigravity 完整协议翻译仍由 CLIProxyAPI 完成。
+ * 把 Switchyard antigravity 池账号导出到 CLIProxyAPI auth-dir，供明确选择
+ * 外挂 CLIProxyAPI 模式的用户使用。原生 Antigravity provider 不会调用此函数。
  */
 export function syncAntigravityPoolToCliproxyDir(providerId, {
   authDir = path.join(os.homedir(), ".cli-proxy-api"),

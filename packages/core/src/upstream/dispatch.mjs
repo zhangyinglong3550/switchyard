@@ -14,14 +14,23 @@
 //   richest tool-calling surface, and both Responses and Anthropic Messages map
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
-import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
+import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
+import {
+  antigravityPayloadToChatResponse,
+  antigravitySessionKey,
+  antigravityStreamToChatResponse,
+  buildAntigravityEnvelope,
+  clearAntigravityReplay
+} from "../antigravity-adapter.mjs";
 import { applyOutbound, applyInbound } from "../compat/index.mjs";
 import { rectifyUpstreamRequest } from "../compat/runtime-rectifier.mjs";
+import { transformOpenCodeTextToolCalls } from "../opencode-text-tool-calls.mjs";
 import {
   bindProviderToAccount,
+  clearAccountAffinity,
   isAccountPoolProvider,
   markAccountFailure,
   markAccountSuccess,
@@ -73,7 +82,8 @@ async function runWithAccountPool(provider, opts, runner) {
   for (let attempt = 0; attempt < ACCOUNT_POOL_MAX_ATTEMPTS; attempt += 1) {
     const picked = await pickAndRefreshAccount(provider, {
       excludeIds,
-      fetchImpl: opts?.fetchImpl
+      fetchImpl: opts?.fetchImpl,
+      sessionKey: opts?.accountSessionKey
     });
     if (!picked.ok) {
       lastError = picked.error || "account pool unavailable";
@@ -90,6 +100,7 @@ async function runWithAccountPool(provider, opts, runner) {
           error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`
         });
         lastResult = withAccountMeta(result, account);
+        clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
         // 401：同号已在 pick 时 refresh；仍失败则换号
         continue;
       }
@@ -103,6 +114,7 @@ async function runWithAccountPool(provider, opts, runner) {
           status: result.upstream.status,
           payload: await readJsonResponse(result.upstream).catch(() => ({ error: `status ${result.upstream.status}` }))
         }, account);
+        clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
         continue;
       }
       markAccountSuccess(provider, account);
@@ -110,6 +122,7 @@ async function runWithAccountPool(provider, opts, runner) {
     } catch (err) {
       const message = err?.message || String(err);
       markAccountFailure(provider, account, { status: 0, error: message });
+      clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
       lastError = message;
       lastResult = withAccountMeta({
         kind: "error",
@@ -132,8 +145,12 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   // （默认 3×3=9），对 5xx/限流场景反而加剧压力。故账号池供应商关闭外层重试，
   // 由池内换号兜底；非池供应商保留外层重试（默认最多 3 次）。
   const retryOpts = isAccountPoolProvider(provider) ? { ...opts, retry: { enabled: false } } : opts;
+  const accountSessionKey = provider?.poolKind === "antigravity_oauth"
+    ? antigravitySessionKey(chatBody, opts)
+    : "";
+  const poolOpts = accountSessionKey ? { ...opts, accountSessionKey } : opts;
   return withDispatchRetry(provider, opts.model, retryOpts, () =>
-    runWithAccountPool(provider, opts, (activeProvider, account) =>
+    runWithAccountPool(provider, poolOpts, (activeProvider, account) =>
       dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
     )
   );
@@ -149,10 +166,63 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
   const requestOverrides = collectRequestOverrides(provider, ctxModel);
   const upstreamOptsWithOverrides = applyHeaderOverrides(upstreamOpts, requestOverrides);
 
+  if (apiFormat === "antigravity") {
+    const built = buildAntigravityEnvelope(provider, upstreamModel, outbound, upstreamOptsWithOverrides);
+    const upstream = await callAntigravity(provider, built.envelope, {
+      ...upstreamOptsWithOverrides,
+      stream
+    });
+    if (stream) {
+      if (!upstream.ok) return withAccountMeta({ kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+      const chatStream = antigravityStreamToChatResponse(upstream, upstreamModel, built);
+      return withAccountMeta({ kind: "stream", upstream: chatStream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    }
+    const raw = await readJsonResponse(upstream);
+    if (!upstream.ok) {
+      const message = raw?.error?.message || raw?.error || "";
+      if (/signature|invalid_argument|invalid argument/i.test(String(message))) {
+        clearAntigravityReplay(built.wireModel, built.sessionId);
+      }
+      return withAccountMeta({ kind: "error", status: upstream.status, payload: raw, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    }
+    try {
+      const payload = antigravityPayloadToChatResponse(raw, upstreamModel, built);
+      return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(payload, ctx), rawPayload: raw, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    } catch (err) {
+      return withAccountMeta({
+        kind: "error",
+        status: 502,
+        payload: { error: err?.message || String(err) },
+        requestOverrides: requestOverrideSummary(requestOverrides)
+      }, account);
+    }
+  }
+
   if (apiFormat === "openai_chat") {
     const upstreamBody = applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides);
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
-    if (stream) return withAccountMeta({ kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (stream) {
+      const rectifiedStream = await retryFailedStreamWithRectifier({
+        upstream,
+        body: upstreamBody,
+        apiFormat,
+        ctx,
+        send: (body) => callOpenAIChat(provider, body, upstreamOptsWithOverrides)
+      });
+      const normalizedUpstream = rectifiedStream.upstream.ok && isOpenCodeGoDeepSeek(provider, upstreamModel)
+        ? transformOpenCodeTextToolCalls(rectifiedStream.upstream, {
+          tools: outbound.tools,
+          restoreToolName: (name) => ctx._switchyardToolNameSafeToRaw?.get(name) || name
+        })
+        : rectifiedStream.upstream;
+      return withAccountMeta({
+        kind: "stream",
+        upstream: normalizedUpstream,
+        rectifiers: rectifiedStream.rectifiers,
+        errorClass: rectifiedStream.errorClass,
+        requestOverrides: requestOverrideSummary(requestOverrides)
+      }, account);
+    }
     const maybeRetry = await readOrRetryRectified({
       upstream,
       body: upstreamBody,
@@ -423,6 +493,72 @@ async function readOrRetryRectified({ upstream, body, apiFormat, ctx, send }) {
   };
 }
 
+// A stream that failed before its headers/body became a usable SSE stream is
+// safe to retry: nothing has been emitted to the client, so a retry cannot
+// duplicate text or a tool call. Keep this separate from readOrRetryRectified
+// because the normal stream path must return a Response for the server to
+// pipe, while failed error bodies have already been consumed for inspection.
+async function retryFailedStreamWithRectifier({ upstream, body, apiFormat, ctx, send }) {
+  if (upstream.ok) return { upstream, rectifiers: [], errorClass: "" };
+
+  let activeUpstream = upstream;
+  let activeBody = body;
+  const rectifiers = [];
+  let errorClass = "";
+
+  // Both fallbacks are only sent before the downstream receives any upstream
+  // bytes. The first retains concise descriptions; the second preserves every
+  // tool name/schema field but removes descriptions, which keeps very large
+  // Codex tool manifests below fragile OpenCode Go backend limits.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const payload = await readJsonResponse(activeUpstream);
+    const rectified = rectifyUpstreamRequest({
+      apiFormat,
+      body: activeBody,
+      payload,
+      status: activeUpstream.status,
+      ctx: { ...ctx, runtimeRectifierAttempt: attempt }
+    });
+    errorClass = rectified.errorClass || errorClass;
+    if (!rectified.applied) {
+      return {
+        upstream: jsonResponseFromPayload(payload, activeUpstream.status),
+        rectifiers,
+        errorClass
+      };
+    }
+
+    activeBody = rectified.body;
+    activeUpstream = await send(activeBody);
+    const rectifier = {
+      ...rectified.action,
+      retryStatus: activeUpstream.status,
+      retryOk: activeUpstream.ok
+    };
+    rectifiers.push(rectifier);
+    if (activeUpstream.ok) {
+      return {
+        upstream: activeUpstream,
+        rectifiers,
+        errorClass: errorClass || rectifier.errorClass || ""
+      };
+    }
+  }
+
+  return {
+    upstream: activeUpstream,
+    rectifiers,
+    errorClass
+  };
+}
+
+function jsonResponseFromPayload(payload, status) {
+  return new Response(JSON.stringify(payload ?? { error: `status ${status || 0}` }), {
+    status: Number(status) || 502,
+    headers: { "Content-Type": "application/json; charset=utf-8" }
+  });
+}
+
 export function stripInternalFieldsDeep(value, path = []) {
   if (Array.isArray(value)) return value.map((item) => stripInternalFieldsDeep(item, path));
   if (!value || typeof value !== "object") return value;
@@ -433,6 +569,11 @@ export function stripInternalFieldsDeep(value, path = []) {
     out[key] = stripInternalFieldsDeep(item, [...path, key]);
   }
   return out;
+}
+
+function isOpenCodeGoDeepSeek(provider, upstreamModel) {
+  if (String(provider?.id || "").toLowerCase() !== "opencode-go") return false;
+  return /deepseek/i.test(String(upstreamModel || ""));
 }
 
 function effectiveProxyUrl(provider, override) {

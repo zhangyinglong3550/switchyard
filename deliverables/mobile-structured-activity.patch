@@ -1,0 +1,656 @@
+diff --git a/apps/desktop/src/mobile-control/message-parts.mjs b/apps/desktop/src/mobile-control/message-parts.mjs
+new file mode 100644
+index 0000000..2e2f892
+--- /dev/null
++++ b/apps/desktop/src/mobile-control/message-parts.mjs
+@@ -0,0 +1,70 @@
++const TOOL_STATUS = new Map([
++  ["pending", "pending"], ["queued", "pending"], ["running", "running"], ["in_progress", "running"],
++  ["completed", "completed"], ["success", "completed"], ["succeeded", "completed"],
++  ["failed", "failed"], ["error", "failed"], ["cancelled", "cancelled"], ["canceled", "cancelled"],
++  ["waiting_for_approval", "waiting_for_approval"], ["approval", "waiting_for_approval"]
++]);
++
++export function toolStatus(value, fallback = "completed") {
++  const raw = String(value?.status || value?.type || value || "").toLowerCase();
++  return TOOL_STATUS.get(raw) || (raw.includes("fail") || raw.includes("error") ? "failed" : fallback);
++}
++
++export function textValue(value, maxLength = 20_000) {
++  if (value === null || value === undefined) return "";
++  if (typeof value === "string") return value.slice(0, maxLength);
++  if (typeof value === "number" || typeof value === "boolean") return String(value);
++  if (Array.isArray(value)) return value.map((item) => textValue(item, maxLength)).filter(Boolean).join("\n").slice(0, maxLength);
++  if (typeof value === "object") {
++    if (typeof value.text === "string") return value.text.slice(0, maxLength);
++    if (typeof value.output_text === "string") return value.output_text.slice(0, maxLength);
++    if (typeof value.content === "string") return value.content.slice(0, maxLength);
++    try { return JSON.stringify(value, null, 2).slice(0, maxLength); } catch { return String(value).slice(0, maxLength); }
++  }
++  return String(value).slice(0, maxLength);
++}
++
++function parseArguments(value) {
++  if (typeof value !== "string") return value;
++  try { return JSON.parse(value); } catch { return value; }
++}
++
++export function toolFrom(value = {}, fallbackStatus = "completed") {
++  const state = value.state && typeof value.state === "object" ? value.state : {};
++  const input = value.input ?? value.arguments ?? value.args ?? value.rawInput ?? state.input ?? value.action ?? null;
++  const parsed = parseArguments(input);
++  const commandValue = value.command ?? parsed?.command ?? parsed?.cmd ?? "";
++  const command = Array.isArray(commandValue) ? commandValue.join(" ") : commandValue;
++  const output = value.output ?? value.result ?? value.aggregated_output ?? value.rawOutput ?? state.output ?? state.metadata?.output ?? "";
++  const error = value.error ?? state.error ?? "";
++  const name = value.name || value.tool || value.toolName || value.kind?.tool_type || value.type || "工具调用";
++  const title = value.title || state.title || state.input?.title || state.metadata?.description || "";
++  return {
++    id: String(value.callId || value.call_id || value.callID || value.toolCallId || value.tool_call_id || value.id || ""),
++    name: String(name || "工具调用"),
++    title: String(title || ""),
++    command: textValue(command, 8_000),
++    arguments: textValue(parsed, 12_000),
++    status: toolStatus(state.status || value.status, error ? "failed" : fallbackStatus),
++    output: textValue(output, 20_000),
++    error: textValue(error, 8_000)
++  };
++}
++
++export function toolMessage(tool, text = "") {
++  const normalized = toolFrom(tool);
++  return {
++    role: "tool",
++    kind: "tool",
++    text: String(text || normalized.title || normalized.name || "工具调用"),
++    tool: normalized
++  };
++}
++
++export function mergeTool(target, next) {
++  const merged = { ...(target || {}) };
++  for (const [key, value] of Object.entries(next || {})) {
++    if (value !== "" && value !== null && value !== undefined) merged[key] = value;
++  }
++  return merged;
++}
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/dto.mjs b/apps/desktop/src/mobile-control/dto.mjs
+index 7b474cb..5fcb2b3 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/dto.mjs
++++ b/apps/desktop/src/mobile-control/dto.mjs
+@@ -38,7 +38,7 @@ const EVENT_TYPES = new Set([
+   "error"
+ ]);
+ 
+-function cleanText(value, maxLength = 4000) {
++export function cleanMobileText(value, maxLength = 4000) {
+   return String(value || "")
+     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+@@ -49,7 +49,7 @@ function cleanText(value, maxLength = 4000) {
+ function projectName(value) {
+   const text = String(value || "").trim();
+   if (!text) return "";
+-  return cleanText(path.basename(text), 120);
++  return cleanMobileText(path.basename(text), 120);
+ }
+ 
+ function projectCapabilities(value) {
+@@ -61,16 +61,33 @@ function projectCapabilities(value) {
+   );
+ }
+ 
++function projectTool(value) {
++  if (!value || typeof value !== "object") return null;
++  const status = ["pending", "running", "waiting_for_approval", "completed", "failed", "cancelled"].includes(value.status)
++    ? value.status
++    : "completed";
++  return {
++    id: cleanMobileText(value.id || "", 240),
++    name: cleanMobileText(value.name || "工具调用", 160),
++    title: cleanMobileText(value.title || "", 500),
++    command: cleanMobileText(value.command || "", 8_000),
++    arguments: cleanMobileText(value.arguments || "", 12_000),
++    status,
++    output: cleanMobileText(value.output || "", 20_000),
++    error: cleanMobileText(value.error || "", 8_000)
++  };
++}
++
+ export function projectMobileSession(row = {}, overlay = {}) {
+   const state = SESSION_STATES.has(row.state) ? row.state : "completed";
+   const updatedAt = row.updatedAt || row.mtime || null;
+   return {
+     id: String(row.id || ""),
+     agent: String(row.agent || row.agentId || ""),
+-    title: cleanText(overlay.title || row.title || row.name || row.id || "未命名任务", 200),
++    title: cleanMobileText(overlay.title || row.title || row.name || row.id || "未命名任务", 200),
+     state,
+     updatedAt: updatedAt ? String(updatedAt) : null,
+-    model: cleanText(overlay.model || row.model || "", 160),
++    model: cleanMobileText(overlay.model || row.model || "", 160),
+     project: projectName(row.project || row.directory || row.cwd || ""),
+     pinned: Boolean(overlay.pinned),
+     archived: Boolean(overlay.archived ?? row.archived),
+@@ -85,6 +102,7 @@ export function projectMobileEvent(event = {}) {
+     type: EVENT_TYPES.has(event.type) ? event.type : "status",
+     role: ["user", "assistant", "tool", "system"].includes(event.role) ? event.role : null,
+     createdAt: event.createdAt ? String(event.createdAt) : null,
+-    summary: cleanText(event.summary || "", 4000)
++    summary: cleanMobileText(event.summary || "", 4000),
++    ...(event.tool ? { tool: projectTool(event.tool) } : {})
+   };
+ }
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/session-registry.mjs b/apps/desktop/src/mobile-control/session-registry.mjs
+index c614dda..48b78d5 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/session-registry.mjs
++++ b/apps/desktop/src/mobile-control/session-registry.mjs
+@@ -43,10 +43,12 @@ function visibleModels(config, agentId) {
+ 
+ function projectMessages(messages = []) {
+   return messages.slice(-500).map((message) => ({
++    id: message.id ? String(message.id).slice(0, 240) : null,
+     role: ["user", "assistant", "tool", "system"].includes(message.role) ? message.role : "assistant",
+     text: String(message.text || "").slice(0, 20_000),
+     kind: String(message.kind || "message"),
+-    timestamp: message.timestamp || null
++    timestamp: message.timestamp || null,
++    tool: projectMobileEvent({ type: "tool", tool: message.tool }).tool
+   }));
+ }
+ 
+@@ -150,7 +152,8 @@ export function createSessionRegistry({
+         sessionId: mobileSessionId,
+         type: event.type,
+         summary: event.summary,
+-        role: event.role
++        role: event.role,
++        tool: event.tool
+       }));
+       if (["completed", "failed", "cancelled", "canceled"].includes(String(event.summary || "").toLowerCase())) {
+         // 租约自然过期是兜底；运行时明确终态时不强行猜测 owner。
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/codex-runtime.mjs b/apps/desktop/src/mobile-control/codex-runtime.mjs
+index 00147f3..932ace1 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/codex-runtime.mjs
++++ b/apps/desktop/src/mobile-control/codex-runtime.mjs
+@@ -3,6 +3,7 @@ import os from "node:os";
+ import path from "node:path";
+ import { spawn as spawnChild } from "node:child_process";
+ import { scanCodexSessions } from "./local-session-scan.mjs";
++import { mergeTool, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
+ 
+ const CAPABILITIES = Object.freeze({
+   sendMessage: true,
+@@ -94,12 +95,8 @@ function normalizeItem(item = {}) {
+   if (type.toLowerCase().includes("reasoning") || type.toLowerCase().includes("thought")) {
+     return { role: "assistant", text: item.text || contentText(item.content), kind: "thinking" };
+   }
+-  if (type.toLowerCase().includes("tool") || type.toLowerCase().includes("command")) {
+-    return {
+-      role: "tool",
+-      text: item.title || item.name || item.command || "工具调用",
+-      kind: type
+-    };
++  if (type === "function_call" || type === "custom_tool_call" || type.toLowerCase().includes("tool") || type.toLowerCase().includes("command")) {
++    return toolMessage(item, item.title || item.name || item.command || "工具调用");
+   }
+   const text = item.text || contentText(item.content);
+   return text ? { role: item.role || "assistant", text, kind: type || "message" } : null;
+@@ -146,34 +143,46 @@ export function cleanCodexUserPart(value) {
+ 
+ export function parseCodexRollout(lines) {
+   const messages = [];
++  const toolById = new Map();
+   for (const line of lines) {
+     try {
+       const entry = JSON.parse(line);
+       if (entry.type !== "response_item") continue;
+       const item = entry.payload || {};
+-      if (item.type === "message") {
++      const type = String(item.type || "");
++      if (type === "message") {
+         const role = item.role === "user" ? "user" : item.role === "assistant" ? "assistant" : "";
+         if (!role) continue;
+         for (const part of Array.isArray(item.content) ? item.content : []) {
+-          const type = String(part?.type || "text");
++          const partType = String(part?.type || "text");
+           const text = String(part?.text || part?.input_text || part?.output_text || "");
+           if (!text) continue;
+-          if (role === "user" && !type.includes("reasoning")) {
++          if (role === "user" && !partType.includes("reasoning")) {
+             const cleaned = cleanCodexUserPart(text);
+             if (cleaned) messages.push({ role: "user", text: cleaned, kind: "text" });
+             continue;
+           }
+-          messages.push({
+-            role: type.includes("reasoning") ? "assistant" : role,
+-            text,
+-            kind: type.includes("reasoning") ? "thinking" : "text"
+-          });
++          messages.push({ role: partType.includes("reasoning") ? "assistant" : role, text, kind: partType.includes("reasoning") ? "thinking" : "text" });
+         }
+-      } else if (String(item.type || "").includes("reasoning")) {
+-        const text = String(item.text || item.summary || "");
++      } else if (type.includes("reasoning")) {
++        const text = textValue(item.text || item.summary || item.content);
+         if (text) messages.push({ role: "assistant", text, kind: "thinking" });
+-      } else if (String(item.type || "").includes("command") || String(item.type || "").includes("tool")) {
+-        messages.push({ role: "tool", text: String(item.command || item.name || item.title || "工具调用"), kind: "tool" });
++      } else if (type === "function_call_output" || type === "custom_tool_call_output" || type.endsWith("_output")) {
++        const id = String(item.call_id || item.tool_call_id || item.id || "");
++        const existing = toolById.get(id);
++        const patch = toolFrom(item, "completed");
++        if (existing) {
++          existing.tool = mergeTool(existing.tool, patch);
++          existing.text = existing.tool.title || existing.tool.name || existing.text;
++        } else {
++          const message = toolMessage(patch);
++          messages.push(message);
++          if (id) toolById.set(id, message);
++        }
++      } else if (type === "function_call" || type === "custom_tool_call" || type.includes("tool") || type.includes("command") || type === "web_search_call") {
++        const message = toolMessage(toolFrom(item, item.status ? "completed" : "running"));
++        messages.push(message);
++        if (message.tool.id) toolById.set(message.tool.id, message);
+       }
+     } catch {}
+   }
+@@ -256,12 +265,15 @@ export function createCodexRuntime({
+     if (sessionId && String(frame.method || "").match(/completed|failed|cancelled|canceled/)) {
+       activeTurns.delete(sessionId);
+     }
++    const type = eventType(frame.method);
++    const toolSource = params.item || params.command || params.toolCall || params.tool || params;
+     const event = {
+       sessionId,
+-      type: eventType(frame.method),
++      type,
+       summary: eventSummary(frame),
+       runtimeEvent: frame.method,
+-      turnId: turnId || null
++      turnId: turnId || null,
++      ...(type === "tool" ? { tool: toolFrom(toolSource, String(frame.method || "").includes("completed") ? "completed" : "running") } : {})
+     };
+     for (const subscriber of subscribers) {
+       try { subscriber(event, frame); } catch {}
+@@ -382,7 +394,10 @@ export function createCodexRuntime({
+         if (frame.type === "item.completed" || frame.type === "item.updated") {
+           if (item.type === "agent_message" && item.text) emit({ sessionId: sid, type: "message", role: "assistant", summary: String(item.text), runtimeEvent: "codex/cli-agent-message" });
+           else if (String(item.type || "").includes("reasoning") && (item.text || item.summary)) emit({ sessionId: sid, type: "thinking", role: "assistant", summary: String(item.text || item.summary), runtimeEvent: "codex/cli-reasoning" });
+-          else if (String(item.type || "").includes("command") || String(item.type || "").includes("tool")) emit({ sessionId: sid, type: "tool", role: "tool", summary: String(item.command || item.title || item.name || "工具调用"), runtimeEvent: "codex/cli-tool" });
++          else if (String(item.type || "").includes("command") || String(item.type || "").includes("tool")) {
++            const tool = toolFrom(item, frame.type === "item.updated" ? "running" : "completed");
++            emit({ sessionId: sid, type: "tool", role: "tool", summary: String(tool.title || tool.name || "工具调用"), tool, runtimeEvent: "codex/cli-tool" });
++          }
+           else if (item.type === "error") emit({ sessionId: sid, type: "error", summary: String(item.message || "Codex 执行失败"), runtimeEvent: "codex/cli-error" });
+         } else if (frame.type === "turn.completed") emit({ sessionId: sid, type: "status", summary: "completed", runtimeEvent: "codex/cli-completed" });
+       } catch {}
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/claude-runtime.mjs b/apps/desktop/src/mobile-control/claude-runtime.mjs
+index dc3b389..8cda9de 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/claude-runtime.mjs
++++ b/apps/desktop/src/mobile-control/claude-runtime.mjs
+@@ -4,6 +4,7 @@ import path from "node:path";
+ import { randomUUID } from "node:crypto";
+ import { spawn as spawnChild } from "node:child_process";
+ import { scanClaudeSessions } from "./local-session-scan.mjs";
++import { mergeTool, toolFrom, toolMessage } from "./message-parts.mjs";
+ 
+ const CAPABILITIES = Object.freeze({ sendMessage: true, setModel: true, setEffort: true, cancel: true, rename: true, archive: true, unarchive: true, delete: false, fork: false, compact: false, approve: false });
+ 
+@@ -28,6 +29,7 @@ export function cleanClaudeUserText(value) {
+ 
+ export function parseClaudeJsonl(lines) {
+   const rows = [];
++  const toolById = new Map();
+   for (const line of lines) try {
+     const item = JSON.parse(line);
+     if (item.isMeta) continue;
+@@ -36,9 +38,18 @@ export function parseClaudeJsonl(lines) {
+     const content = item.message?.content ?? item.content ?? item.text;
+     if (Array.isArray(content)) {
+       for (const block of content) {
++        if (block?.type === "tool_use") {
++          const message = toolMessage(toolFrom({ ...block, status: "running" }), block.name || "工具调用");
++          rows.push(message);
++          if (message.tool.id) toolById.set(message.tool.id, message);
++          continue;
++        }
+         if (block?.type === "tool_result") {
+-          const text = textOf(block.content ?? block.text);
+-          if (text.trim()) rows.push({ role: "tool", text: text.trim().slice(0, 2000), kind: "tool" });
++          const id = String(block.tool_use_id || "");
++          const existing = toolById.get(id);
++          const patch = toolFrom({ id, name: existing?.tool?.name || "工具调用", output: block.content ?? block.text, status: block.is_error ? "failed" : "completed" });
++          if (existing) existing.tool = mergeTool(existing.tool, patch);
++          else rows.push(toolMessage(patch, textOf(block.content ?? block.text) || "工具结果"));
+           continue;
+         }
+         const text = textOf(block);
+@@ -91,6 +102,14 @@ export function createClaudeRuntime({ overlay, command, env, spawnProcess = spaw
+       const thinking = delta.thinking || ""; const answer = delta.text || "";
+       if (thinking) emit({ sessionId: sid, type: "thinking", role: "assistant", summary: String(thinking), runtimeEvent: "claude/native-thinking" });
+       if (answer) emit({ sessionId: sid, type: "message", role: "assistant", summary: String(answer), runtimeEvent: "claude/native-text" });
++      if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
++        const tool = toolFrom({ ...event.content_block, status: "running" }, "running");
++        emit({ sessionId: sid, type: "tool", role: "tool", summary: tool.name, tool, runtimeEvent: "claude/native-tool" });
++      }
++      if (event.type === "content_block_stop" && event.content_block?.type === "tool_use") {
++        const tool = toolFrom({ ...event.content_block, status: "completed" });
++        emit({ sessionId: sid, type: "tool", role: "tool", summary: tool.name, tool, runtimeEvent: "claude/native-tool" });
++      }
+       if (frame.type === "result") emit({ sessionId: sid, type: frame.is_error ? "error" : "status", summary: frame.is_error ? String(frame.result || "Claude Code 执行失败") : "completed", runtimeEvent: "claude/native-completed" });
+     } catch {} }));
+     await new Promise((resolve, reject) => child.once("error", reject).once("close", (code) => { active.delete(sid); code === 0 ? resolve() : reject(new Error(`Claude Code 执行失败（${code}）：${stderr.trim().slice(-1000) || "无错误输出"}`)); }));
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/acp-runtime.mjs b/apps/desktop/src/mobile-control/acp-runtime.mjs
+index 4ee3989..6e950f6 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/acp-runtime.mjs
++++ b/apps/desktop/src/mobile-control/acp-runtime.mjs
+@@ -1,4 +1,5 @@
+ import path from "node:path";
++import { mergeTool, toolFrom, toolMessage } from "./message-parts.mjs";
+ 
+ const BASE_CAPABILITIES = Object.freeze({
+   sendMessage: true,
+@@ -65,7 +66,15 @@ function updateEvent(frame) {
+     type,
+     summary,
+     role,
+-    runtimeEvent: kind || frame.method
++    runtimeEvent: kind || frame.method,
++    tool: type === "tool" ? toolFrom({
++      id: update.toolCallId,
++      name: update.toolName || update.kind || update.title || "工具调用",
++      title: update.title,
++      input: update.rawInput,
++      output: update.rawOutput,
++      status: update.status || (kind === "tool_call" ? "running" : "completed")
++    }, kind === "tool_call" ? "running" : "completed") : null
+   };
+ }
+ 
+@@ -126,11 +135,14 @@ export function createAcpRuntime({
+       if (["message", "thinking"].includes(event.type) && event.summary) {
+         const rows = messages.get(event.sessionId) || [];
+         const previous = rows.at(-1);
+-        if (previous && previous.role === event.role && previous.kind === event.runtimeEvent) {
+-          previous.text += event.summary;
+-        } else {
+-          rows.push({ role: event.role, text: event.summary, kind: event.type === "thinking" ? "thinking" : event.runtimeEvent });
+-        }
++        if (previous && previous.role === event.role && previous.kind === event.runtimeEvent) previous.text += event.summary;
++        else rows.push({ role: event.role, text: event.summary, kind: event.type === "thinking" ? "thinking" : event.runtimeEvent });
++        messages.set(event.sessionId, rows.slice(-500));
++      } else if (event.type === "tool" && event.tool) {
++        const rows = messages.get(event.sessionId) || [];
++        const previous = event.tool.id ? rows.findLast((row) => row.kind === "tool" && row.tool?.id === event.tool.id) : null;
++        if (previous) previous.tool = mergeTool(previous.tool, event.tool);
++        else rows.push(toolMessage(event.tool, event.summary));
+         messages.set(event.sessionId, rows.slice(-500));
+       }
+       if (event.type === "metadata" || event.type === "usage") return;
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/opencode-runtime.mjs b/apps/desktop/src/mobile-control/opencode-runtime.mjs
+index 378ef2a..e45fa8f 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/opencode-runtime.mjs
++++ b/apps/desktop/src/mobile-control/opencode-runtime.mjs
+@@ -3,6 +3,7 @@ import fs from "node:fs";
+ import os from "node:os";
+ import path from "node:path";
+ import { createAcpClient } from "./acp-client.mjs";
++import { toolFrom, toolMessage } from "./message-parts.mjs";
+ 
+ const STORAGE_ROOT = path.join(os.homedir(), ".local", "share", "opencode", "storage");
+ 
+@@ -92,8 +93,8 @@ function localOpenCodeMessages(sessionId, storageRoot = STORAGE_ROOT) {
+       } else if (part.type === "reasoning" && String(part.text || "").trim()) {
+         rows.push({ role: "assistant", text: String(part.text), kind: "thinking" });
+       } else if (part.type === "tool") {
+-        const title = part.state?.input?.title || part.state?.input?.filePath || part.tool || "工具调用";
+-        rows.push({ role: "tool", text: String(title), kind: "tool" });
++        const tool = toolFrom(part);
++        rows.push(toolMessage(tool, tool.title || tool.name));
+       }
+     }
+   }
+@@ -282,7 +283,8 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
+             });
+           }
+         } else if (frame.type === "tool" || part.type === "tool") {
+-          emit({ sessionId: sid, type: "tool", role: "tool", summary: part.tool || part.state?.input?.title || "工具调用", runtimeEvent: "opencode/tool" });
++          const tool = toolFrom(part, "running");
++          emit({ sessionId: sid, type: "tool", role: "tool", summary: tool.title || tool.name || "工具调用", tool, runtimeEvent: "opencode/tool" });
+         } else if (frame.type === "step_finish") {
+           emit({ sessionId: sid, type: "status", summary: String(part.reason || "completed"), runtimeEvent: "opencode/step_finish" });
+         } else if (frame.type === "error") {
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/grok-runtime.mjs b/apps/desktop/src/mobile-control/grok-runtime.mjs
+index d65ee7f..85bde6c 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/desktop/src/mobile-control/grok-runtime.mjs
++++ b/apps/desktop/src/mobile-control/grok-runtime.mjs
+@@ -1,5 +1,6 @@
+ import { createAcpClient } from "./acp-client.mjs";
+ import { createAcpRuntime } from "./acp-runtime.mjs";
++import { mergeTool, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
+ import fs from "node:fs";
+ import path from "node:path";
+ import { scanGrokSessions } from "./local-session-scan.mjs";
+@@ -29,21 +30,35 @@ export function cleanGrokUserText(value) {
+ 
+ export function parseGrokChatHistory(lines) {
+   const messages = [];
++  const toolById = new Map();
+   for (const line of lines) {
+     let entry = null;
+     try { entry = JSON.parse(line); } catch { continue; }
+     const type = String(entry?.type || "");
+     const raw = grokText(entry?.content);
+-    if (type === "user") {
+-      const text = cleanGrokUserText(raw);
+-      if (text) messages.push({ role: "user", text, kind: "text" });
++    if (type === "user") { const text = cleanGrokUserText(raw); if (text) messages.push({ role: "user", text, kind: "text" }); continue; }
++    if (type === "reasoning") {
++      const text = textValue(entry.summary || raw).trim();
++      if (text) messages.push({ role: "assistant", text, kind: "thinking" });
++      continue;
++    }
++    if (type === "backend_tool_call") {
++      const tool = toolFrom({ ...entry.kind, id: entry.kind?.id, name: entry.kind?.tool_type, input: entry.kind?.action, status: entry.kind?.status || "completed" });
++      const message = toolMessage(tool, tool.name);
++      messages.push(message);
++      if (tool.id) toolById.set(tool.id, message);
++      continue;
++    }
++    if (type === "tool_result") {
++      const id = String(entry.tool_call_id || "");
++      const existing = toolById.get(id);
++      const patch = toolFrom({ id, output: entry.content, status: "completed" });
++      if (existing) existing.tool = mergeTool(existing.tool, patch);
++      else messages.push(toolMessage(patch, textValue(entry.content) || "工具结果"));
+       continue;
+     }
+     const text = raw.trim();
+-    if (!text) continue;
+-    if (type === "assistant") messages.push({ role: "assistant", text, kind: "text" });
+-    else if (type === "reasoning") messages.push({ role: "assistant", text, kind: "thinking" });
+-    else if (type === "tool_result") messages.push({ role: "tool", text: text.slice(0, 2000), kind: "tool" });
++    if (text && type === "assistant") messages.push({ role: "assistant", text, kind: "text" });
+   }
+   return messages.slice(-500);
+ }
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/app.js b/apps/mobile/app.js
+index ef63ac6..2c323f9 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/app.js
++++ b/apps/mobile/app.js
+@@ -268,19 +268,26 @@ function renderRichText(value) {
+ }
+ function messageKey(message, index = 0) { return message.id || `${message.role || "assistant"}:${message.kind || "message"}:${index}`; }
+ function firstLine(value) { return String(value || "").split(/\n/).map((line) => line.trim()).filter(Boolean)[0] || ""; }
++function toolStatusLabel(status) { return ({ pending: "等待中", running: "执行中", waiting_for_approval: "待审批", completed: "已完成", failed: "失败", cancelled: "已取消" })[status] || "已完成"; }
++function toolDetailBlock(label, value, className = "") { const text = String(value || "").trim(); return text ? `<section class="tool-section ${className}"><b>${label}</b><pre>${escapeHtml(text)}</pre></section>` : ""; }
++function renderToolMessage(message, key) {
++  const tool = message.tool || {}; const status = tool.status || "completed";
++  const title = tool.title || tool.name || firstLine(message.text) || "工具调用";
++  const command = tool.command || "";
++  const argumentsText = tool.arguments && tool.arguments !== command ? tool.arguments : "";
++  const details = [toolDetailBlock("命令", command, "tool-command"), toolDetailBlock("参数", argumentsText), toolDetailBlock("输出", tool.output, "tool-output"), toolDetailBlock("错误", tool.error, "tool-error")].join("");
++  const open = status === "failed" || status === "waiting_for_approval";
++  return `<details class="tool status-${escapeHtml(status)}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}"${open ? " open" : ""}><summary><span class="ic">⌘</span><span class="tool-head"><b>${escapeHtml(title)}</b><small>${escapeHtml(tool.name && tool.name !== title ? tool.name : command || "点击查看详情")}</small></span><span class="tool-state">${escapeHtml(toolStatusLabel(status))}</span><span class="chevron">⌄</span></summary><div class="tool-detail">${details || '<div class="tool-empty">Agent 未提供命令或参数详情</div>'}</div></details>`;
++}
+ function renderMessage(message, extraClass = "", index = 0) {
+   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
+-  if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考过程</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
+-  if (message.role === "tool" || kind === "tool") {
+-    const summary = firstLine(text) || "工具调用";
+-    const detail = text && text !== summary ? `<div class="tool-detail">${escapeHtml(text)}</div>` : "";
+-    return `<details class="tool" data-message-key="${escapeHtml(key)}"><summary><span class="ic">⌘</span><span class="t">${escapeHtml(summary)}</span><span class="ok">✓</span></summary>${detail}</details>`;
+-  }
++  if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考过程</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
++  if (message.role === "tool" || kind === "tool") return renderToolMessage(message, key);
+   if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
+   const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
+   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div></div>`;
+ }
+-function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}`).join("\u001f"); }
++function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}`).join("\u001f"); }
+ function renderMessages(rows = []) { $("#messages").innerHTML = rows.map((message, index) => renderMessage(message, "", index)).join(""); lastDetailFingerprint = messageFingerprint(rows); }
+ function syncMessages(rows = []) {
+   const fingerprint = messageFingerprint(rows);
+@@ -383,7 +390,15 @@ function appendEvent(event) {
+     $("#chat-state-dot").className = status;
+   }
+   if (event.type === "error") { $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", text: `发送失败：${event.summary}` }, "failed")); toast("消息没有发送成功，请重试"); }
+-  if (event.type === "tool") $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "tool", kind: "tool", text: event.summary || "正在使用工具" }));
++  if (event.type === "tool") {
++    const selector = event.tool?.id ? `.tool[data-tool-id="${CSS.escape(event.tool.id)}"]` : "";
++    const existing = selector ? $("#messages").querySelector(selector) : null;
++    const expanded = existing?.open;
++    const html = renderMessage({ id: event.id, role: "tool", kind: "tool", text: event.summary || "正在使用工具", tool: event.tool || null });
++    if (existing) { existing.outerHTML = html; const updated = selector ? $("#messages").querySelector(selector) : null; if (updated && expanded) updated.open = true; }
++    else $("#messages").insertAdjacentHTML("beforeend", html);
++    scrollMessages();
++  }
+ }
+ 
+ function finalizeStreamingMessages() {
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css b/apps/mobile/styles.css
+index f21c773..a2eba27 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css
++++ b/apps/mobile/styles.css
+@@ -317,3 +317,21 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
+ .group-menu button{display:block;width:100%;height:36px;padding:0 10px;border:0;border-radius:8px;background:transparent;color:var(--text);text-align:left;font-size:12.5px;font-weight:650}
+ .group-menu button:active{background:var(--line-soft)}
+ .group-menu button.danger-text{color:var(--danger)}
++/* structured agent activity cards */
++.think .chevron,.tool .chevron{flex:none;color:var(--faint);transition:transform .18s ease}
++.think[open] .chevron,.tool[open] .chevron{transform:rotate(180deg)}
++.think:not([open]) .think-body,.tool:not([open]) .tool-detail{display:none}
++.think[open] summary{border-bottom:1px dashed #eee1c8}
++.tool{padding:0;overflow:hidden}
++.tool summary{padding:10px 12px}
++.tool-head{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}
++.tool-head b,.tool-head small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.tool-head b{font-size:12.5px;color:#514b43}
++.tool-head small{font:10.5px/1.35 var(--mono);color:var(--faint)}
++.tool-state{flex:none;padding:3px 7px;border-radius:999px;background:#edf3ee;color:#55745d;font-size:10px;font-weight:700}
++.tool.status-running .ic{animation:pulse 1.35s infinite}.tool.status-running .tool-state,.tool.status-pending .tool-state{background:#f6edd7;color:#9b7836}
++.tool.status-failed .tool-state{background:#fae8e5;color:#a65348}.tool.status-waiting_for_approval .tool-state{background:#f3eafa;color:#765494}
++.tool .tool-detail{margin:0;padding:2px 12px 11px;border-top:1px dashed var(--line-soft);font-family:var(--font)}
++.tool-section{margin-top:9px}.tool-section>b{display:block;margin-bottom:5px;color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.6px}
++.tool-section pre{max-height:260px;margin:0;padding:9px 10px;overflow:auto;border:1px solid var(--line-soft);border-radius:9px;background:#f8f5ef;color:#5f584e;font:11px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
++.tool-section.tool-command pre{color:#4d6177;background:#f1f4f7}.tool-section.tool-error pre{color:#994d43;background:#fff2ef}.tool-empty{padding:9px 0 1px;color:var(--faint);font-size:11px}
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/index.html b/apps/mobile/index.html
+index 1746630..adf82ac 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/index.html
++++ b/apps/mobile/index.html
+@@ -6,7 +6,7 @@
+   <meta name="theme-color" content="#f7f4ef">
+   <title>Switchyard</title>
+   <link rel="manifest" href="/manifest.webmanifest">
+-  <link rel="stylesheet" href="/styles.css?v=28">
++  <link rel="stylesheet" href="/styles.css?v=29">
+ </head>
+ <body>
+   <div class="app-shell">
+@@ -51,6 +51,6 @@
+   <div id="workspace-sheet" class="bottom-sheet-backdrop" hidden aria-hidden="true" style="display:none"><div class="bottom-sheet workspace-sheet"><div class="sheet-handle"></div><div class="sheet-title"><div><strong>选择工作目录</strong><span id="workspace-path">正在读取…</span></div><button id="close-workspace-sheet" class="icon-control" aria-label="关闭">×</button></div><div class="workspace-browser-actions"><button id="workspace-parent" class="text-button" type="button">返回上级</button><button id="workspace-create" class="text-button" type="button">新建文件夹</button></div><button id="workspace-choose" class="workspace-use-current" type="button">在此文件夹开始</button><div id="workspace-browser-list" class="workspace-browser-list"></div></div></div>
+   <div id="model-sheet" class="bottom-sheet-backdrop" hidden aria-hidden="true" style="display:none"><div class="bottom-sheet"><div class="sheet-handle"></div><div class="sheet-title"><div><strong>对话设置</strong><span>模型、权限和思考程度在下一轮生效</span></div><button id="close-model-sheet" class="icon-control" aria-label="关闭">×</button></div><div id="session-runtime-settings" class="runtime-settings"></div><div class="sheet-section-label">切换模型</div><div id="session-model-list" class="model-list"></div></div></div>
+   <div id="toast" role="status" aria-live="polite"></div>
+-  <script type="module" src="/app.js?v=28"></script>
++  <script type="module" src="/app.js?v=29"></script>
+ </body>
+ </html>
+diff --git a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/sw.js b/apps/mobile/sw.js
+index 9f9fb07..28f9905 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/apps/mobile/sw.js
++++ b/apps/mobile/sw.js
+@@ -1,5 +1,5 @@
+-const CACHE = "switchyard-mobile-v28";
+-const ASSETS = ["/", "/app.js?v=28", "/styles.css?v=28", "/manifest.webmanifest"];
++const CACHE = "switchyard-mobile-v29";
++const ASSETS = ["/", "/app.js?v=29", "/styles.css?v=29", "/manifest.webmanifest"];
+ self.addEventListener("install", (event) => {
+   self.skipWaiting();
+   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+diff --git a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-agent-runtimes.test.mjs b/packages/core/test/mobile-agent-runtimes.test.mjs
+index 928402a..e483479 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-agent-runtimes.test.mjs
++++ b/packages/core/test/mobile-agent-runtimes.test.mjs
+@@ -334,3 +334,26 @@ test("codex rollout drops system-injected blocks and keeps real user text", () =
+   ]);
+   assert.equal(cleanCodexUserPart("<recommended_plugins>\n- Slack\n</recommended_plugins>"), "");
+ });
++
++test("agent histories preserve structured tool details and collapsible reasoning content", () => {
++  const codex = parseCodexRollout([
++    JSON.stringify({ type: "response_item", payload: { type: "reasoning", summary: [{ type: "summary_text", text: "先检查文件" }] } }),
++    JSON.stringify({ type: "response_item", payload: { type: "function_call", call_id: "call-1", name: "shell", arguments: JSON.stringify({ command: ["bash", "-lc", "npm test"], workdir: "/Users/alice/demo" }) } }),
++    JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: "call-1", output: JSON.stringify({ output: "42 tests passed", metadata: { exit_code: 0 } }) } })
++  ]);
++  assert.equal(codex[0].kind, "thinking");
++  assert.match(codex[0].text, /先检查文件/);
++  assert.equal(codex[1].tool.id, "call-1");
++  assert.equal(codex[1].tool.command, "bash -lc npm test");
++  assert.match(codex[1].tool.output, /42 tests passed/);
++  assert.equal(codex[1].tool.status, "completed");
++
++  const claude = parseClaudeJsonl([
++    JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "npm test" } }] } }),
++    JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "passed" }] } })
++  ]);
++  assert.equal(claude.length, 1);
++  assert.equal(claude[0].tool.name, "Bash");
++  assert.equal(claude[0].tool.command, "npm test");
++  assert.equal(claude[0].tool.output, "passed");
++});
+diff --git a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-control-foundation.test.mjs b/packages/core/test/mobile-control-foundation.test.mjs
+index cc60660..0c31177 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-control-foundation.test.mjs
++++ b/packages/core/test/mobile-control-foundation.test.mjs
+@@ -212,3 +212,16 @@ test("mobile agent discovery only exposes installed native clients", (t) => {
+   assert.equal(agents["claude-code"], null);
+   assert.equal(agents.opencode, null);
+ });
++
++test("mobile event DTO keeps safe structured tool fields and redacts secrets", async () => {
++  const { projectMobileEvent } = await import("../../../apps/desktop/src/mobile-control/dto.mjs");
++  const event = projectMobileEvent({
++    type: "tool",
++    summary: "执行命令",
++    tool: { id: "call-1", name: "shell", command: "curl -H 'Authorization: Bearer secret-token' /Users/alice/demo", arguments: '{"token":"sk-secret123456"}', status: "running", output: "ok" }
++  });
++  assert.equal(event.tool.id, "call-1");
++  assert.equal(event.tool.status, "running");
++  assert.doesNotMatch(event.tool.command, /secret-token|\/Users\/alice/);
++  assert.doesNotMatch(event.tool.arguments, /sk-secret123456/);
++});
+diff --git a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-pwa-structure.test.mjs b/packages/core/test/mobile-pwa-structure.test.mjs
+index 5e9d8ed..41854bd 100644
+--- a/Users/zhangyinglong/code/codex/switchyard/packages/core/test/mobile-pwa-structure.test.mjs
++++ b/packages/core/test/mobile-pwa-structure.test.mjs
+@@ -32,7 +32,7 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
+   assert.match(js, /class="me /);
+   assert.match(js, /class="ai /);
+   assert.match(js, /class="think"/);
+-  assert.match(js, /class="tool"/);
++  assert.match(js, /class="tool status-/);
+   assert.match(js, /richTextCache/);
+   assert.match(js, /instant: true/);
+   assert.match(js, /workspace-group|group-head/);

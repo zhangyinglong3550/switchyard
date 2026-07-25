@@ -81,6 +81,13 @@ export function normalizeAccount(raw = {}) {
     ssoToken: String(raw.ssoToken || raw.sso_token || raw.sso || "").trim(),
     idToken: String(raw.idToken || raw.id_token || "").trim(),
     accountId: String(raw.accountId || raw.account_id || raw.chatgpt_account_id || "").trim(),
+    // Newer Codex subscription exports may authenticate with an Ed25519
+    // Agent Identity instead of OAuth access / refresh tokens.
+    agentIdentity: raw.agentIdentity === true || String(raw.authMode || raw.auth_mode || "").toLowerCase() === "agentidentity",
+    authMode: String(raw.authMode || raw.auth_mode || "").trim(),
+    agentRuntimeId: String(raw.agentRuntimeId || raw.agent_runtime_id || "").trim(),
+    agentPrivateKey: String(raw.agentPrivateKey || raw.agent_private_key || "").trim(),
+    agentTaskId: String(raw.agentTaskId || raw.agent_task_id || raw.task_id || "").trim(),
     projectId: String(raw.projectId || raw.project_id || "").trim(),
     planType: String(raw.planType || raw.plan_type || raw.chatgpt_plan_type || "").trim(),
     tokenType: String(raw.tokenType || raw.token_type || "Bearer").trim() || "Bearer",
@@ -208,6 +215,7 @@ export function publicAccountView(account) {
     hasRefreshToken: hasRefresh,
     hasSessionToken: hasSession,
     hasSsoToken: Boolean(account.ssoToken),
+    hasAgentIdentity: account.agentIdentity === true && Boolean(account.agentRuntimeId && account.agentPrivateKey),
     accountId: account.accountId || "",
     projectId: account.projectId || "",
     planType: account.planType || "",
@@ -216,12 +224,14 @@ export function publicAccountView(account) {
     accessExpiresAt: account.expiresAt,
     tokenExpired: accessExpired,
     accessExpired,
-    accessStatusLabel: formatAccessStatusLabel({
+    accessStatusLabel: account.agentIdentity
+      ? "Agent Identity（无需 OAuth Access）"
+      : formatAccessStatusLabel({
       accessExpiresAt: account.expiresAt,
       accessExpired,
       hasRefreshToken: canAutoRefresh
     }),
-    canAutoRefresh,
+    canAutoRefresh: account.agentIdentity ? false : canAutoRefresh,
     // 单号额度
     quotaOk: account.quotaOk === true,
     quotaSummary: account.quotaSummary || "",
@@ -352,6 +362,7 @@ export function upsertAccounts(providerId, incomingAccounts, {
 }
 
 function accountKey(account) {
+  if (account.agentIdentity && account.agentRuntimeId) return `agent:${account.agentRuntimeId}`;
   if (account.refreshToken) return `rt:${account.refreshToken}`;
   if (account.sessionToken) return `st:${account.sessionToken}`;
   if (account.ssoToken) return `sso:${account.ssoToken}`;

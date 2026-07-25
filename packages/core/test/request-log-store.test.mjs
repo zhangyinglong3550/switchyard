@@ -450,6 +450,49 @@ test("request log store · keeps oversized summaries as valid JSON with stream d
   assert.equal(row.request_summary.length < 12000, true);
 });
 
+test("request log store · preserves rectifier metadata when verbose compatibility descriptors are present", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=${Date.now()}-${Math.random()}`);
+
+  store.recordRequestEvent({
+    ts: "2026-06-23T10:00:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/responses",
+    providerId: "opencode-go",
+    modelId: "opencode-go/deepseek-v4-pro",
+    status: 400,
+    requestSummary: {
+      protocol: "openai_responses",
+      modelId: "opencode-go/deepseek-v4-pro",
+      providerId: "opencode-go",
+      compatRules: {
+        outbound: Array.from({ length: 12 }, (_, index) => ({
+          id: `rule-${index}`,
+          source: "auto",
+          description: "x".repeat(6000),
+          changes: ["x".repeat(6000)]
+        }))
+      },
+      rectifiers: [{ id: "opencode-go-tool-manifest", retryStatus: 400, retryOk: false }],
+      messages: { roleCounts: { assistant: 2, tool: 2 } }
+    }
+  });
+
+  const [row] = store.listRequestLogs({ limit: 1 });
+  const summary = JSON.parse(row.request_summary);
+  assert.deepEqual(summary.compatRules.outbound[0], { id: "rule-0", source: "auto" });
+  assert.deepEqual(summary.rectifiers, [{ id: "opencode-go-tool-manifest", retryStatus: 400, retryOk: false }]);
+  assert.equal(summary.messages.roleCounts.tool, 2);
+  assert.equal(summary.truncated, undefined);
+});
+
 test("request log store · cleanup deletes rows when SQLite log exceeds max bytes", async (t) => {
   if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-"));

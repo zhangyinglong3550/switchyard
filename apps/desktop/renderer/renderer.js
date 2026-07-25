@@ -130,17 +130,18 @@ const state = {
   skillHub: { items: [], install: null, detail: null },
   plugins: { sources: [], marketplaces: [], installed: [], available: [] },
   coreFiles: { items: [], current: null },
-  compatPacks: [],
-  compatActive: { providers: {}, models: {} },
-  providerCompatRecommendations: [],
-  modelCompatRecommendations: [],
   providerHealth: {},
   diagnostics: null,
   usageRequests: [],
   lastCapabilitySuggestion: null,
   traces: { sessions: [], requests: [], selected: null },
   usageRange: defaultUsageRange(),
-  liveLogAgent: ""
+  liveLogAgent: "",
+  mobileControl: {
+    status: { running: false, url: null, configuredPort: 17889 },
+    devices: [],
+    challenge: null
+  }
 };
 
 /* ── 通用表格列宽拖拽 ── */
@@ -190,19 +191,18 @@ const toast = (msg, type) => {
   toast._t = setTimeout(() => el.classList.remove("show"), dur);
 };
 
-let providerCompatRecommendationRun = 0;
-let modelCompatRecommendationRun = 0;
-
 const PROTOCOL_LABEL = {
   openai_chat: "OpenAI Chat",
   openai_responses: "OpenAI Responses",
-  anthropic_messages: "Anthropic Messages"
+  anthropic_messages: "Anthropic Messages",
+  antigravity: "OpenAI 接入（Antigravity 自动转换）"
 };
 
 const PROTOCOL_HELP = {
   openai_chat: "最通用，适合大多数 OpenAI-compatible / 中转服务",
   openai_responses: "OpenAI 新协议，Codex 和新版 OpenAI 更适合这条链路",
-  anthropic_messages: "Claude / Claude Code 原生协议"
+  anthropic_messages: "Claude / Claude Code 原生协议",
+  antigravity: "对客户端统一暴露 OpenAI 兼容接口；网关自动转换到 Google Antigravity 上游"
 };
 
 const CAPABILITY_LABEL = {
@@ -214,19 +214,6 @@ const CAPABILITY_LABEL = {
   multimodal: "多模态",
   "developer-role": "Developer 角色",
   "schema-strictness": "工具 Schema 严格度"
-};
-
-const COMPAT_FLAG_LABEL = {
-  supportsText: "文本",
-  supportsStream: "流式",
-  supportsTools: "工具调用",
-  supportsVision: "图片",
-  supportsReasoning: "思考",
-  supportsDeveloperRole: "Developer 角色",
-  requiresThinkingRoundtrip: "需要 thinking 回传",
-  requiresToolResultsTogether: "需要合并工具结果",
-  schemaStrictness: "Schema 严格度",
-  streaming: "流式状态"
 };
 
 const AUTH_MODE_LABEL = {
@@ -253,24 +240,24 @@ const POOL_KIND_UI = {
   antigravity_oauth: {
     label: "Antigravity",
     chip: "账号池 · Antigravity",
-    title: "Antigravity 账号池",
-    body: "账号在 Switchyard 管理并同步到 ~/.cli-proxy-api；请求经本机 CLIProxyAPI（默认 8317）做协议翻译与多号轮询。请保持 8317 进程运行，API Key 使用 cliproxy 的 sk-…。",
-    importPlaceholder: "（Antigravity 可用「选择文件夹…」或默认路径导入 antigravity-*.json）",
-    importBtn: "从 CLIProxyAPI 默认目录导入",
+    title: "Antigravity OAuth（OpenAI 接入）",
+    body: "对 Codex、OpenAI 客户端统一暴露 OpenAI 兼容接口；Switchyard 在网关内部自动转为 Google Cloud Code Assist。导入 CPA 的 Antigravity 凭证后，会自动复用 ~/.cli-proxy-api 中已刷新的 access token；同一任务会固定账号，并自动保持工具调用所需的 thought signature。",
+    importPlaceholder: "（可从现有 Antigravity 凭证目录导入 antigravity-*.json）",
+    importBtn: "导入本机 Antigravity 凭证",
     showPaste: false,
     showFilePick: true,
-    authNote: "已选择 Antigravity 账号池：可从文件夹导入 antigravity-*.json；刷新后会同步回 auth-dir。"
+    authNote: "已选择 Antigravity OAuth：客户端仍按 OpenAI 协议调用 Switchyard；从文件夹导入含 project_id 的 antigravity-*.json 后即可使用，无需填写 API Key 或配置 OAuth client。"
   },
   codex_oauth: {
     label: "Codex 订阅",
     chip: "账号池 · Codex",
     title: "Codex 订阅账号池",
-    body: "凭证只存 ~/.switchyard/pools/codex_oauth/。推荐：点「选择 JSON 文件…」多选本地一堆 type:codex JSON；或「选择文件夹…」整目录导入。也支持粘贴 / 导入本机 ~/.codex/auth.json。",
+    body: "凭证只存 ~/.switchyard/pools/codex_oauth/。支持本机 Codex OAuth，也支持从 Sub2API 备份导入的 Agent Identity 账号；Switchyard 会直接调用 Codex，不依赖外部 Sub2API。",
     importPlaceholder: "可选：粘贴 CPA type:codex JSON / 数组 / NDJSON。批量文件请用下方「选择 JSON 文件…」",
     importBtn: "导入本机 ~/.codex/auth.json",
     showPaste: true,
     showFilePick: true,
-    authNote: "已选择 Codex 账号池：批量多选本地 JSON 即可。无 refresh_token 时用 session_token 续 access。"
+    authNote: "已选择 Codex 账号池：批量多选本地 JSON 即可。Sub2API 备份请使用上方专用导入；OAuth 账号无 refresh_token 时会用 session_token 续 access。"
   }
 };
 
@@ -440,6 +427,7 @@ function setActiveTab(tab) {
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
   if (tab === "settings") {
     renderSettings();
+    refreshMobileControl().catch(() => {});
   }
 }
 
@@ -458,21 +446,17 @@ function initUiDensityToggle() {
 }
 
 async function refreshAll() {
-  const [config, status, configPath, presets, compatPacks, compatActive, providerHealth] = await Promise.all([
+  const [config, status, configPath, presets, providerHealth] = await Promise.all([
     invoke("config:read"),
     invoke("gateway:status"),
     invoke("config:file"),
     invoke("provider:presets"),
-    invoke("compat:packs"),
-    invoke("compat:active"),
     invoke("provider-health:list").catch(() => ({}))
   ]);
   state.config = config;
   state.status = status;
   state.configPath = configPath;
   state.providerPresets = presets || [];
-  state.compatPacks = compatPacks || [];
-  state.compatActive = compatActive || { providers: {}, models: {} };
   state.providerHealth = providerHealth || {};
   renderProviderPresetOptions();
   renderHeader();
@@ -742,6 +726,7 @@ function syncProviderAuthControls() {
   const poolPanel = document.getElementById("provider-account-pool-panel");
   const anthropicPanel = document.getElementById("provider-anthropic-oauth-panel");
   const codexPanel = document.getElementById("provider-codex-oauth-panel");
+  const sub2apiPanel = document.getElementById("provider-sub2api-panel");
   if (!keyFields || !note) return;
   const needsKey = mode === "api_key" || mode === "keychain";
   keyFields.style.display = needsKey ? "" : "none";
@@ -774,13 +759,13 @@ function syncProviderAuthControls() {
         const strategy = document.getElementById("provider-pool-strategy");
         if (strategy && !strategy.dataset.userTouched) strategy.value = preset.poolStrategy;
       }
-      // Antigravity 混合模式需要 cliproxy API Key
-      if (preset?.poolKind === "antigravity_oauth" && keyFields) {
-        keyFields.style.display = "";
-      }
       syncProviderPoolUi();
       refreshProviderPoolList().catch(() => {});
     }
+  }
+  if (sub2apiPanel) {
+    const isSub2Api = preset?.id === "sub2api-codex";
+    sub2apiPanel.style.display = isSub2Api ? "" : "none";
   }
   syncProviderRiskNote();
 }
@@ -803,7 +788,6 @@ function applyProviderPreset(preset) {
     if (strategy && !strategy.dataset.userTouched) strategy.value = preset.poolStrategy;
   }
   renderAuthModeOptions(preset, preset.defaultAuthMode || "api_key");
-  renderCompatPackOptions("provider-compat-packs", preset.compatPacks || []);
   syncUsageCheckForm(preset.usage_check || {});
   syncProviderPoolUi();
   // 无 /models 的供应商：选中模板后直接带出预制模型，不必先点「发现」
@@ -905,54 +889,6 @@ function providerAuthCell(provider) {
   return '<span class="chip warn">未配置</span>';
 }
 
-function compatPacksHtml(ids = []) {
-  const selected = Array.isArray(ids) ? ids : [];
-  if (!selected.length) return "";
-  const byId = new Map((state.compatPacks || []).map((pack) => [pack.id, pack]));
-  return selected.map((id) => {
-    const pack = byId.get(id);
-    const tip = pack ? `${pack.description || ""}${Array.isArray(pack.changes) && pack.changes.length ? "\n" + pack.changes.map((c) => "• " + c).join("\n") : ""}` : "";
-    return `<span class="chip"${tip ? ` title="${escapeHtml(tip)}"` : ""}>${escapeHtml(pack?.label || id)}</span>`;
-  }).join("");
-}
-
-const COMPAT_DIRECTION_LABEL = {
-  outbound: "请求",
-  inbound: "响应",
-  stream: "流式"
-};
-
-function flattenCompatRules(rulesByDirection) {
-  return Object.entries(rulesByDirection || {}).flatMap(([direction, rules]) =>
-    (rules || []).map((rule) => ({ ...rule, direction: rule.direction || direction }))
-  );
-}
-
-function compactCompatRules(rulesByDirection) {
-  const grouped = new Map();
-  for (const rule of flattenCompatRules(rulesByDirection)) {
-    const key = `${rule.id}:${rule.source}`;
-    const current = grouped.get(key) || { ...rule, directions: new Set() };
-    if (rule.direction) current.directions.add(rule.direction);
-    grouped.set(key, current);
-  }
-  return Array.from(grouped.values()).map((rule) => ({
-    ...rule,
-    directions: Array.from(rule.directions || [])
-  }));
-}
-
-function compatRulesHtml(rulesByDirection, { limit = 4 } = {}) {
-  const rules = compactCompatRules(rulesByDirection).slice(0, limit);
-  if (!rules.length) return "";
-  return rules.map((rule) => {
-    const source = rule.source === "manual" ? "手动" : "自动";
-    const direction = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
-    const title = [rule.description, rule.trigger ? `触发：${rule.trigger}` : "", rule.risk ? `风险：${rule.risk}` : ""].filter(Boolean).join("\n");
-    return `<span class="chip ${rule.source === "auto" ? "good" : ""}" title="${escapeHtml(title)}">${escapeHtml(source)}规则：${escapeHtml(rule.label || rule.id)}${direction ? ` · ${escapeHtml(direction)}` : ""}</span>`;
-  }).join("");
-}
-
 function requestErrorClass(summary) {
   return summary?.errorClass || summary?.error_class || "";
 }
@@ -974,26 +910,6 @@ function requestOverrideItems(summary) {
   if (overrides.headerNames?.length) items.push(`请求头：${overrides.headerNames.join(", ")}`);
   if (overrides.bodyKeys?.length) items.push(`请求体字段：${overrides.bodyKeys.join(", ")}`);
   return items;
-}
-
-function providerRouteExtrasCell(provider) {
-  const chips = [];
-  if (state.providerHealth?.[provider.id]) {
-    const health = state.providerHealth[provider.id];
-    chips.push(healthChip(health));
-    const balance = balanceChip(health.balance);
-    if (balance) chips.push(balance);
-  }
-  if (!normalizeClientScope(provider.allowedClients).includes("*")) chips.push(`<span class="chip">可见：${escapeHtml(clientScopeLabel(provider.allowedClients))}</span>`);
-  if (provider.proxyUrl) chips.push(`<span class="chip good">Provider 代理</span>`);
-  if (provider.routingMode && provider.routingMode !== "auto") {
-    chips.push(`<span class="chip">${provider.routingMode === "native" ? "强制原生" : "强制转换"}</span>`);
-  }
-  const packs = compatPacksHtml(provider.compatPacks || []);
-  if (packs) chips.push(packs);
-  const activeRules = compatRulesHtml(state.compatActive?.providers?.[provider.id]);
-  if (activeRules) chips.push(activeRules);
-  return chips.length ? `<div class="chip-row compact">${chips.join("")}</div>` : '<span class="tiny muted">-</span>';
 }
 
 function uniqueCopiedName(baseName, exists) {
@@ -1059,7 +975,7 @@ function renderProviders() {
   const tbody = document.getElementById("providers-tbody");
   tbody.innerHTML = "";
   if (!config.providers.length) {
-    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><div>暂无供应商</div><button class="btn primary" data-empty-action="provider">新增供应商</button></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state"><div>暂无供应商</div><button class="btn primary" data-empty-action="provider">新增供应商</button></div></td></tr>`;
     tbody.querySelector("[data-empty-action='provider']").addEventListener("click", () => openProviderDialog(null));
     return;
   }
@@ -1076,7 +992,6 @@ function renderProviders() {
       </td>
       <td class="mono" style="${p.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(p.baseUrl)}</td>
       <td>${providerAuthCell(p)}</td>
-      <td>${providerRouteExtrasCell(p)}</td>
       <td>${providerBalanceCell(p)}</td>
       <td>${counts[p.id] || 0}</td>
       <td><div class="row-actions" style="display:flex; gap:4px;">
@@ -1137,25 +1052,18 @@ function renderModels() {
   });
   if (!filtered.length) {
     const message = config.models.length ? "没有匹配的模型" : "还没有添加模型";
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div>${message}</div><button class="btn primary" data-empty-action="model">新增模型</button></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state"><div>${message}</div><button class="btn primary" data-empty-action="model">新增模型</button></div></td></tr>`;
     tbody.querySelector("[data-empty-action='model']").addEventListener("click", () => openModelDialog(null));
     return;
   }
   for (const m of filtered) {
     const tr = document.createElement("tr");
-    const caps = [
-      Object.entries(m.capabilities || {}).filter(([_k, v]) => v).map(([k]) => `<span class="chip">${k}</span>`).join(" "),
-      !normalizeClientScope(m.allowedClients).includes("*") ? `<span class="chip">可见：${escapeHtml(clientScopeLabel(m.allowedClients))}</span>` : "",
-      compatPacksHtml(m.compatPacks || []),
-      compatRulesHtml(state.compatActive?.models?.[m.id])
-    ].filter(Boolean).join(" ");
     const aliases = (m.aliases || []).map((a) => `<span class="chip">${escapeHtml(a)}</span>`).join(" ") || '<span class="tiny muted">—</span>';
     tr.innerHTML = `
       <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.id)}</td>
       <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.providerId)}</td>
       <td class="mono" style="${m.enabled === false ? 'opacity:0.45;' : ''}">${escapeHtml(m.upstreamModel)}</td>
       <td>${aliases}</td>
-      <td class="chip-row">${caps}</td>
       <td><div class="row-actions" style="display:flex; gap:4px;">
         <button class="btn ${m.enabled === false ? 'primary' : ''}" data-toggle-model="${escapeHtml(m.id)}">${m.enabled === false ? '启用' : '禁用'}</button>
         <button class="btn" data-edit-model="${escapeHtml(m.id)}">编辑</button>
@@ -1484,7 +1392,6 @@ function renderDiagnostics() {
       const chain = request?.conversionChain?.steps?.length
         ? `<div class="tiny muted">链路：${escapeHtml(request.conversionChain.steps.join(" → "))}</div>`
         : "";
-      const rules = compatRulesHtml(request?.compatRules, { limit: 3 });
       const errorClass = requestErrorClass(request);
       const rectifiers = rectifierItems(request);
       const overrides = requestOverrideItems(request);
@@ -1500,7 +1407,6 @@ function renderDiagnostics() {
             <div class="tiny muted">${escapeHtml(formatDate(row.ts))} · status ${escapeHtml(row.status || "-")}</div>
             <div class="tiny muted">${escapeHtml(row.classification?.title || row.error || "-")}</div>
             ${chain}
-            ${rules ? `<div class="chip-row compact">${rules}</div>` : ""}
             ${runtimeChips ? `<div class="chip-row compact">${runtimeChips}</div>` : ""}
           </div>
           <div class="row-actions">
@@ -1554,11 +1460,10 @@ function renderDiagnostics() {
         <td class="mono">${escapeHtml(model.id)}</td>
         <td class="mono">${escapeHtml(model.providerId)}</td>
         <td class="chip-row compact">${capabilityChips(model.capabilities)}</td>
-        <td class="chip-row compact">${compatRulesHtml(state.compatActive?.models?.[model.id]) || '<span class="tiny muted">-</span>'}</td>
         <td>${(model.visibleIn || []).map((id) => `<span class="chip">${escapeHtml(agentLabel(id))}</span>`).join("") || '<span class="tiny muted">不可见</span>'}</td>
         <td><button class="btn" data-diagnostic-probe="${index}">运行探针</button></td>
       </tr>
-    `).join("") || '<tr><td colspan="6" class="muted">暂无模型</td></tr>';
+    `).join("") || '<tr><td colspan="5" class="muted">暂无模型</td></tr>';
     modelsTbody.querySelectorAll("[data-diagnostic-probe]").forEach((button) => {
       button.addEventListener("click", () => probeConfiguredModel(data.models[Number(button.dataset.diagnosticProbe)]?.id));
     });
@@ -1612,42 +1517,7 @@ function formatCapabilityProbe(result) {
   for (const [key, value] of Object.entries(caps)) {
     lines.push(`- ${CAPABILITY_LABEL[key] || key}: ${value ? "启用" : "关闭"}`);
   }
-  const profile = result.compatibilityProfile;
-  if (profile) {
-    lines.push("", "兼容画像：");
-    lines.push(`- 上游协议：${PROTOCOL_LABEL[profile.protocol] || profile.protocol || "-"}`);
-    for (const [key, value] of Object.entries(profile.flags || {})) {
-      if (value === null || value === undefined) continue;
-      lines.push(`- ${COMPAT_FLAG_LABEL[key] || key}: ${formatProfileValue(value)}`);
-    }
-    if (profile.recommendations?.length) {
-      lines.push("", "建议补丁 / 策略：");
-      for (const item of profile.recommendations) {
-        lines.push(`- ${item.title || item.ruleId}: ${item.reason || ""}`);
-      }
-    }
-  }
-  const activeRules = compactCompatRules(result.compatRules || {});
-  lines.push("", "当前实际兼容规则：");
-  if (activeRules.length) {
-    for (const rule of activeRules) {
-      const source = rule.source === "manual" ? "手动" : "自动";
-      const directions = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
-      lines.push(`- ${source} · ${rule.label || rule.id}${directions ? ` · ${directions}` : ""}`);
-      if (rule.description) lines.push(`  ${rule.description}`);
-      if (rule.changes?.length) lines.push(`  改动：${rule.changes.join("；")}`);
-      if (rule.risk) lines.push(`  风险：${rule.risk}`);
-    }
-  } else {
-    lines.push("- 无");
-  }
   return lines.join("\n");
-}
-
-function formatProfileValue(value) {
-  if (value === true) return "是";
-  if (value === false) return "否";
-  return String(value);
 }
 
 async function probeConfiguredModel(modelId) {
@@ -1943,6 +1813,70 @@ async function restoreSelectedProfileBackup() {
 function renderSettings() {
   const pathEl = document.getElementById("settings-config-path");
   if (pathEl) pathEl.textContent = state.configPath || "-";
+  renderMobileControl();
+}
+
+function normalizeMobileTailscaleBase(value) {
+  const parsed = new URL(String(value || "").trim().replace(/\/$/, ""));
+  if (parsed.protocol !== "https:") throw new Error("协议必须为 HTTPS");
+  // This machine already uses the Tailnet root URL for another local service.
+  // The mobile-control plane is deliberately exposed on its own HTTPS port.
+  if (/\.ts\.net$/i.test(parsed.hostname) && (!parsed.port || parsed.port === "443")) {
+    parsed.port = "17889";
+  }
+  return parsed.origin;
+}
+
+function renderMobileControl() {
+  const mobile = state.mobileControl || {};
+  const status = mobile.status || { running: false };
+  const statusEl = document.getElementById("mobile-control-status");
+  const urlEl = document.getElementById("mobile-control-url");
+  const toggle = document.getElementById("btn-mobile-control-toggle");
+  const pair = document.getElementById("btn-mobile-pair");
+  const pairing = document.getElementById("mobile-pairing");
+  const pairingUrl = document.getElementById("mobile-pairing-url");
+  const tailscaleBase = document.getElementById("mobile-tailscale-base");
+  const devices = document.getElementById("mobile-devices");
+  if (statusEl) statusEl.textContent = status.running ? "运行中 · 仅本机" : "未启用";
+  if (urlEl) urlEl.textContent = status.url || `http://127.0.0.1:${status.configuredPort || 17889}`;
+  if (toggle) {
+    toggle.textContent = status.running ? "停用手机端" : "启用手机端";
+    toggle.classList.toggle("primary", !status.running);
+  }
+  if (pair) pair.disabled = !status.running;
+  if (pairing) pairing.hidden = !mobile.challenge?.pairingUrl;
+  if (pairingUrl) pairingUrl.value = mobile.challenge?.pairingUrl || "";
+  if (tailscaleBase && document.activeElement !== tailscaleBase) {
+    const saved = String(localStorage.getItem("switchyard.mobile-control.tailscale-base") || "");
+    try {
+      const normalized = saved ? normalizeMobileTailscaleBase(saved) : "";
+      if (normalized && normalized !== saved) localStorage.setItem("switchyard.mobile-control.tailscale-base", normalized);
+      tailscaleBase.value = normalized;
+    } catch {
+      tailscaleBase.value = saved;
+    }
+  }
+  if (!devices) return;
+  const rows = mobile.devices || [];
+  devices.innerHTML = rows.length ? rows.map((device) => `
+    <div class="mobile-device-row ${device.revokedAt ? "is-revoked" : ""}">
+      <div>
+        <strong>${escapeHtml(device.name || "移动设备")}</strong>
+        <div class="tiny muted">${device.revokedAt ? "已撤销" : `最近访问：${escapeHtml(device.lastSeenAt || "尚未访问")}`}</div>
+      </div>
+      ${device.revokedAt ? "" : `<button class="btn danger" type="button" data-mobile-device-revoke="${escapeHtml(device.id)}">撤销</button>`}
+    </div>
+  `).join("") : '<div class="empty-state">还没有配对设备</div>';
+}
+
+async function refreshMobileControl() {
+  const status = await invoke("mobile-control:status");
+  state.mobileControl.status = status || { running: false };
+  state.mobileControl.devices = status?.running
+    ? await invoke("mobile-control:devices").catch(() => [])
+    : [];
+  renderMobileControl();
 }
 
 function resetProviderDiscovery() {
@@ -2116,160 +2050,6 @@ function renderProviderDiscovery() {
   });
 }
 
-function renderCompatPackOptions(containerId, selected = []) {
-  const wrap = document.getElementById(containerId);
-  if (!wrap) return;
-  const selectedSet = new Set(Array.isArray(selected) ? selected : []);
-  const packs = state.compatPacks || [];
-  if (!packs.length) {
-    wrap.innerHTML = '<div class="tiny muted">暂无可用兼容包</div>';
-    return;
-  }
-  wrap.innerHTML = packs.map((pack) => `
-    <label class="checkbox-line compat-pack-option">
-      <input type="checkbox" value="${escapeHtml(pack.id)}" ${selectedSet.has(pack.id) ? "checked" : ""}>
-      <span>
-        <strong>${escapeHtml(pack.label || pack.id)}</strong>
-        <small>${escapeHtml(pack.description || (pack.patchIds || []).join(", "))}</small>
-      </span>
-    </label>
-  `).join("");
-}
-
-function collectCompatPackOptions(containerId) {
-  const wrap = document.getElementById(containerId);
-  if (!wrap) return [];
-  return Array.from(wrap.querySelectorAll('input[type="checkbox"]:checked')).map((input) => input.value).filter(Boolean);
-}
-
-function setCompatPackOptions(containerId, packIds = []) {
-  const wrap = document.getElementById(containerId);
-  if (!wrap) return [];
-  const selected = new Set(packIds.filter(Boolean));
-  const applied = [];
-  wrap.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-    if (selected.has(input.value)) {
-      input.checked = true;
-      applied.push(input.value);
-    }
-  });
-  return applied;
-}
-
-function recommendationPackIds(recommendations = []) {
-  return Array.from(new Set((recommendations || []).flatMap((item) => item.recommendedCompatPacks || [])));
-}
-
-function renderCompatRecommendations(containerId, recommendations = [], { applyTarget = "" } = {}) {
-  const wrap = document.getElementById(containerId);
-  if (!wrap) return;
-  const packsById = new Map((state.compatPacks || []).map((pack) => [pack.id, pack]));
-  const packIds = recommendationPackIds(recommendations);
-  if (!recommendations.length) {
-    wrap.innerHTML = '<div class="tiny muted">暂无命中的推荐规则；可以先保存配置或运行探针后再观察真实错误。</div>';
-    return;
-  }
-  wrap.innerHTML = `
-    <div class="compat-recommendation-toolbar">
-      <span class="tiny muted">命中 ${recommendations.length} 条规则 · 建议 ${packIds.length} 个兼容包</span>
-      <button class="btn" type="button" data-apply-compat-recommendations="${escapeHtml(applyTarget)}" ${packIds.length ? "" : "disabled"}>应用推荐</button>
-    </div>
-    ${recommendations.map((item) => {
-      const packs = (item.recommendedCompatPacks || []).map((id) => `<span class="chip good">${escapeHtml(packsById.get(id)?.label || id)}</span>`).join("");
-      const unknown = (item.unknownCompatPacks || []).map((id) => `<span class="chip warn">未知：${escapeHtml(id)}</span>`).join("");
-      const fixtures = (item.fixtures || []).map((name) => `<span class="chip">${escapeHtml(name)}</span>`).join("");
-      return `
-        <div class="compat-recommendation-card">
-          <div class="compat-recommendation-head">
-            <strong>${escapeHtml(item.id)}</strong>
-            <span class="tiny muted">${escapeHtml(item.source || "builtin")}</span>
-          </div>
-          <div class="chip-row compact">${packs}${unknown}</div>
-          ${item.reason ? `<p><span>原因</span>${escapeHtml(item.reason)}</p>` : ""}
-          ${item.impact ? `<p><span>影响</span>${escapeHtml(item.impact)}</p>` : ""}
-          ${item.risk ? `<p><span>风险</span>${escapeHtml(item.risk)}</p>` : ""}
-          ${fixtures ? `<div class="compat-recommendation-fixtures"><span class="tiny muted">Fixture</span><div class="chip-row compact">${fixtures}</div></div>` : ""}
-        </div>
-      `;
-    }).join("")}
-  `;
-  wrap.querySelectorAll("[data-apply-compat-recommendations]").forEach((button) => {
-    button.addEventListener("click", () => applyCompatRecommendations(button.dataset.applyCompatRecommendations));
-  });
-}
-
-function providerRecommendationPayload() {
-  const form = document.getElementById("provider-form");
-  const fd = new FormData(form);
-  const raw = Object.fromEntries(fd.entries());
-  return {
-    provider: {
-      id: String(raw.id || "").trim(),
-      name: String(raw.name || "").trim(),
-      presetId: String(raw.presetId || "").trim() || undefined,
-      apiFormat: raw.apiFormat || "openai_chat",
-      baseUrl: String(raw.baseUrl || "").trim(),
-      routingMode: raw.routingMode || "auto",
-      allowedClients: collectClientScopeOptions("provider-visible-clients")
-    }
-  };
-}
-
-async function refreshProviderCompatRecommendations() {
-  const run = ++providerCompatRecommendationRun;
-  const payload = providerRecommendationPayload();
-  const hasSignal = payload.provider.id || payload.provider.name || payload.provider.baseUrl;
-  if (!hasSignal) {
-    state.providerCompatRecommendations = [];
-    renderCompatRecommendations("provider-compat-recommendations", [], { applyTarget: "provider" });
-    return;
-  }
-  try {
-    const result = await invoke("compat:registry:recommend", payload);
-    if (run !== providerCompatRecommendationRun) return;
-    state.providerCompatRecommendations = result.recommendations || [];
-    renderCompatRecommendations("provider-compat-recommendations", state.providerCompatRecommendations, { applyTarget: "provider" });
-  } catch (err) {
-    if (run !== providerCompatRecommendationRun) return;
-    document.getElementById("provider-compat-recommendations").innerHTML = `<div class="tiny muted">推荐规则加载失败：${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function modelRecommendationPayload() {
-  const model = collectModelForm();
-  const provider = (state.config?.providers || []).find((item) => item.id === model.providerId) || { id: model.providerId, apiFormat: "openai_chat" };
-  return { provider, model };
-}
-
-async function refreshModelCompatRecommendations() {
-  const run = ++modelCompatRecommendationRun;
-  const payload = modelRecommendationPayload();
-  const hasSignal = payload.provider?.id || payload.model?.id || payload.model?.upstreamModel;
-  if (!hasSignal) {
-    state.modelCompatRecommendations = [];
-    renderCompatRecommendations("model-compat-recommendations", [], { applyTarget: "model" });
-    return;
-  }
-  try {
-    const result = await invoke("compat:registry:recommend", payload);
-    if (run !== modelCompatRecommendationRun) return;
-    state.modelCompatRecommendations = result.recommendations || [];
-    renderCompatRecommendations("model-compat-recommendations", state.modelCompatRecommendations, { applyTarget: "model" });
-  } catch (err) {
-    if (run !== modelCompatRecommendationRun) return;
-    document.getElementById("model-compat-recommendations").innerHTML = `<div class="tiny muted">推荐规则加载失败：${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function applyCompatRecommendations(target) {
-  const isModel = target === "model";
-  const recommendations = isModel ? state.modelCompatRecommendations : state.providerCompatRecommendations;
-  const packIds = recommendationPackIds(recommendations);
-  const containerId = isModel ? "model-compat-packs" : "provider-compat-packs";
-  const applied = setCompatPackOptions(containerId, packIds);
-  toast(applied.length ? `已勾选 ${applied.length} 个推荐兼容包` : "没有可应用的兼容包");
-}
-
 /** 从表单字段解析网关重试配置（供应商 / 模型共用字段名） */
 function collectRetryFromRaw(raw) {
   const retryEnabled = String(raw.retryEnabled || "default");
@@ -2316,7 +2096,6 @@ function collectProviderForm() {
     routingMode: raw.routingMode || "auto",
     ...(retry ? { retry } : {}),
     allowedClients: collectClientScopeOptions("provider-visible-clients"),
-    compatPacks: collectCompatPackOptions("provider-compat-packs"),
     apiKeyEnv: raw.apiKeyEnv?.trim(),
     apiKey: raw.apiKey?.trim(),
     usage_check: usageCheckFromForm(raw)
@@ -2325,15 +2104,9 @@ function collectProviderForm() {
     data.providerType = "account_pool";
     data.poolKind = raw.poolKind || document.getElementById("provider-pool-kind")?.value || currentPoolKind();
     data.poolStrategy = raw.poolStrategy || document.getElementById("provider-pool-strategy")?.value || "weighted_round_robin";
-    // Antigravity 混合模式：请求走 CLIProxyAPI，需要本机 API Key
-    if (data.poolKind === "antigravity_oauth") {
-      if (!data.apiKey && !data.apiKeyEnv) {
-        data.apiKey = "sk-cliproxy-grok-local";
-      }
-    } else {
-      delete data.apiKeyEnv;
-      delete data.apiKey;
-    }
+    // 账号池的动态 token 只存 pools，不写入 provider 配置。
+    delete data.apiKeyEnv;
+    delete data.apiKey;
   } else if (authMode === "anthropic_oauth") {
     data.providerType = "anthropic_oauth";
     data.apiFormat = "anthropic_messages";
@@ -2394,7 +2167,7 @@ async function refreshProviderPoolList() {
     if (strategy && pool?.strategy) strategy.value = pool.strategy;
     if (!accounts.length) {
       const emptyHint = poolKind === "codex_oauth"
-        ? "尚未导入账号 · 可点「选择 JSON 文件…」批量导入"
+        ? "尚未导入账号 · 可点「选择 JSON 文件…」或使用 Sub2API 备份专用导入"
         : poolKind === "antigravity_oauth"
         ? "尚未导入账号 · 可从文件夹导入"
         : "尚未导入账号 · 可粘贴或导入";
@@ -2417,7 +2190,9 @@ async function refreshProviderPoolList() {
           ? (account.canAutoRefresh ? "Access 已过期 · 可自动续" : "Access 已过期 · 无续期凭证")
           : (account.expiresAt ? `Access 有效至 ${String(account.expiresAt).replace("T", " ").slice(0, 16)}` : "Access 未知"))
       );
-      const accessChip = account.tokenExpired
+      const accessChip = account.hasAgentIdentity
+        ? "chip good"
+        : account.tokenExpired
         ? (account.canAutoRefresh ? "chip warn" : "chip bad")
         : "chip good";
       const quotaLabel = escapeHtml(account.quotaLabel || "未查询");
@@ -2437,7 +2212,7 @@ async function refreshProviderPoolList() {
         <td><span class="${healthChipClass(health)}" title="${statusTitle}">${healthLabel}</span></td>
         <td>${escapeHtml(account.weight || 1)}</td>
         <td class="tiny"><span class="${quotaChipClass(account)}" title="${quotaTitle}">${quotaLabel}</span></td>
-        <td class="tiny"><span class="${accessChip}" title="OAuth access token 过期时间，不是订阅到期">${accessLabel}</span>${account.hasRefreshToken || account.hasSessionToken ? ' <span class="chip good">可续</span>' : ""}</td>
+        <td class="tiny"><span class="${accessChip}" title="${account.hasAgentIdentity ? "使用 Agent Identity，不依赖 OAuth access token" : "OAuth access token 过期时间，不是订阅到期"}">${accessLabel}</span>${account.hasAgentIdentity ? ' <span class="chip good">原生</span>' : (account.hasRefreshToken || account.hasSessionToken ? ' <span class="chip good">可续</span>' : "")}</td>
         <td>
           <button class="btn tiny" type="button" data-pool-quota="${escapeHtml(account.id)}">额度</button>
           <button class="btn tiny" type="button" data-pool-toggle="${escapeHtml(account.id)}" data-enabled="${enabled ? "1" : "0"}">${enabled ? "停用" : "启用"}</button>
@@ -2511,6 +2286,7 @@ function openProviderDialog(editId) {
   const title = document.getElementById("provider-dialog-title");
   const form = document.getElementById("provider-form");
   form.reset();
+  resetSub2ApiDataImportPanel();
   const existing = editId ? state.config.providers.find((p) => p.id === editId) : null;
   resetProviderDiscovery();
   title.textContent = existing ? `编辑供应商 · ${existing.id}` : "新增供应商";
@@ -2544,7 +2320,6 @@ function openProviderDialog(editId) {
     syncProviderPoolUi();
     syncProviderRiskNote(existing);
     renderClientScopeOptions("provider-visible-clients", existing.allowedClients || ["*"]);
-    renderCompatPackOptions("provider-compat-packs", existing.compatPacks || []);
     syncUsageCheckForm(effectiveProviderUsageCheck(existing) || {});
     state.providerDiscovery = state.config.models
       .filter((m) => m.providerId === existing.id)
@@ -2575,13 +2350,11 @@ function openProviderDialog(editId) {
     renderAuthModeOptions(null, "api_key");
     syncProviderRiskNote(null);
     renderClientScopeOptions("provider-visible-clients", ["*"]);
-    renderCompatPackOptions("provider-compat-packs", []);
     syncUsageCheckForm({});
   }
   document.getElementById("provider-api-key-input").type = "password";
   document.getElementById("btn-provider-key-toggle").textContent = "显示";
   renderProviderDiscovery();
-  refreshProviderCompatRecommendations().catch(() => {});
   wrap.classList.add("open");
   form._editId = editId || null;
 }
@@ -2594,7 +2367,6 @@ document.getElementById("provider-preset-select").addEventListener("change", (e)
     syncUsageCheckForm({});
   }
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
-  refreshProviderCompatRecommendations().catch(() => {});
 });
 document.getElementById("provider-auth-mode").addEventListener("change", () => {
   syncProviderAuthControls();
@@ -2778,8 +2550,7 @@ document.getElementById("btn-pool-import-cpa")?.addEventListener("click", async 
       : poolKind === "antigravity_oauth"
       ? "Antigravity"
       : "CLIProxyAPI";
-    const syncHint = result.sync?.written != null ? `，同步 CPA ${result.sync.written}` : "";
-    toast(`从 ${label} 导入：新增 ${result.added}，跳过 ${result.skipped}，扫描 ${result.scanned || 0}${syncHint}`);
+    toast(`从 ${label} 导入：新增 ${result.added}，跳过 ${result.skipped}，扫描 ${result.scanned || 0}`);
   } catch (err) {
     toast(err?.message || String(err));
   }
@@ -2811,12 +2582,6 @@ document.getElementById("btn-pool-import-dir")?.addEventListener("click", async 
   } catch (err) {
     toast(err?.message || String(err));
   }
-});
-document.getElementById("provider-form").addEventListener("input", (e) => {
-  if (["id", "name", "baseUrl"].includes(e.target?.name)) refreshProviderCompatRecommendations().catch(() => {});
-});
-document.getElementById("provider-form").addEventListener("change", (e) => {
-  if (["apiFormat", "routingMode"].includes(e.target?.name)) refreshProviderCompatRecommendations().catch(() => {});
 });
 document.getElementById("btn-provider-key-toggle").addEventListener("click", () => {
   const input = document.getElementById("provider-api-key-input");
@@ -2863,7 +2628,10 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
     }));
   const newId = data.id;
   if (editId) {
-    providers = providers.map((p) => p.id === editId ? { ...data, id: newId, capabilities: {} } : p);
+    const previous = providers.find((p) => p.id === editId);
+    providers = providers.map((p) => p.id === editId
+      ? { ...previous, ...data, id: newId, capabilities: {} }
+      : p);
   } else {
     providers.push({ ...data, id: newId, capabilities: {} });
   }
@@ -2881,7 +2649,13 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
   if (editId) {
     const resolvedEditId = editId !== newId ? newId : editId;
     const existingById = new Map(models.map((m) => [m.id, m]));
-    for (const item of discoveredModels) existingById.set(item.id, { ...item, providerId: newId });
+    for (const item of discoveredModels) {
+      existingById.set(item.id, {
+        ...existingById.get(item.id),
+        ...item,
+        providerId: newId
+      });
+    }
     models = Array.from(existingById.values());
   } else {
     const existingIds = new Set(models.map((m) => m.id));
@@ -3068,7 +2842,6 @@ function openModelDialog(editId) {
     form.querySelector('[name="proxyUrl"]').value = existing.proxyUrl || "";
     fillRetryFormFields(form, existing.retry);
     renderClientScopeOptions("model-visible-clients", existing.allowedClients || ["*"]);
-    renderCompatPackOptions("model-compat-packs", existing.compatPacks || []);
     if (existing.capabilities) {
       form.querySelector('[name="cap-text"]').checked = !!existing.capabilities.text;
       form.querySelector('[name="cap-tools"]').checked = !!existing.capabilities.tools;
@@ -3084,7 +2857,6 @@ function openModelDialog(editId) {
     form.querySelector('[name="priceCurrency"]').value = existing.pricing?.currency || "USD";
   } else {
     renderClientScopeOptions("model-visible-clients", ["*"]);
-    renderCompatPackOptions("model-compat-packs", []);
     fillRetryFormFields(form, null);
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
@@ -3096,18 +2868,10 @@ function openModelDialog(editId) {
   state.lastCapabilitySuggestion = null;
   document.getElementById("btn-model-apply-capabilities").style.display = "none";
   document.getElementById("model-test-output").textContent = "尚未测试";
-  refreshModelCompatRecommendations().catch(() => {});
   wrap.classList.add("open");
   form._editId = editId || null;
 }
 document.getElementById("btn-model-add").addEventListener("click", () => openModelDialog(null));
-document.getElementById("model-form").addEventListener("input", (e) => {
-  if (["id", "upstreamModel", "displayName", "aliases"].includes(e.target?.name)) refreshModelCompatRecommendations().catch(() => {});
-});
-document.getElementById("model-form").addEventListener("change", (e) => {
-  if (["providerId"].includes(e.target?.name)) refreshModelCompatRecommendations().catch(() => {});
-});
-
 function collectModelForm() {
   const form = document.getElementById("model-form");
   const fd = new FormData(form);
@@ -3131,7 +2895,6 @@ function collectModelForm() {
     ...(retry ? { retry } : {}),
     ...(pricing ? { pricing } : {}),
     allowedClients: collectClientScopeOptions("model-visible-clients"),
-    compatPacks: collectCompatPackOptions("model-compat-packs"),
     capabilities: {
       text: raw["cap-text"] === "on",
       tools: raw["cap-tools"] === "on",
@@ -3162,7 +2925,10 @@ document.getElementById("model-form").addEventListener("submit", async (e) => {
   }
   let models = [...state.config.models];
   if (editId) {
-    models = models.map((m) => m.id === editId ? data : m);
+    const previous = models.find((m) => m.id === editId);
+    models = models.map((m) => m.id === editId
+      ? { ...previous, ...data, compatPacks: previous?.compatPacks || [] }
+      : m);
   } else {
     models.push(data);
   }
@@ -3435,6 +3201,99 @@ document.getElementById("btn-import-apply").addEventListener("click", async () =
 });
 document.getElementById("import-dialog-wrap").querySelector("[data-close]").addEventListener("click", () => {
   document.getElementById("import-dialog-wrap").classList.remove("open");
+});
+
+/* ---- Sub2API Data Backup Import ---- */
+let sub2apiDataImportResult = null;
+function resetSub2ApiDataImportPanel() {
+  sub2apiDataImportResult = null;
+  const summary = document.getElementById("sub2api-data-import-summary");
+  const output = document.getElementById("sub2api-data-import-output");
+  const apply = document.getElementById("btn-sub2api-data-import-apply");
+  const reselect = document.getElementById("btn-sub2api-data-import-reselect");
+  if (summary) summary.innerHTML = "";
+  if (output) output.textContent = "尚未选择备份文件";
+  if (apply) apply.disabled = true;
+  if (reselect) reselect.style.display = "none";
+}
+
+function renderSub2ApiDataImportPreview(result) {
+  const summary = document.getElementById("sub2api-data-import-summary");
+  const output = document.getElementById("sub2api-data-import-output");
+  const apply = document.getElementById("btn-sub2api-data-import-apply");
+  const reselect = document.getElementById("btn-sub2api-data-import-reselect");
+  if (!result?.ok) return;
+  const files = result.files || [];
+  summary.innerHTML = `
+    <div class="metric"><div class="metric-value">${escapeHtml(result.totals?.files || 0)}</div><div class="metric-label">备份文件</div></div>
+    <div class="metric"><div class="metric-value">${escapeHtml(result.totals?.accounts || 0)}</div><div class="metric-label">账号</div></div>
+    <div class="metric"><div class="metric-value">${escapeHtml(result.totals?.proxies || 0)}</div><div class="metric-label">代理</div></div>
+    <div style="flex-basis:100%;"></div>
+    <div class="tiny muted">${files.map((file) => `${escapeHtml(file.name)}：${escapeHtml(file.accounts)} 账号 / ${escapeHtml(file.proxies)} 代理`).join("<br>")}</div>
+  `;
+  output.textContent = "已完成本机校验，等待导入到 Switchyard 账号池。";
+  if (apply) apply.disabled = false;
+  if (reselect) reselect.style.display = "";
+}
+
+async function chooseSub2ApiDataBackups() {
+  const result = await invoke("import:sub2api:data-select");
+  if (result?.cancelled) return false;
+  if (!result?.ok) {
+    toast(result?.error || "Sub2API 备份解析失败", "error");
+    return false;
+  }
+  sub2apiDataImportResult = result;
+  renderSub2ApiDataImportPreview(result);
+  return true;
+}
+
+document.getElementById("btn-sub2api-data-import-select")?.addEventListener("click", async () => {
+  try {
+    await chooseSub2ApiDataBackups();
+  } catch (err) {
+    toast(`选择 Sub2API 备份失败：${err?.message || String(err)}`, "error");
+  }
+});
+document.getElementById("btn-sub2api-data-import-reselect")?.addEventListener("click", () => {
+  chooseSub2ApiDataBackups().catch((err) => toast(`选择 Sub2API 备份失败：${err?.message || String(err)}`, "error"));
+});
+document.getElementById("btn-sub2api-data-import-apply")?.addEventListener("click", async (event) => {
+  if (!sub2apiDataImportResult?.importId) return;
+  const button = event.currentTarget;
+  const output = document.getElementById("sub2api-data-import-output");
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识，再导入备份", "error");
+  button.disabled = true;
+  button.textContent = "导入中…";
+  output.textContent = "正在写入 Switchyard 本机账号池…";
+  try {
+    const result = await invoke("import:sub2api:data-apply", {
+      importId: sub2apiDataImportResult.importId,
+      providerId
+    });
+    if (!result?.ok) {
+      output.textContent = `导入失败：${result?.error || "未知错误"}`;
+      return toast(result?.error || "Sub2API 备份导入失败", "error");
+    }
+    output.textContent = [
+      "导入完成",
+      `可导入账号：${result.imported || 0}（其中 Agent Identity ${result.agentIdentity || 0}）`,
+      `写入账号池：新增 ${result.added || 0}，重复跳过 ${result.skipped || 0}，更新 ${result.updated || 0}`,
+      result.unsupported ? `未支持的备份账号：${result.unsupported}` : "",
+      result.errors?.length ? `无效账号：${result.errors.length}（未写入）` : ""
+    ].filter(Boolean).join("\n");
+    sub2apiDataImportResult = null;
+    button.disabled = true;
+    await refreshProviderPoolList();
+    toast(`Sub2API 备份已导入 Switchyard：新增 ${result.added || 0} 个账号`, result.errors?.length ? "warn" : "success");
+  } catch (err) {
+    output.textContent = `导入失败：${err?.message || String(err)}`;
+    toast(`Sub2API 备份导入失败：${err?.message || String(err)}`, "error");
+  } finally {
+    button.disabled = !sub2apiDataImportResult?.importId;
+    button.textContent = "导入到 Switchyard 账号池";
+  }
 });
 
 /* ---- Logs ---- */
@@ -3939,19 +3798,13 @@ function renderRequestTrace(row) {
   } else if (row.prompt_preview) {
     events.push({ role: "user", title: "请求内容", text: row.prompt_preview, timestamp: row.ts });
   }
-  if (request?.conversionChain || request?.compatRules) {
-    const details = [];
-    if (request.conversionChain?.steps?.length) details.push(`协议链路：${request.conversionChain.steps.join(" -> ")}`);
-    const rules = compactCompatRules(request.compatRules || {});
-    if (rules.length) {
-      details.push("兼容规则：");
-      for (const rule of rules) {
-        const source = rule.source === "manual" ? "手动" : "自动";
-        const dirs = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
-        details.push(`- ${source} · ${rule.label || rule.id}${dirs ? ` · ${dirs}` : ""}`);
-      }
-    }
-    events.push({ role: "system", title: "协议转换 / 兼容规则", text: details.join("\n") || "无", timestamp: row.ts });
+  if (request?.conversionChain?.steps?.length) {
+    events.push({
+      role: "system",
+      title: "协议转换",
+      text: `协议链路：${request.conversionChain.steps.join(" -> ")}`,
+      timestamp: row.ts
+    });
   }
   {
     const details = [];
@@ -5009,14 +4862,6 @@ function structuredSummaryHtml(entry) {
     if (request.conversionChain?.steps?.length) {
       parts.push(summaryListBlock("协议转换链路", [request.conversionChain.steps.join(" -> ")]));
     }
-    const activeRules = compactCompatRules(request.compatRules || {});
-    if (activeRules.length) {
-      parts.push(summaryListBlock("实际兼容规则", activeRules.map((rule) => {
-        const source = rule.source === "manual" ? "手动" : "自动";
-        const dirs = (rule.directions || []).map((item) => COMPAT_DIRECTION_LABEL[item] || item).join("/");
-        return `${source} · ${rule.label || rule.id}${dirs ? ` · ${dirs}` : ""}`;
-      })));
-    }
     const errorClass = requestErrorClass(request);
     if (errorClass) parts.push(summaryListBlock("错误分类", [errorClass]));
     const rectifiers = rectifierItems(request);
@@ -5211,6 +5056,95 @@ document.getElementById("btn-test-batch")?.addEventListener("click", async () =>
       lines.push(`  ✗ ${err.message}`);
     }
     out.textContent = lines.join("\n");
+  }
+});
+
+document.getElementById("btn-mobile-control-toggle")?.addEventListener("click", async () => {
+  const running = Boolean(state.mobileControl.status?.running);
+  const button = document.getElementById("btn-mobile-control-toggle");
+  if (button) button.disabled = true;
+  try {
+    state.mobileControl.status = await invoke(
+      running ? "mobile-control:disable" : "mobile-control:enable"
+    );
+    if (running) state.mobileControl.challenge = null;
+    await refreshMobileControl();
+    toast(running ? "手机端控制已停用" : "手机端控制已启用");
+  } catch (error) {
+    toast(`手机端控制操作失败：${error.message}`, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+document.getElementById("btn-mobile-pair")?.addEventListener("click", async () => {
+  try {
+    state.mobileControl.challenge = await invoke("mobile-control:pair-start", {
+      ttlMs: 10 * 60 * 1000
+    });
+    const savedBase = String(localStorage.getItem("switchyard.mobile-control.tailscale-base") || "");
+    const remoteBase = savedBase ? normalizeMobileTailscaleBase(savedBase) : "";
+    if (remoteBase && remoteBase !== savedBase) localStorage.setItem("switchyard.mobile-control.tailscale-base", remoteBase);
+    if (remoteBase && state.mobileControl.challenge?.pairingPath) {
+      state.mobileControl.challenge.pairingUrl = `${remoteBase}${state.mobileControl.challenge.pairingPath}`;
+    }
+    renderMobileControl();
+    document.getElementById("mobile-pairing-url")?.select();
+    toast("已生成一次性配对链接");
+  } catch (error) {
+    toast(`生成配对链接失败：${error.message}`, "error");
+  }
+});
+
+document.getElementById("mobile-tailscale-base")?.addEventListener("change", (event) => {
+  const input = event.target;
+  const raw = String(input.value || "").trim().replace(/\/$/, "");
+  if (!raw) {
+    localStorage.removeItem("switchyard.mobile-control.tailscale-base");
+    input.value = "";
+    return;
+  }
+  try {
+    const normalized = normalizeMobileTailscaleBase(raw);
+    localStorage.setItem("switchyard.mobile-control.tailscale-base", normalized);
+    input.value = normalized;
+    if (state.mobileControl.challenge?.pairingPath) {
+      state.mobileControl.challenge.pairingUrl = `${normalized}${state.mobileControl.challenge.pairingPath}`;
+      renderMobileControl();
+    }
+  } catch (error) {
+    toast(`Tailscale 地址无效：${error.message}`, "error");
+    input.focus();
+  }
+});
+
+document.getElementById("btn-mobile-pair-copy")?.addEventListener("click", async () => {
+  const value = document.getElementById("mobile-pairing-url")?.value || "";
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    toast("配对链接已复制");
+  } catch {
+    toast("复制失败，请手动复制", "error");
+  }
+});
+
+document.getElementById("btn-mobile-devices-refresh")?.addEventListener("click", () => {
+  refreshMobileControl().catch((error) => toast(error.message, "error"));
+});
+
+document.getElementById("mobile-devices")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-mobile-device-revoke]");
+  if (!button) return;
+  if (!confirm("撤销后该设备会立即失去访问权限，确认继续？")) return;
+  try {
+    await invoke("mobile-control:device-revoke", {
+      deviceId: button.dataset.mobileDeviceRevoke
+    });
+    await refreshMobileControl();
+    toast("设备已撤销");
+  } catch (error) {
+    toast(`撤销失败：${error.message}`, "error");
   }
 });
 

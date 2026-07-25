@@ -64,6 +64,20 @@ export function buildRouter(config) {
   return { providers, models, ambiguousSecondaryKeys: ambiguous };
 }
 
+/**
+ * A Codex task keeps sending its old full provider/model id after that provider
+ * has been removed.  This is intentionally narrow: only a qualified id whose
+ * provider no longer exists is eligible for recovery.  Unknown short names or
+ * models belonging to a live provider remain normal routing errors.
+ */
+export function isDeletedProviderModelRequest(config, requestedModel) {
+  const requested = String(requestedModel || "").trim();
+  const slash = requested.indexOf("/");
+  if (slash <= 0 || slash === requested.length - 1) return false;
+  const providerId = requested.slice(0, slash);
+  return !(config.providers || []).some((provider) => provider?.id === providerId);
+}
+
 export function resolveRoute(config, requestedModel, { clientId } = {}) {
   const router = buildRouter(config);
   const requested = String(requestedModel || "").trim();

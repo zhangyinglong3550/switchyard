@@ -342,6 +342,179 @@ test("dispatchChat → rectifies thinking budget errors and retries once", async
   assert.equal(result.rectifiers[0].id, "thinking-budget");
 });
 
+test("dispatchChat → retries an OpenCode Go DeepSeek tool-manifest crash with compact schemas", async (t) => {
+  resetPatches();
+  let calls = 0;
+  let retriedBody = null;
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    if (calls === 1) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Cannot read properties of undefined (reading 'text')" } }));
+      return;
+    }
+    retriedBody = data;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x",
+      choices: [{ message: { role: "assistant", content: "ok" } }]
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+
+  const result = await dispatchChat(provider, "deepseek-v4-pro", {
+    messages: [{ role: "user", content: "go" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "complex_tool",
+        description: "tool",
+        parameters: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            value: {
+              description: "optional input",
+              type: ["string", "null"],
+              oneOf: [{ type: "string" }, { type: "null" }]
+            },
+            entries: {
+              type: "array",
+              items: [{ type: "object", properties: { id: { type: "integer" } }, required: ["id"] }]
+            }
+          },
+          additionalProperties: { type: "string" }
+        }
+      }
+    }]
+  });
+
+  assert.equal(result.kind, "json");
+  assert.equal(calls, 2);
+  assert.equal(result.rectifiers[0].id, "opencode-go-tool-manifest");
+  const parameters = retriedBody.tools[0].function.parameters;
+  assert.equal(parameters.$schema, undefined);
+  assert.equal(parameters.additionalProperties, false);
+  assert.equal(parameters.properties.value.type, "string");
+  assert.equal(parameters.properties.value.oneOf, undefined);
+  assert.equal(parameters.properties.entries.items.type, "object");
+  assert.equal(parameters.properties.entries.items.properties.id.type, "integer");
+});
+
+test("dispatchChat → rectifies an OpenCode Go DeepSeek stream 400 before piping SSE", async (t) => {
+  resetPatches();
+  let calls = 0;
+  let retriedBody = null;
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    assert.equal(data.stream, true);
+    if (calls === 1) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Error from provider (Console Go): Upstream request failed" }));
+      return;
+    }
+    retriedBody = data;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n");
+  });
+  t.after(() => close(up));
+  const provider = { id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+
+  const result = await dispatchChat(provider, "deepseek-v4-pro", {
+    stream: true,
+    messages: [{ role: "user", content: "go" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "complex_tool",
+        description: "x".repeat(900),
+        parameters: {
+          type: "object",
+          properties: {
+            value: {
+              description: "y".repeat(600),
+              type: ["string", "null"],
+              oneOf: [{ type: "string" }, { type: "null" }]
+            }
+          },
+          additionalProperties: { type: "string" }
+        }
+      }
+    }]
+  });
+
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(result.rectifiers[0].id, "opencode-go-tool-manifest");
+  assert.equal(retriedBody.tools[0].function.description.length, 480);
+  assert.equal(retriedBody.tools[0].function.parameters.properties.value.description.length, 240);
+  assert.equal(retriedBody.tools[0].function.parameters.properties.value.type, "string");
+  assert.match(await result.upstream.text(), /data: \[DONE\]/);
+});
+
+test("dispatchChat → retries a persistent OpenCode Go Console Go stream 400 with a description-free manifest", async (t) => {
+  resetPatches();
+  let calls = 0;
+  let finalBody = null;
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    if (calls < 3) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Error from provider (Console Go): Upstream request failed" }));
+      return;
+    }
+    finalBody = data;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n");
+  });
+  t.after(() => close(up));
+  const provider = { id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+
+  const result = await dispatchChat(provider, "deepseek-v4-pro", {
+    stream: true,
+    messages: [{ role: "user", content: "go" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "complex_tool",
+        description: "x".repeat(900),
+        parameters: {
+          type: "object",
+          description: "object description ".repeat(80),
+          properties: {
+            value: {
+              description: "y".repeat(600),
+              type: ["string", "null"],
+              oneOf: [{ type: "string" }, { type: "null" }]
+            }
+          },
+          required: ["value"],
+          additionalProperties: { type: "string" }
+        }
+      }
+    }]
+  });
+
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.ok, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(result.rectifiers.map((item) => item.id), [
+    "opencode-go-tool-manifest",
+    "opencode-go-tool-manifest-minimal"
+  ]);
+  assert.equal(finalBody.tools[0].function.description, undefined);
+  assert.equal(finalBody.tools[0].function.parameters.description, undefined);
+  assert.equal(finalBody.tools[0].function.parameters.properties.value.description, undefined);
+  assert.equal(finalBody.tools[0].function.parameters.properties.value.type, "string");
+  assert.deepEqual(finalBody.tools[0].function.parameters.required, ["value"]);
+  assert.match(await result.upstream.text(), /data: \[DONE\]/);
+});
+
 test("dispatchChat → openai_responses upstream flattens to chat-shape", async (t) => {
   resetPatches();
   const up = await spawnUpstream((req, res, body) => {

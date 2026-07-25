@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { responsesToChat, chatToResponse, extractNamespaceMap } from "../src/openai-adapter.mjs";
-import { anthropicToChat, chatToAnthropic } from "../src/anthropic-adapter.mjs";
+import { responsesToChat, chatToResponse, extractNamespaceMap, streamChatAsResponses } from "../src/openai-adapter.mjs";
+import { anthropicToChat, chatToAnthropic, streamResponsesAsAnthropic } from "../src/anthropic-adapter.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse, streamResponsesAsChat } from "../src/openai-adapter-out.mjs";
 import { Writable } from "node:stream";
@@ -206,6 +206,102 @@ test("streamResponsesAsChat emits chat.completion.chunk with id and content", as
   assert.match(body, /data: \[DONE\]/);
 });
 
+test("streamChatAsResponses closes partial output and reports adapter EOF as incomplete", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"id":"chat_1","choices":[{"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}',
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamChatAsResponses({ body: stream, ok: true, status: 200 }, res, "chat/gpt");
+
+  assert.match(body, /event: response.output_item.done/);
+  assert.match(body, /"text":"partial"/);
+  assert.match(body, /event: response.incomplete/);
+  assert.match(body, /"reason":"adapter_eof"/);
+  assert.doesNotMatch(body, /event: response.failed/);
+  assert.doesNotMatch(body, /data: \[DONE\]/);
+});
+
+test("streamChatAsResponses uses parser-visible heartbeats while upstream is silent", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      setTimeout(() => {
+        controller.enqueue(new TextEncoder().encode([
+          'data: {"id":"chat_1","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+          "",
+          "data: [DONE]",
+          ""
+        ].join("\n")));
+        controller.close();
+      }, 20);
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamChatAsResponses(
+    { body: stream, ok: true, status: 200 },
+    res,
+    "chat/gpt",
+    { heartbeatMs: 1, idleTimeoutMs: 1_000 }
+  );
+
+  assert.match(body, /event: response\.heartbeat/);
+  assert.match(body, /event: response\.completed/);
+  assert.match(body, /data: \[DONE\]/);
+});
+
+test("streamResponsesAsChat turns response.incomplete into a terminal Chat error", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"type":"response.output_text.delta","delta":"partial"}',
+        "",
+        'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"adapter_eof"}}}',
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamResponsesAsChat({ body: stream, ok: true, status: 200 }, res, "responses/gpt");
+
+  assert.match(body, /"content":"partial"/);
+  assert.match(body, /event: error/);
+  assert.match(body, /adapter_eof/);
+  assert.doesNotMatch(body, /"finish_reason":"stop"/);
+  assert.doesNotMatch(body, /data: \[DONE\]/);
+});
+
 test("streamResponsesAsChat translates function_call deltas to tool_calls", async () => {
   const stream = new ReadableStream({
     start(controller) {
@@ -238,6 +334,108 @@ test("streamResponsesAsChat translates function_call deltas to tool_calls", asyn
   assert.match(body, /run_terminal_command/);
   assert.match(body, /"finish_reason":"tool_calls"/);
   assert.match(body, /"id":"chatcmpl_/);
+});
+
+test("streamResponsesAsAnthropic preserves text and tool-call deltas", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = new TextEncoder();
+      controller.enqueue(enc.encode([
+        'data: {"type":"response.output_text.delta","delta":"先读取文件。"}',
+        "",
+        'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Read","arguments":""}}',
+        "",
+        'data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\\"file_path\\":\\"README.md\\"}"}',
+        "",
+        'data: {"type":"response.completed","response":{"id":"r1","usage":{"output_tokens":3},"output":[]}}',
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamResponsesAsAnthropic({ body: stream, ok: true, status: 200 }, res, "claude-via-responses");
+
+  assert.match(body, /event: message_start/);
+  assert.match(body, /"type":"text_delta","text":"先读取文件。"/);
+  assert.match(body, /"type":"tool_use","id":"call_1","name":"Read"/);
+  assert.match(body, /\\"file_path\\":\\"README.md\\"/);
+  assert.match(body, /"stop_reason":"tool_use"/);
+  assert.match(body, /event: message_stop/);
+});
+
+test("streamResponsesAsAnthropic turns response.incomplete into an error", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"type":"response.output_text.delta","delta":"partial"}',
+        "",
+        'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"adapter_eof"}}}',
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  const chunks = [];
+  const res = {
+    writeHead() {},
+    write(value) { chunks.push(String(value)); },
+    end() {}
+  };
+
+  await streamResponsesAsAnthropic({ body: stream, ok: true, status: 200 }, res, "claude-via-responses");
+
+  const body = chunks.join("");
+  assert.match(body, /event: error/);
+  assert.match(body, /adapter_eof/);
+  assert.doesNotMatch(body, /event: message_stop/);
+});
+
+test("streamResponsesAsAnthropic emits an error instead of message_stop when upstream stalls", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        "",
+        ""
+      ].join("\n")));
+    },
+    cancel() {
+      cancelled = true;
+    }
+  });
+  const chunks = [];
+  const res = {
+    writeHead() {},
+    write(value) { chunks.push(String(value)); },
+    end() {}
+  };
+
+  await streamResponsesAsAnthropic(
+    { body: stream, ok: true, status: 200 },
+    res,
+    "claude-via-responses",
+    { idleTimeoutMs: 1 }
+  );
+
+  const body = chunks.join("");
+  assert.equal(cancelled, true);
+  assert.match(body, /event: error/);
+  assert.match(body, /idle for 1000ms/);
+  assert.doesNotMatch(body, /event: message_stop/);
 });
 
 test("responsesStreamToChatResponse preserves streamed function_call arguments", async () => {

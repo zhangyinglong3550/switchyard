@@ -20,6 +20,7 @@ import {
   accountFromAntigravityJson,
   accountFromCodexAuthJson,
   poolKindOf,
+  ensureFreshAccount,
   isWebSsoJwt
 } from "../src/account-pool/index.mjs";
 import { providerReady, providerAuthHeaders, isCodexOAuthProvider } from "../src/upstream/clients.mjs";
@@ -490,8 +491,7 @@ test("picker · bind antigravity and codex pool kinds", () => {
     id: "antigravity-pool",
     authMode: "account_pool",
     poolKind: "antigravity_oauth",
-    baseUrl: "http://127.0.0.1:8317/v1",
-    apiKey: "sk-cliproxy-local"
+    baseUrl: "https://daily-cloudcode-pa.googleapis.com"
   };
   assert.equal(poolKindOf(antiProvider), "antigravity_oauth");
   const antiBound = bindProviderToAccount(antiProvider, {
@@ -499,9 +499,11 @@ test("picker · bind antigravity and codex pool kinds", () => {
     email: "a@x.com",
     accessToken: "google-access"
   });
-  assert.equal(antiBound.authMode, "api_key");
-  assert.equal(antiBound.apiKey, "sk-cliproxy-local");
-  assert.equal(antiBound._relay, "cliproxy");
+  assert.equal(antiBound.authMode, "antigravity_oauth");
+  assert.equal(antiBound.apiFormat, "antigravity");
+  assert.equal(antiBound.apiKey, "google-access");
+  assert.equal(antiBound._antigravityAccessToken, "google-access");
+  assert.equal(antiBound._relay, undefined);
   assert.equal(antiBound._accountEmail, "a@x.com");
   assert.equal(isAccountPoolProvider(antiBound), false);
 
@@ -523,6 +525,54 @@ test("picker · bind antigravity and codex pool kinds", () => {
   assert.equal(codexBound._codexAccessToken, "codex-live");
   assert.equal(providerAuthHeaders(codexBound, "bearer").Authorization, "Bearer codex-live");
   assert.equal(providerAuthHeaders(codexBound, "bearer")["chatgpt-account-id"], "acct-9");
+});
+
+test("picker · Antigravity CPA imports reuse the local refreshed credential without OAuth client env", async () => {
+  const home = tmpHome();
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-cpa-"));
+  try {
+    const email = "fresh@x.com";
+    const fileName = `antigravity-${email}.json`;
+    fs.writeFileSync(path.join(authDir, fileName), JSON.stringify({
+      type: "antigravity",
+      email,
+      access_token: "fresh-local-access",
+      refresh_token: "fresh-local-refresh",
+      expired: new Date(Date.now() + 3600_000).toISOString(),
+      project_id: "fresh-project"
+    }));
+    upsertAccounts("antigravity-pool", [{
+      email,
+      accessToken: "expired-pool-access",
+      refreshToken: "expired-pool-refresh",
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+      projectId: "old-project",
+      source: `cpa-file:${fileName}`
+    }], { home, poolKind: "antigravity_oauth" });
+    const account = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
+    const result = await ensureFreshAccount(account, {
+      home,
+      provider: {
+        id: "antigravity-pool",
+        authMode: "account_pool",
+        poolKind: "antigravity_oauth",
+        antigravityAuthDir: authDir
+      },
+      fetchImpl: async () => {
+        throw new Error("Google refresh should not run when CPA already has a fresh access token");
+      }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.refreshed, true);
+    assert.equal(result.account.accessToken, "fresh-local-access");
+    assert.equal(result.account.projectId, "fresh-project");
+    const stored = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
+    assert.equal(stored.accessToken, "fresh-local-access");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(authDir, { recursive: true, force: true });
+  }
 });
 
 test("accountFrom* helpers parse token fields", () => {

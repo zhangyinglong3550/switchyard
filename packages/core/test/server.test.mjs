@@ -405,17 +405,15 @@ test("server streams Anthropic response when selected upstream is openai_respons
       assert.equal(req.url, "/responses");
       const body = JSON.parse(buf);
       assert.equal(body.model, "glm-5.2");
-      assert.equal(body.stream, false);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        id: "resp_1",
-        object: "response",
-        created_at: 0,
-        status: "completed",
-        model: "glm-5.2",
-        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hello from responses" }] }],
-        usage: { input_tokens: 1, output_tokens: 3 }
-      }));
+      assert.equal(body.stream, true);
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end([
+        "event: response.completed",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"glm-5.2\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello from responses\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":3}}}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"));
     });
   });
   await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
@@ -495,7 +493,308 @@ test("server streams Anthropic tool_use input as json deltas for Claude Code", a
   assert.match(text, /"stop_reason":"tool_use"/);
 });
 
-test("server returns partial Anthropic stream when Codex Responses stream disconnects after text", async (t) => {
+test("server restores OpenCode Go DeepSeek XML tool calls for Codex Responses", async (t) => {
+  let upstreamBody = null;
+  const upstream = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (chunk) => (buf += chunk));
+    req.on("end", () => {
+      assert.equal(req.url, "/v1/chat/completions");
+      const body = JSON.parse(buf);
+      upstreamBody = body;
+      assert.equal(body.model, "deepseek-v4");
+      assert.equal(body.stream, true);
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.write('data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"我来按步骤完成。<tool_calls><tool_call name=\\"mcp__chrome__navigate_to\\"><parameter name=\\"url\\">https://skills.home.ke.com/</parameter>"},"finish_reason":null}]}\n\n');
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"</tool_call></tool_calls>"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [{ id: "opencode-go/deepseek-v4", providerId: "opencode-go", upstreamModel: "deepseek-v4" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({
+      model: "opencode-go/deepseek-v4",
+      stream: true,
+      input: [{ type: "message", role: "user", content: "打开技能市场" }],
+      tools: [{
+        type: "function",
+        name: "mcp__chrome__navigate_page",
+        description: "Open a browser page",
+        parameters: {
+          type: "object",
+          properties: { url: { type: "string" } },
+          required: ["url"]
+        }
+      }]
+    })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.equal(upstreamBody?.tools?.length, 1, JSON.stringify(upstreamBody));
+  assert.doesNotMatch(text, /<tool_calls>|<tool_call|<parameter/);
+  assert.match(text, /event: response\.function_call_arguments\.done/);
+  assert.match(text, /"name":"mcp__chrome__navigate_page"/);
+  assert.match(text, /"arguments":"{\\"url\\":\\"https:\/\/skills\.home\.ke\.com\/\\"}"/);
+  const completed = completedResponseFromSse(text);
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.output[0].type, "message");
+  assert.equal(completed.output[0].content[0].text, "我来按步骤完成。");
+  assert.equal(completed.output[1].type, "function_call");
+  assert.equal(completed.output[1].name, "mcp__chrome__navigate_page");
+  assert.equal(completed.output[1].arguments, "{\"url\":\"https://skills.home.ke.com/\"}");
+});
+
+test("server retries OpenCode Go DeepSeek Console Go stream 400 before responding to Codex", async (t) => {
+  let calls = 0;
+  let retryBody = null;
+  const upstream = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (chunk) => (buf += chunk));
+    req.on("end", () => {
+      calls += 1;
+      const body = JSON.parse(buf);
+      assert.equal(req.url, "/v1/chat/completions");
+      assert.equal(body.stream, true);
+      if (calls === 1) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Error from provider (Console Go): Upstream request failed" }));
+        return;
+      }
+      retryBody = body;
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"已恢复"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [{ id: "opencode-go/deepseek-v4", providerId: "opencode-go", upstreamModel: "deepseek-v4" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({
+      model: "opencode-go/deepseek-v4",
+      stream: true,
+      input: [{ type: "message", role: "user", content: "继续" }],
+      tools: [{
+        type: "function",
+        name: "mcp__chrome__navigate_page",
+        description: "Open a browser page ".repeat(100),
+        parameters: {
+          type: "object",
+          properties: {
+            url: { type: ["string", "null"], description: "Target URL ".repeat(100) }
+          },
+          required: ["url"],
+          additionalProperties: { type: "string" }
+        }
+      }]
+    })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.equal(calls, 2);
+  assert.equal(retryBody.tools[0].function.description.length, 480);
+  assert.equal(retryBody.tools[0].function.parameters.properties.url.description.length, 240);
+  assert.match(text, /已恢复/);
+  assert.doesNotMatch(text, /Upstream request failed/);
+});
+
+test("server restores OpenCode Go DeepSeek XML tool calls for Claude Code", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.write('data: {"choices":[{"index":0,"delta":{"content":"<tool_calls><to_mcp><provider>chrome</provider><tool_call>navigate_page</tool_call><tool_call_params>{\\"url\\":\\"https://skills.home.ke.com/"},"finish_reason":null}]}\n\n');
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"\\"}</tool_call_params></to_mcp></tool_calls>"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "opencode-go", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [{ id: "opencode-go/deepseek-v4", providerId: "opencode-go", upstreamModel: "deepseek-v4" }],
+    clients: { "claude-code": { enabled: true, allowedModels: ["*"] } }
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/claude-code/v1/messages`, {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+    headers: { "Content-Type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": "dummy" },
+    body: JSON.stringify({
+      model: "opencode-go/deepseek-v4",
+      max_tokens: 128,
+      stream: true,
+      messages: [{ role: "user", content: "打开技能市场" }],
+      tools: [{
+        name: "mcp__chrome__navigate_page",
+        description: "Open a browser page",
+        input_schema: {
+          type: "object",
+          properties: { url: { type: "string" } },
+          required: ["url"]
+        }
+      }]
+    })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.doesNotMatch(text, /<tool_calls>|<to_mcp>|tool_call_params/);
+  assert.match(text, /event: content_block_start/);
+  assert.match(text, /"type":"tool_use"/);
+  assert.match(text, /"name":"mcp__chrome__navigate_page"/);
+  assert.match(text, /"type":"input_json_delta"/);
+  assert.match(text, /\\"url\\":\\"https:\/\/skills\.home\.ke\.com\/\\"/);
+  assert.match(text, /"stop_reason":"tool_use"/);
+  assert.match(text, /event: message_stop/);
+});
+
+test("server sends CCA-valid Antigravity tool schemas from Codex Responses", async (t) => {
+  let received = null;
+  const upstream = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (chunk) => (buf += chunk));
+    req.on("end", () => {
+      assert.equal(req.url, "/v1internal:streamGenerateContent?alt=sse");
+      received = JSON.parse(buf);
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end(`data: ${JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: "工具定义已接受。" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 3 }
+        }
+      })}\n\n`);
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{
+      id: "antigravity",
+      apiFormat: "antigravity",
+      baseUrl: `http://127.0.0.1:${upPort}`,
+      apiKey: "test-access-token",
+      projectId: "project-123"
+    }],
+    models: [{ id: "antigravity/gemini-3.6-flash", providerId: "antigravity", upstreamModel: "gemini-3.6-flash" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({
+      model: "antigravity/gemini-3.6-flash",
+      stream: true,
+      input: [{ type: "message", role: "user", content: "调用复杂工具" }],
+      tools: [{
+        type: "function",
+        name: "complex_tool",
+        parameters: {
+          type: "object",
+          properties: {
+            options: {
+              type: "array",
+              items: [{
+                type: "object",
+                properties: {
+                  present: { type: ["string", "null"] },
+                  mode: { type: ["string", "null"], enum: ["fast", null] }
+                },
+                required: ["present", "missing"]
+              }]
+            },
+            valid: { type: "boolean" }
+          },
+          required: ["valid", "missing"]
+        }
+      }]
+    })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.match(text, /工具定义已接受/);
+  assert.match(text, /event: response\.completed/);
+
+  const schema = received?.request?.tools?.[0]?.functionDeclarations?.[0]?.parameters;
+  assert.ok(schema, JSON.stringify(received));
+  const assertCcaSchema = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(assertCcaSchema);
+      return;
+    }
+    if (Array.isArray(value.type)) assert.fail(`CCA schema type must be scalar: ${JSON.stringify(value)}`);
+    if (Array.isArray(value.items)) assert.fail(`CCA schema items must be a schema object: ${JSON.stringify(value)}`);
+    if (Array.isArray(value.required)) {
+      const properties = value.properties || {};
+      for (const name of value.required) {
+        assert.ok(Object.hasOwn(properties, name), `stale required field ${name} in ${JSON.stringify(value)}`);
+      }
+    }
+    for (const child of Object.values(value.properties || {})) assertCcaSchema(child);
+    if (value.items) assertCcaSchema(value.items);
+  };
+  assertCcaSchema(schema);
+  assert.deepEqual(schema.required, ["valid"]);
+  assert.deepEqual(schema.properties.options.items.required, ["present"]);
+  assert.equal(schema.properties.options.items.properties.present.nullable, true);
+  assert.deepEqual(schema.properties.options.items.properties.mode.enum, ["fast"]);
+});
+
+test("server emits Anthropic SSE error when Codex Responses stream disconnects after text", async (t) => {
   const upstream = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
@@ -503,6 +802,7 @@ test("server returns partial Anthropic stream when Codex Responses stream discon
       res.write([
         "event: response.output_text.delta",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        "",
         ""
       ].join("\n"));
       setTimeout(() => res.destroy(new Error("synthetic codex disconnect")), 20);
@@ -535,7 +835,8 @@ test("server returns partial Anthropic stream when Codex Responses stream discon
   assert.equal(resp.status, 200, text);
   assert.match(text, /event: message_start/);
   assert.match(text, /partial/);
-  assert.match(text, /event: message_stop/);
+  assert.match(text, /event: error/);
+  assert.doesNotMatch(text, /event: message_stop/);
 });
 
 test("server translates Responses SSE to Chat Completions for /v1/chat/completions stream", async (t) => {
@@ -695,7 +996,7 @@ test("server preserves native Codex Responses body for openai_responses upstream
   assert.match(text, /response.output_text.delta/);
 });
 
-test("server turns upstream response-body decode failures into SSE errors", async (t) => {
+test("server turns upstream response-body decode failures into Responses failures", async (t) => {
   let acceptEncoding = "";
   const upstream = http.createServer((req, res) => {
     acceptEncoding = String(req.headers["accept-encoding"] || "");
@@ -733,9 +1034,9 @@ test("server turns upstream response-body decode failures into SSE errors", asyn
   const text = await resp.text();
   assert.equal(resp.status, 200, text);
   assert.equal(acceptEncoding, "identity");
-  assert.match(text, /event: error/);
+  assert.match(text, /event: response.failed/);
   assert.match(text, /upstream_stream_error/);
-  assert.match(text, /data: \[DONE\]/);
+  assert.doesNotMatch(text, /data: \[DONE\]/);
 });
 
 test("server retries native Responses stream when it disconnects before the first upstream chunk", async (t) => {
@@ -929,6 +1230,7 @@ test("server emits response.failed when native Responses stream disconnects", as
         "",
         "event: response.output_text.delta",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        "",
         ""
       ].join("\n"));
       setTimeout(() => res.destroy(new Error("synthetic upstream disconnect")), 20);
@@ -959,10 +1261,170 @@ test("server emits response.failed when native Responses stream disconnects", as
   const text = await resp.text();
   assert.equal(resp.status, 200, text);
   assert.equal(attempts, 1);
-  assert.doesNotMatch(text, /event: response.failed/);
-  assert.doesNotMatch(text, /upstream_stream_error/);
+  assert.match(text, /event: response.failed/);
+  assert.match(text, /upstream_stream_error/);
+  assert.doesNotMatch(text, /data: \[DONE\]/);
   assert.match(text, /response.output_text.delta/);
   assert.match(text, /delta.*partial/);
+});
+
+test("server cancels an idle native Responses stream and emits response.incomplete", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.write([
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        "",
+        ""
+      ].join("\n"));
+      // Deliberately neither complete nor close: the gateway must detect
+      // upstream silence rather than letting its downstream keepalive mask it.
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{
+      id: "codex",
+      providerType: "codex_oauth",
+      apiFormat: "openai_responses",
+      baseUrl: `http://127.0.0.1:${upPort}`,
+      streamIdleTimeoutMs: 1
+    }],
+    models: [{ id: "codex/gpt-5.5", providerId: "codex", upstreamModel: "gpt-5.5" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({ model: "codex/gpt-5.5", stream: true, input: "ping" })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.match(text, /response.output_text.delta/);
+  assert.match(text, /event: response.incomplete/);
+  assert.match(text, /"reason":"upstream_stall_timeout"/);
+  assert.doesNotMatch(text, /event: response.failed/);
+});
+
+test("server aborts the upstream Responses stream when the downstream client disconnects", async (t) => {
+  let resolveUpstreamClosed;
+  const upstreamClosed = new Promise((resolve) => {
+    resolveUpstreamClosed = resolve;
+  });
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.write([
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+        "",
+        ""
+      ].join("\n"));
+      res.once("close", resolveUpstreamClosed);
+      // Keep the upstream stream open. A client cancellation must tear it down
+      // through the gateway AbortSignal instead of leaving it token-draining.
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "codex", providerType: "codex_oauth", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${upPort}` }],
+    models: [{ id: "codex/gpt-5.5", providerId: "codex", upstreamModel: "gpt-5.5" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    server.closeAllConnections?.();
+    upstream.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const controller = new AbortController();
+  const response = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({ model: "codex/gpt-5.5", stream: true, input: "ping" })
+  });
+  const reader = response.body.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  controller.abort();
+  await reader.cancel().catch(() => {});
+
+  await Promise.race([
+    upstreamClosed,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("upstream stream was not aborted")), 2_000))
+  ]);
+});
+
+test("server fails Responses conversion when a chat upstream goes idle after output", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.write([
+        "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":null}]}",
+        "",
+        ""
+      ].join("\n"));
+      // No finish_reason and no [DONE].
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{
+      id: "chat",
+      apiFormat: "openai_chat",
+      baseUrl: `http://127.0.0.1:${upPort}/v1`,
+      streamIdleTimeoutMs: 1
+    }],
+    models: [{ id: "chat/gpt", providerId: "chat", upstreamModel: "gpt" }]
+  });
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({ model: "chat/gpt", stream: true, input: "ping" })
+  });
+  const text = await resp.text();
+  assert.equal(resp.status, 200, text);
+  assert.match(text, /response.output_text.delta/);
+  assert.match(text, /event: response.incomplete/);
+  assert.match(text, /"reason":"upstream_stall_timeout"/);
+  assert.match(text, /event: response.output_item.done/);
+  assert.doesNotMatch(text, /event: response.completed/);
+  assert.doesNotMatch(text, /data: \[DONE\]/);
 });
 
 test("server ignores invalid EOF after native Responses stream completed", async (t) => {

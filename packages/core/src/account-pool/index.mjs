@@ -37,6 +37,21 @@ export {
 } from "./import-multi.mjs";
 
 export {
+  accountFromSub2ApiEntry,
+  importSub2ApiDataToCodexPool
+} from "./import-sub2api.mjs";
+
+export {
+  AGENT_IDENTITY_AUTH_BASE_URL,
+  isAgentIdentityAccount,
+  validateAgentIdentityAccount,
+  buildAgentAssertion,
+  registerAgentIdentityTask,
+  ensureAgentIdentityTask,
+  isInvalidAgentIdentityTaskResponse
+} from "./agent-identity.mjs";
+
+export {
   XAI_OAUTH_CLIENT_ID,
   XAI_TOKEN_ENDPOINT,
   XAI_API_BASE_URL,
@@ -71,6 +86,9 @@ export {
   isAccountPoolProvider,
   poolKindOf,
   poolStrategyOf,
+  accountAffinityId,
+  bindAccountAffinity,
+  clearAccountAffinity,
   listEligibleAccounts,
   pickAccount,
   ensureFreshAccount,

@@ -72,8 +72,37 @@ export function classifyCompatibilityError(payload, status = 0) {
   return "";
 }
 
-export function rectifyUpstreamRequest({ apiFormat = "openai_chat", body, payload, status } = {}) {
+export function rectifyUpstreamRequest({ apiFormat = "openai_chat", body, payload, status, ctx } = {}) {
   const errorClass = classifyCompatibilityError(payload, status);
+  // OpenCode Go's DeepSeek route has occasionally returned an internal 500
+  // (`Cannot read properties of undefined (reading 'text')`) for a valid but
+  // rich Codex tool manifest. It is not a client-visible schema validation
+  // error, so the generic classifier cannot identify it from the response.
+  // Retry once with the same tools expressed through the conservative OpenAI
+  // function-schema subset instead of making users choose a compat option.
+  if (!errorClass && isOpenCodeGoToolManifestFailure(payload, status, body, ctx)) {
+    const retryStage = Number(ctx?.runtimeRectifierAttempt || 0);
+    if (retryStage > 0) {
+      return actionResult(minimalOpenCodeToolManifest(body), {
+        id: "opencode-go-tool-manifest-minimal",
+        label: "OpenCode Go minimal tool manifest rectifier",
+        errorClass: "opencode-go.tool-manifest-crash",
+        changes: [
+          "removed all tool and schema descriptions after the compact-manifest retry also failed",
+          "preserved every tool name, parameter name, type, required field and enum"
+        ]
+      });
+    }
+    return actionResult(compactOpenCodeToolManifest(body), {
+      id: "opencode-go-tool-manifest",
+      label: "OpenCode Go tool manifest rectifier",
+      errorClass: "opencode-go.tool-manifest-crash",
+      changes: [
+        "compacted function schemas to the OpenAI object/array/primitive subset",
+        "removed nullable unions and unsupported composition keywords for retry"
+      ]
+    });
+  }
   if (!errorClass) return { applied: false, errorClass: "" };
 
   if (errorClass === "vision.unsupported-image") {
@@ -206,6 +235,170 @@ function disableThinking(body) {
   if (next.reasoning_split !== undefined) next.reasoning_split = false;
   if (next.reasoning && typeof next.reasoning === "object") next.reasoning = { ...next.reasoning, effort: "none" };
   return next;
+}
+
+function isOpenCodeGoToolManifestFailure(payload, status, body, ctx) {
+  if (!Array.isArray(body?.tools) || !body.tools.length) return false;
+  if (![400, 500, 502, 503, 504].includes(Number(status))) return false;
+  const provider = String(ctx?.provider?.id || "").toLowerCase();
+  const model = [
+    ctx?.model?.id,
+    ctx?.model?.providerId,
+    ctx?.model?.upstreamModel
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (provider !== "opencode-go" && !/\bopencode\b/.test(model)) return false;
+  // OpenCode Go has returned both a concrete internal exception and the
+  // generic Console Go wrapper error for the same malformed/oversized tool
+  // manifest path. Restrict the generic signature to requests that actually
+  // carry tools, then retry once with the compact fallback below.
+  return /cannot read properties of undefined \(reading ['"]text['"]\)|error from provider \(console go\): upstream request failed|upstream request failed/i
+    .test(errorText(payload));
+}
+
+function compactOpenCodeToolManifest(body) {
+  return {
+    ...body,
+    tools: body.tools.map((tool) => {
+      const fn = tool?.function || tool || {};
+      const name = String(fn.name || tool?.name || "tool").trim() || "tool";
+      const description = typeof fn.description === "string"
+        ? fn.description.slice(0, 480)
+        : "";
+      return {
+        type: "function",
+        function: {
+          name,
+          description,
+          parameters: compactOpenCodeSchema(fn.parameters || tool?.parameters)
+        }
+      };
+    })
+  };
+}
+
+function compactOpenCodeSchema(raw) {
+  const schema = isPlainObject(raw) ? raw : {};
+  const variant = firstConcreteSchemaVariant(schema);
+  const source = variant ? { ...variant, ...schema } : schema;
+  const type = concreteSchemaType(source);
+  const description = typeof source.description === "string" ? source.description.slice(0, 240) : "";
+
+  if (type === "object" || (!type && isPlainObject(source.properties))) {
+    const properties = {};
+    for (const [name, property] of Object.entries(source.properties || {})) {
+      properties[name] = compactOpenCodeSchema(property);
+    }
+    const out = { type: "object", properties };
+    if (description) out.description = description;
+    const required = Array.isArray(source.required)
+      ? source.required.filter((name) => typeof name === "string" && Object.hasOwn(properties, name))
+      : [];
+    if (required.length) out.required = required;
+    // A schema-valued additionalProperties is one of the JSON Schema forms
+    // that strict proxy implementations commonly mishandle. The fallback is
+    // intentionally conservative and only runs after the upstream has failed.
+    out.additionalProperties = false;
+    return out;
+  }
+
+  if (type === "array") {
+    const items = Array.isArray(source.items)
+      ? source.items.find((item) => isPlainObject(item))
+      : source.items;
+    const out = {
+      type: "array",
+      items: compactOpenCodeSchema(items)
+    };
+    if (description) out.description = description;
+    return out;
+  }
+
+  const out = { type: type || "string" };
+  if (description) out.description = description;
+  if (Array.isArray(source.enum)) {
+    const values = source.enum.filter((value) => value != null && ["string", "number", "boolean"].includes(typeof value));
+    if (values.length) out.enum = values;
+  }
+  return out;
+}
+
+function minimalOpenCodeToolManifest(body) {
+  return {
+    ...body,
+    tools: body.tools.map((tool) => {
+      const fn = tool?.function || tool || {};
+      const name = String(fn.name || tool?.name || "tool").trim() || "tool";
+      return {
+        type: "function",
+        function: {
+          name,
+          parameters: minimalOpenCodeSchema(fn.parameters || tool?.parameters)
+        }
+      };
+    })
+  };
+}
+
+function minimalOpenCodeSchema(raw) {
+  const schema = isPlainObject(raw) ? raw : {};
+  const variant = firstConcreteSchemaVariant(schema);
+  const source = variant ? { ...variant, ...schema } : schema;
+  const type = concreteSchemaType(source);
+
+  if (type === "object" || (!type && isPlainObject(source.properties))) {
+    const properties = {};
+    for (const [name, property] of Object.entries(source.properties || {})) {
+      properties[name] = minimalOpenCodeSchema(property);
+    }
+    const out = { type: "object", properties, additionalProperties: false };
+    const required = Array.isArray(source.required)
+      ? source.required.filter((name) => typeof name === "string" && Object.hasOwn(properties, name))
+      : [];
+    if (required.length) out.required = required;
+    return out;
+  }
+
+  if (type === "array") {
+    const items = Array.isArray(source.items)
+      ? source.items.find((item) => isPlainObject(item))
+      : source.items;
+    return { type: "array", items: minimalOpenCodeSchema(items) };
+  }
+
+  const out = { type: type || "string" };
+  if (Array.isArray(source.enum)) {
+    const values = source.enum.filter((value) => value != null && ["string", "number", "boolean"].includes(typeof value));
+    if (values.length) out.enum = values;
+  }
+  return out;
+}
+
+function firstConcreteSchemaVariant(schema) {
+  for (const key of ["anyOf", "oneOf", "allOf"]) {
+    if (!Array.isArray(schema?.[key])) continue;
+    const match = schema[key].find((candidate) => {
+      if (!isPlainObject(candidate)) return false;
+      const type = concreteSchemaType(candidate);
+      return Boolean(type || candidate.properties || candidate.items);
+    });
+    if (match) return match;
+  }
+  return null;
+}
+
+function concreteSchemaType(schema) {
+  const raw = schema?.type;
+  if (typeof raw === "string") return raw === "null" ? "" : raw;
+  if (Array.isArray(raw)) {
+    return raw.find((type) => typeof type === "string" && type !== "null") || "";
+  }
+  if (isPlainObject(schema?.properties)) return "object";
+  if (schema?.items !== undefined) return "array";
+  return "";
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function visit(value, visitor) {

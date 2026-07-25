@@ -377,6 +377,35 @@ testPatch("reasoning-state · backfills placeholder reasoning on bare tool_call 
   assert.equal(out.thinking.type, "enabled");
 });
 
+testPatch("reasoning-state · DeepSeek keeps tool-call placeholders after incomplete thinking disables the current turn", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "exec_command", arguments: "{}" } }]
+        },
+        { role: "tool", tool_call_id: "c1", content: "ok" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c2", type: "function", function: { name: "exec_command", arguments: "{}" } }]
+        },
+        { role: "tool", tool_call_id: "c2", content: "ok" }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "opencode-go" }, model: { id: "opencode-go/deepseek-v4-pro" } }
+  );
+
+  assert.equal(out.thinking.type, "disabled");
+  assert.equal(out.messages[1].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
+  assert.equal(out.messages[3].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
+});
+
 // ── 3. GLM content.text ────────────────────────────────────────────────────
 
 testPatch("glm-content-text · wraps bare string content into array for GLM providers", () => {
@@ -438,6 +467,60 @@ testPatch("opencode-tool-history · preserves message count", () => {
   };
   const out = applyOutbound(body, ctx);
   assert.equal(out.messages.length, 2);
+});
+
+testPatch("opencode-tool-history · bounds oversized DeepSeek tool results while preserving the newest tail", () => {
+  registerPatch(opencodeToolHistoryPatch.id, opencodeToolHistoryPatch);
+  const ctx = { provider: { id: "opencode-go" }, model: { id: "opencode-go/deepseek-v4-pro" } };
+  const older = "a".repeat(40_000);
+  const newest = `newest-prefix-${"b".repeat(20_000)}-newest-tail`;
+  const out = applyOutbound({
+    messages: [
+      { role: "assistant", content: "", tool_calls: [{ id: "c1" }] },
+      { role: "tool", tool_call_id: "c1", content: older },
+      { role: "assistant", content: "", tool_calls: [{ id: "c2" }] },
+      { role: "tool", tool_call_id: "c2", content: newest }
+    ]
+  }, ctx);
+
+  const [olderOut, newestOut] = out.messages.filter((message) => message.role === "tool");
+  assert.ok(olderOut.content.length <= 12_200);
+  assert.ok(newestOut.content.length <= 12_200);
+  assert.match(newestOut.content, /newest-tail$/);
+  assert.match(newestOut.content, /tool result truncated/);
+});
+
+testPatch("opencode-tool-history · preserves two already-adjacent DeepSeek tool rounds", () => {
+  registerPatch(opencodeToolHistoryPatch.id, opencodeToolHistoryPatch);
+  const ctx = { provider: { id: "opencode-go" }, model: { id: "opencode-go/deepseek-v4-pro" } };
+  const out = applyOutbound({
+    messages: [
+      { role: "user", content: "inspect" },
+      {
+        role: "assistant",
+        content: "first",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "browser", arguments: "{\"url\":\"a\"}" } }]
+      },
+      { role: "tool", tool_call_id: "c1", content: "first-result" },
+      {
+        role: "assistant",
+        content: "second",
+        tool_calls: [{ id: "c2", type: "function", function: { name: "shell", arguments: "{\"cmd\":\"b\"}" } }]
+      },
+      { role: "tool", tool_call_id: "c2", content: "second-result" }
+    ]
+  }, ctx);
+
+  assert.deepEqual(out.messages.map((message) => [
+    message.role,
+    message.tool_calls?.[0]?.id || message.tool_call_id || ""
+  ]), [
+    ["user", ""],
+    ["assistant", "c1"],
+    ["tool", "c1"],
+    ["assistant", "c2"],
+    ["tool", "c2"]
+  ]);
 });
 
 testPatch("tool-history-adjacent · preserves already-adjacent parallel tool results", () => {

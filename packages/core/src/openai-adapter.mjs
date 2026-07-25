@@ -1,6 +1,13 @@
 // Adapter between OpenAI Responses API and Chat Completions, including streaming.
 import crypto from "node:crypto";
 import { contentToText, safeJsonParse } from "./utils.mjs";
+import { SseParser } from "./sse-parser.mjs";
+import { iterateUpstreamBody } from "./stream-idle-timeout.mjs";
+import {
+  CODEX_RESPONSES_HEARTBEAT_MS,
+  startStreamKeepalive,
+  writeCodexResponsesHeartbeat
+} from "./stream-keepalive.mjs";
 import {
   SWITCHYARD_THINKING_KEY,
   cloneAnthropicThinkingBlocks,
@@ -81,7 +88,12 @@ function unflattenToolName(name, namespaceMap = {}) {
     }
   }
   // 3. 没有 namespaceMap 信息时，按 `__` 拆分（最后一段为函数名）
-  if (name.includes("__")) {
+  // MCP function names commonly use `mcp__provider__operation`, but they are
+  // ordinary OpenAI functions rather than Responses namespace tools. Splitting
+  // them here turns a declared `mcp__chrome__navigate_page` tool into the
+  // nonexistent namespace `mcp__chrome`, which makes Codex lose the tool
+  // binding on the next turn.
+  if (name.includes("__") && !/^mcp__/i.test(name)) {
     const parts = name.split("__");
     return { namespace: parts.slice(0, -1).join("__"), name: parts[parts.length - 1] };
   }
@@ -460,10 +472,18 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     });
     return entry;
   };
+  let terminalSeen = false;
   const handleData = (data) => {
-    if (!data || data === "[DONE]") return;
+    if (!data) return;
+    if (data === "[DONE]") {
+      terminalSeen = true;
+      return;
+    }
     const event = safeJsonParse(data);
     if (!event) return;
+    if (event.type === "error" || event.error) {
+      throw new Error(event.error?.message || event.message || "Chat stream returned an error");
+    }
     // Chat 流最终 usage（stream_options.include_usage）
     if (event.usage && typeof event.usage === "object") {
       capturedUsage = {
@@ -481,6 +501,7 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     const choice = event.choices?.[0] || {};
     const rawDelta = choice.delta || {};
     const finishReason = choice.finish_reason;
+    if (finishReason != null) terminalSeen = true;
     const reasoningDelta = extractReasoningSummaryText(rawDelta);
     if (reasoningDelta) appendReasoning(reasoningDelta);
     // Handle streaming tool calls (OpenAI Chat SSE format)
@@ -523,139 +544,153 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
       }
     }
   };
-  const processSseRecord = (record) => {
-    if (!record.trim()) return;
-    const dataLines = [];
-    for (const line of record.split(/\r?\n/)) {
-      if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  const parser = new SseParser((record) => {
+    handleData(String(record.data || "").trim());
+  });
+  let finalizedOutput = null;
+  const finalizeOutput = () => {
+    if (finalizedOutput) return finalizedOutput;
+    const flushed = thinkSplitter.flush();
+    appendReasoning(flushed.reasoning);
+    appendText(flushed.text);
+    const output = [];
+    if (reasoningStarted) {
+      const summary = reasoning ? [{ type: "summary_text", text: reasoning }] : [];
+      const col = reasoning ? [{ type: "reasoning_text", text: reasoning }] : [];
+      const completedReasoning = {
+        id: reasoningItemId,
+        type: "reasoning",
+        status: "completed",
+        summary,
+        content: col,
+        encrypted_content: encodeAnthropicThinkingBlocks([{ type: "thinking", thinking: reasoning }])
+      };
+      if (reasoningContentPartStarted) {
+        writeEvent(res, "response.reasoning_text.done", {
+          type: "response.reasoning_text.done",
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          content_index: 0,
+          text: reasoning
+        });
+        writeEvent(res, "response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          content_index: 0,
+          part: col[0] || { type: "reasoning_text", text: "" }
+        });
+      }
+      if (reasoningSummaryPartStarted) {
+        writeEvent(res, "response.reasoning_summary_text.done", {
+          type: "response.reasoning_summary_text.done",
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          summary_index: 0,
+          text: reasoning
+        });
+        writeEvent(res, "response.reasoning_summary_part.done", {
+          type: "response.reasoning_summary_part.done",
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          summary_index: 0,
+          part: summary[0] || { type: "summary_text", text: "" }
+        });
+      }
+      output.push(completedReasoning);
+      writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: reasoningOutputIndex, item: completedReasoning });
     }
-    if (dataLines.length) handleData(dataLines.join("\n"));
-  };
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let streamError = null;
-  const keepalive = setInterval(() => {
-    if (!res.destroyed && !res.writableEnded) {
-      res.write(`: switchyard keepalive ${Date.now()}\n\n`);
+    const completedItem = {
+      id: itemId,
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text, annotations: [] }]
+    };
+    if (messageStarted || text) {
+      ensureMessageStarted();
+      writeEvent(res, "response.output_text.done", { type: "response.output_text.done", item_id: itemId, output_index: messageOutputIndex, content_index: 0, text });
+      writeEvent(res, "response.content_part.done", { type: "response.content_part.done", item_id: itemId, output_index: messageOutputIndex, content_index: 0, part: { type: "output_text", text, annotations: [] } });
+      writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: messageOutputIndex, item: completedItem });
+      output.push(completedItem);
     }
-  }, 15000);
-  try {
-    for await (const chunk of upstream.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const records = buffer.split(/\r?\n\r?\n/);
-      buffer = records.pop() || "";
-      for (const record of records) {
-        processSseRecord(record);
+    // An incomplete upstream may stop halfway through a tool call. Finalizing
+    // the item keeps Codex and Claude Code from retaining a dangling tool cell.
+    for (const [, entry] of toolCalls) {
+      if (entry.id && entry.name) {
+        if (!entry.argumentsDone) {
+          entry.argumentsDone = true;
+          writeEvent(res, "response.function_call_arguments.done", {
+            type: "response.function_call_arguments.done",
+            item_id: entry.itemId,
+            output_index: entry.outputIndex,
+            arguments: entry.arguments
+          });
+        }
+        const completedCall = {
+          id: entry.itemId,
+          type: "function_call",
+          status: "completed",
+          call_id: entry.id,
+          name: entry.resolvedName || entry.name,
+          arguments: entry.arguments || "{}"
+        };
+        if (entry.namespace) completedCall.namespace = entry.namespace;
+        writeEvent(res, "response.output_item.done", {
+          type: "response.output_item.done",
+          output_index: entry.outputIndex,
+          item: completedCall
+        });
+        output.push(completedCall);
       }
     }
+    finalizedOutput = output;
+    return output;
+  };
+  let streamError = null;
+  const keepalive = startStreamKeepalive(res, {
+    intervalMs: options.heartbeatMs || CODEX_RESPONSES_HEARTBEAT_MS,
+    writeHeartbeat: writeCodexResponsesHeartbeat
+  });
+  try {
+    if (!upstream?.body) throw new Error(`Chat stream empty (status ${upstream?.status || 0})`);
+    for await (const chunk of iterateUpstreamBody(upstream.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Chat stream"
+    })) {
+      keepalive.touch();
+      parser.push(chunk);
+    }
+    parser.flush();
   } catch (err) {
     streamError = err;
   } finally {
-    clearInterval(keepalive);
+    keepalive.stop();
   }
-  if (streamError && !messageStarted && !reasoningStarted && !text && toolCalls.size === 0) {
-    writeEvent(res, "response.failed", {
-      type: "response.failed",
-      response: { ...baseResponse, status: "failed", error: String(streamError?.message || streamError || "upstream stream error") }
+  if (!terminalSeen && !streamError) {
+    streamError = Object.assign(new Error("Chat stream ended before completion"), {
+      code: "SWITCHYARD_INCOMPLETE_STREAM"
     });
-    res.write("data: [DONE]\n\n");
+  }
+  if (streamError) {
+    const incomplete = streamError?.code === "SWITCHYARD_STREAM_IDLE_TIMEOUT" ||
+      streamError?.code === "SWITCHYARD_INCOMPLETE_STREAM";
+    const response = {
+      ...baseResponse,
+      status: incomplete ? "incomplete" : "failed",
+      output: finalizeOutput(),
+      ...(incomplete
+        ? { incomplete_details: { reason: streamError.code === "SWITCHYARD_STREAM_IDLE_TIMEOUT" ? "upstream_stall_timeout" : "adapter_eof" } }
+        : { error: { type: "upstream_stream_error", message: String(streamError?.message || streamError || "upstream stream error") } })
+    };
+    writeEvent(res, incomplete ? "response.incomplete" : "response.failed", {
+      type: incomplete ? "response.incomplete" : "response.failed",
+      response
+    });
     res.end();
     return;
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) processSseRecord(buffer);
-  const flushed = thinkSplitter.flush();
-  appendReasoning(flushed.reasoning);
-  appendText(flushed.text);
-  const output = [];
-  if (reasoningStarted) {
-    const summary = reasoning ? [{ type: "summary_text", text: reasoning }] : [];
-    const col = reasoning ? [{ type: "reasoning_text", text: reasoning }] : [];
-    const completedReasoning = {
-      id: reasoningItemId,
-      type: "reasoning",
-      status: "completed",
-      summary,
-      content: col,
-      encrypted_content: encodeAnthropicThinkingBlocks([{ type: "thinking", thinking: reasoning }])
-    };
-    if (reasoningContentPartStarted) {
-      writeEvent(res, "response.reasoning_text.done", {
-        type: "response.reasoning_text.done",
-        item_id: reasoningItemId,
-        output_index: reasoningOutputIndex,
-        content_index: 0,
-        text: reasoning
-      });
-      writeEvent(res, "response.content_part.done", {
-        type: "response.content_part.done",
-        item_id: reasoningItemId,
-        output_index: reasoningOutputIndex,
-        content_index: 0,
-        part: col[0] || { type: "reasoning_text", text: "" }
-      });
-    }
-    if (reasoningSummaryPartStarted) {
-      writeEvent(res, "response.reasoning_summary_text.done", {
-        type: "response.reasoning_summary_text.done",
-        item_id: reasoningItemId,
-        output_index: reasoningOutputIndex,
-        summary_index: 0,
-        text: reasoning
-      });
-      writeEvent(res, "response.reasoning_summary_part.done", {
-        type: "response.reasoning_summary_part.done",
-        item_id: reasoningItemId,
-        output_index: reasoningOutputIndex,
-        summary_index: 0,
-        part: summary[0] || { type: "summary_text", text: "" }
-      });
-    }
-    output.push(completedReasoning);
-    writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: reasoningOutputIndex, item: completedReasoning });
-  }
-  const completedItem = {
-    id: itemId,
-    type: "message",
-    status: "completed",
-    role: "assistant",
-    content: [{ type: "output_text", text, annotations: [] }]
-  };
-  if (messageStarted || text) {
-    ensureMessageStarted();
-    writeEvent(res, "response.output_text.done", { type: "response.output_text.done", item_id: itemId, output_index: messageOutputIndex, content_index: 0, text });
-    writeEvent(res, "response.content_part.done", { type: "response.content_part.done", item_id: itemId, output_index: messageOutputIndex, content_index: 0, part: { type: "output_text", text, annotations: [] } });
-    writeEvent(res, "response.output_item.done", { type: "response.output_item.done", output_index: messageOutputIndex, item: completedItem });
-    output.push(completedItem);
-  }
-  // Emit completed function_call items from streamed tool calls
-  for (const [, entry] of toolCalls) {
-    if (entry.id && entry.name) {
-      if (!entry.argumentsDone) {
-        writeEvent(res, "response.function_call_arguments.done", {
-          type: "response.function_call_arguments.done",
-          item_id: entry.itemId,
-          output_index: entry.outputIndex,
-          arguments: entry.arguments
-        });
-      }
-      const completedCall = {
-        id: entry.itemId,
-        type: "function_call",
-        status: "completed",
-        call_id: entry.id,
-        name: entry.resolvedName || entry.name,
-        arguments: entry.arguments
-      };
-      if (entry.namespace) completedCall.namespace = entry.namespace;
-      writeEvent(res, "response.output_item.done", {
-        type: "response.output_item.done",
-        output_index: entry.outputIndex,
-        item: completedCall
-      });
-      output.push(completedCall);
-    }
-  }
+  const output = finalizeOutput();
   const completedResponse = { ...baseResponse, status: "completed", output };
   if (capturedUsage && (capturedUsage.total_tokens || capturedUsage.prompt_tokens || capturedUsage.completion_tokens)) {
     completedResponse.usage = {

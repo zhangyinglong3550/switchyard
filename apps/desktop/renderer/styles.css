@@ -1789,85 +1789,6 @@ table.data.compact td {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
-.compat-pack-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.compat-pack-option {
-  align-items: flex-start !important;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-strong);
-  padding: 9px 10px;
-}
-
-.compat-pack-option span {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.compat-pack-option small {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1.35;
-}
-
-.compat-recommendation-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.compat-recommendation-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.compat-recommendation-card {
-  display: grid;
-  gap: 7px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-strong);
-  padding: 10px 12px;
-}
-
-.compat-recommendation-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.compat-recommendation-card p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.45;
-}
-
-.compat-recommendation-card p span {
-  display: inline-block;
-  min-width: 34px;
-  color: var(--text);
-  font-weight: 700;
-}
-
-.compat-recommendation-fixtures {
-  display: grid;
-  gap: 4px;
-}
-
 .plugin-tables-stack {
   gap: 18px;
 }
@@ -1931,6 +1852,62 @@ table.data.compact td {
 
 .input-with-button .btn {
   min-height: 38px;
+}
+
+.mobile-control-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.mobile-control-actions {
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
+.mobile-tailscale-base {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0;
+  font-weight: 650;
+}
+
+.mobile-tailscale-base .tiny {
+  line-height: 1.45;
+}
+
+.mobile-pairing {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+}
+
+.mobile-devices-head,
+.mobile-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-devices-head {
+  margin-bottom: 8px;
+}
+
+.mobile-device-list {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-device-row {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.mobile-device-row.is-revoked {
+  opacity: .55;
 }
 
 /* ── Discovery List (provider dialog) ── */

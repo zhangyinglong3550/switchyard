@@ -7,7 +7,8 @@ import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
 export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
   "openai_responses",
-  "anthropic_messages"
+  "anthropic_messages",
+  "antigravity"
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
@@ -173,7 +174,7 @@ function normalizeKnownProvider(provider) {
     if (withRouting.presetId === "xai-account-pool") poolKind = "xai_oauth";
     const defaults = {
       xai_oauth: { baseUrl: "https://api.x.ai/v1", apiFormat: "openai_chat" },
-      antigravity_oauth: { baseUrl: "http://127.0.0.1:8317/v1", apiFormat: "openai_chat" },
+      antigravity_oauth: { baseUrl: "https://daily-cloudcode-pa.googleapis.com", apiFormat: "antigravity" },
       codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" }
     };
     const d = defaults[poolKind] || defaults.xai_oauth;

@@ -121,6 +121,24 @@ function compactMessageList(messages = [], maxItems = 2) {
 function compactSummaryForStorage(summary) {
   if (!summary || typeof summary !== "object") return summary;
   const out = { ...summary };
+  if (summary.compatRules && typeof summary.compatRules === "object") {
+    // Full patch descriptors contain documentation and test lists. With Codex's
+    // large tool catalog that alone can exhaust the request-log limit and drop
+    // the failure metadata we need for diagnosis. Retain the applied rule IDs
+    // (and their source) instead; this is enough to compare requests without
+    // storing request content or making the log unbounded.
+    out.compatRules = Object.fromEntries(
+      ["outbound", "inbound", "stream"].map((direction) => [
+        direction,
+        Array.isArray(summary.compatRules[direction])
+          ? summary.compatRules[direction].map((rule) => ({
+            id: rule?.id || "",
+            source: rule?.source || ""
+          })).filter((rule) => rule.id)
+          : []
+      ])
+    );
+  }
   if (summary.messages && typeof summary.messages === "object") {
     out.messages = {
       roleCounts: summary.messages.roleCounts || {},

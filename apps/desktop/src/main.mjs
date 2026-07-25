@@ -8,12 +8,20 @@ import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import AdmZip from "adm-zip";
 
 const execFileAsync = promisify(execFile);
 import { readConfig, saveValidated, configFile, readRaw } from "./config-store.mjs";
 import { startGateway, stopGateway, restartGateway, reloadConfig, statusFromServer } from "./gateway-host.mjs";
+import {
+  createMobilePairingChallenge,
+  listMobileDevices,
+  mobileControlStatus,
+  revokeMobileDevice,
+  startMobileControl,
+  stopMobileControl
+} from "./mobile-control-host.mjs";
 import { appendLog, snapshotLogs, subscribeLogs, logFilePath, readLogTail } from "./logs.mjs";
 import { listRequestLogs, usageByModel, usageByAgentModel, usageDaily } from "./request-log-store.mjs";
 import { createProviderHealthMonitor } from "./provider-health.mjs";
@@ -52,6 +60,8 @@ import {
 import { listAgentPlugins, addPluginSource, removePluginSource, installPlugin, uninstallPlugin } from "./agent-plugins.mjs";
 import { previewSessionHandoffToCodex, handoffSessionToCodex } from "./session-handoff.mjs";
 import { importProviders } from "../../../packages/core/src/importers/ccswitch.mjs";
+import { parseSub2ApiDataFiles, publicSub2ApiDataImport } from "../../../packages/core/src/importers/sub2api-data.mjs";
+import { importSub2ApiDataToCodexPool } from "../../../packages/core/src/account-pool/import-sub2api.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import {
   applyProfile, restoreProfile, restoreProfileBackup,
@@ -126,6 +136,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
 let codexArtifactTimer = null;
+const sub2apiDataImportSessions = new Map();
+const SUB2API_IMPORT_SESSION_TTL_MS = 10 * 60 * 1000;
 // 托盘常驻 + 关窗保活：mainWindow 保留主窗口引用，tray 为系统托盘，
 // isQuitting 标记是否真正退出（区分“点叉隐藏”与“菜单/托盘退出”）。
 let mainWindow = null;
@@ -149,6 +161,14 @@ function semverGt(a, b) {
     if (na !== nb) return na > nb;
   }
   return false;
+}
+
+function pruneExpiredSub2ApiImportSessions(now = Date.now()) {
+  for (const [id, session] of sub2apiDataImportSessions.entries()) {
+    if (!session?.createdAt || now - session.createdAt > SUB2API_IMPORT_SESSION_TTL_MS) {
+      sub2apiDataImportSessions.delete(id);
+    }
+  }
 }
 
 function platformUpdateAssetPreference() {
@@ -992,6 +1012,18 @@ ipcMain.handle("gateway:restart", async () => {
   startCodexArtifactMonitor();
   return result;
 });
+ipcMain.handle("mobile-control:status", () => mobileControlStatus());
+ipcMain.handle("mobile-control:enable", () => startMobileControl());
+ipcMain.handle("mobile-control:disable", () => stopMobileControl());
+ipcMain.handle("mobile-control:pair-start", (_e, payload = {}) => {
+  return createMobilePairingChallenge({
+    ttlMs: Number(payload.ttlMs) || 10 * 60 * 1000
+  });
+});
+ipcMain.handle("mobile-control:devices", () => listMobileDevices());
+ipcMain.handle("mobile-control:device-revoke", (_e, payload = {}) => {
+  return revokeMobileDevice(payload.deviceId);
+});
 ipcMain.handle("app:version", () => app.getVersion());
 ipcMain.handle("shell:open-url", async (_e, { url } = {}) => {
   if (url) await shell.openExternal(url);
@@ -1316,7 +1348,57 @@ ipcMain.handle("import:ccswitch", () => {
   if (!result.ok) throw new Error(result.error || "import failed");
   return result;
 });
-
+ipcMain.handle("import:sub2api:data-select", async () => {
+  pruneExpiredSub2ApiImportSessions();
+  const selection = await dialog.showOpenDialog({
+    title: "选择一个或多个 Sub2API 数据备份 JSON",
+    defaultPath: app.getPath("home"),
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "JSON", extensions: ["json"] }]
+  });
+  if (selection.canceled || !selection.filePaths.length) return { ok: false, cancelled: true };
+  let parsed;
+  try {
+    parsed = parseSub2ApiDataFiles(selection.filePaths.map((file) => ({
+      name: path.basename(file),
+      text: fs.readFileSync(file, "utf8")
+    })));
+  } catch (err) {
+    return { ok: false, error: `读取 Sub2API 数据备份失败：${err?.message || String(err)}` };
+  }
+  if (!parsed.ok) return parsed;
+  const importId = randomUUID();
+  sub2apiDataImportSessions.set(importId, { data: parsed.data, createdAt: Date.now() });
+  return { ...publicSub2ApiDataImport(parsed), importId };
+});
+ipcMain.handle("import:sub2api:data-apply", async (_e, payload = {}) => {
+  pruneExpiredSub2ApiImportSessions();
+  const importId = String(payload.importId || "").trim();
+  const pending = sub2apiDataImportSessions.get(importId);
+  if (!pending) return { ok: false, error: "Sub2API 数据导入预览已失效，请重新选择备份文件" };
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) return { ok: false, error: "请先填写供应商标识，再导入 Sub2API 备份" };
+  try {
+    const result = importSub2ApiDataToCodexPool(providerId, pending.data, {
+      skipDuplicates: payload.skipDuplicates !== false
+    });
+    if (!result.ok) return result;
+    sub2apiDataImportSessions.delete(importId);
+    appendLog({
+      level: result.errors?.length ? "warn" : "info",
+      msg: "Sub2API backup imported into native Codex pool",
+      providerId,
+      imported: result.imported,
+      added: result.added,
+      skipped: result.skipped,
+      unsupported: result.unsupported,
+      agentIdentity: result.agentIdentity
+    });
+    return result;
+  } catch (err) {
+    return { ok: false, error: `导入 Switchyard 账号池失败：${errorSummary(err)}` };
+  }
+});
 function resolvePoolKind(payload = {}, providerId = "") {
   const explicit = String(payload.poolKind || "").trim();
   if (explicit) return explicit;
@@ -1382,7 +1464,7 @@ ipcMain.handle("account-pool:import-cpa", (_e, payload = {}) => {
     return importAntigravityFromCpaDirs(providerId, {
       dirs: payload.dirs,
       skipDuplicates: payload.skipDuplicates !== false,
-      syncToCliproxy: payload.syncToCliproxy !== false
+      syncToCliproxy: payload.syncToCliproxy === true
     });
   }
   if (poolKind === "codex_oauth") {
@@ -1404,7 +1486,7 @@ ipcMain.handle("account-pool:import-antigravity", (_e, payload = {}) => {
   return importAntigravityFromCpaDirs(providerId, {
     dirs: payload.dirs,
     skipDuplicates: payload.skipDuplicates !== false,
-    syncToCliproxy: payload.syncToCliproxy !== false
+    syncToCliproxy: payload.syncToCliproxy === true
   });
 });
 
@@ -1522,7 +1604,7 @@ ipcMain.handle("account-pool:import-dir-dialog", async (_e, payload = {}) => {
       ...importAntigravityFromCpaDirs(providerId, {
         dirs: [dir],
         skipDuplicates: payload.skipDuplicates !== false,
-        syncToCliproxy: payload.syncToCliproxy !== false
+        syncToCliproxy: payload.syncToCliproxy === true
       }),
       selectedDir: dir
     };
@@ -1612,7 +1694,9 @@ ipcMain.handle("compat:packs", () => listCompatPacks());
 ipcMain.handle("compat:active", () => activeCompatSnapshot(readConfig()));
 ipcMain.handle("compat:registry:snapshot", () => registryRecommendationsForConfig(readConfig()));
 ipcMain.handle("compat:registry:recommend", (_e, payload = {}) => recommendCompatRules(payload));
-ipcMain.handle("provider:discover-models", async (_e, provider) => {
+ipcMain.handle("provider:discover-models", async (_e, provider) => discoverModelsForProvider(provider));
+
+async function discoverModelsForProvider(provider) {
   const resolved = await resolveProbeProvider(provider);
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const probe = resolved.provider;
@@ -1663,7 +1747,7 @@ ipcMain.handle("provider:discover-models", async (_e, provider) => {
   }
   if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: errors.join(" | ") };
   return { ok: false, error: errors.join(" | ") || "未发现模型" };
-});
+}
 
 ipcMain.handle("gateway:doctor", () => {
   const cfg = readConfig();
@@ -2353,6 +2437,9 @@ app.whenReady().then(async () => {
   }
   try {
     await startGateway();
+    if (process.env.SWITCHYARD_MOBILE_CONTROL_ENABLED === "1") {
+      await startMobileControl();
+    }
     syncCodexArtifacts("app-start");
     startCodexArtifactMonitor();
     getProviderHealthMonitor().start({ immediate: true });
@@ -2396,6 +2483,7 @@ app.on("before-quit", (event) => {
     }, 3000);
     try {
       stopCodexArtifactMonitor();
+      await stopMobileControl();
       await stopGateway();
     } catch (err) {
       appendLog({ level: "error", msg: "gateway stop on quit failed", error: err?.message || String(err) });
@@ -2472,6 +2560,19 @@ async function testProviderConnectivity(provider) {
     }
   }
   const apiFormat = probe.apiFormat || "openai_chat";
+  if (apiFormat === "antigravity") {
+    const token = String(probe._antigravityAccessToken || probe.apiKey || "").trim();
+    const projectId = String(probe._antigravityProjectId || probe.projectId || probe.project || "").trim();
+    if (!token) return { ok: false, error: "Antigravity OAuth access token 不可用" };
+    if (!projectId) return { ok: false, error: "Antigravity 凭证缺少 Cloud Code Assist projectId" };
+    return {
+      ok: true,
+      status: 200,
+      url: `${baseUrl}/v1internal:generateContent`,
+      bodyPreview: "Antigravity OAuth 凭证与 Cloud Code Assist projectId 已就绪；客户端可通过 Switchyard 的 OpenAI 兼容接口调用，实际模型连通性会在首次请求时验证。",
+      ...(resolved.accountEmail ? { accountEmail: resolved.accountEmail } : {})
+    };
+  }
   const headers = buildProviderHeaders(probe);
   // 1. 模型列表探测
   const candidates = apiFormatModelUrls(baseUrl, apiFormat);
@@ -2647,6 +2748,33 @@ function normalizeDiscoveredModels(payload, hints = new Map()) {
   }).filter(Boolean);
   // 上游 /models 可能不列出部分可用模型（如 Composer、预设补充项）；把预设 hints 中未返回的补进结果
   return mergeDiscoveredWithPresetModels(discovered, hints);
+}
+
+function discoveredModelsForProvider(provider, items = []) {
+  const seen = new Set();
+  return items.map((item) => {
+    const upstreamModel = String(item?.id || "").trim();
+    if (!upstreamModel || seen.has(upstreamModel)) return null;
+    seen.add(upstreamModel);
+    return {
+      id: `${provider.id}/${upstreamModel.replace(/[^a-zA-Z0-9_./@+-]/g, "_")}`,
+      providerId: provider.id,
+      upstreamModel,
+      displayName: item.displayName || upstreamModel,
+      aliases: [upstreamModel],
+      contextWindow: item.contextWindow,
+      maxOutputTokens: item.maxOutputTokens,
+      allowedClients: ["*"],
+      capabilities: {
+        text: true,
+        tools: item.capabilities?.tools !== false,
+        reasoning: Boolean(item.capabilities?.reasoning),
+        images: Boolean(item.capabilities?.images),
+        stream: item.capabilities?.stream !== false,
+        multimodal: Boolean(item.capabilities?.multimodal)
+      }
+    };
+  }).filter(Boolean);
 }
 
 /** 合并上游发现列表与预设 hints：已有的用上游，缺失的用预设补齐。 */

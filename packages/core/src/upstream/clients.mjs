@@ -4,10 +4,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import dns from "node:dns";
+import { execFileSync } from "node:child_process";
 import { ProxyAgent } from "undici";
 import { safeJsonParse } from "../utils.mjs";
 import { getProviderKeychainSecret, hasKeychainSecret, keychainAccountForProvider } from "../keychain-store.mjs";
-import { accountPoolReady, isAccountPoolProvider } from "../account-pool/index.mjs";
+import {
+  accountPoolReady,
+  isAccountPoolProvider,
+  buildAgentAssertion,
+  ensureAgentIdentityTask,
+  isInvalidAgentIdentityTaskResponse,
+  updateAccountRuntime
+} from "../account-pool/index.mjs";
 import {
   ANTHROPIC_API_VERSION,
   ANTHROPIC_OAUTH_BETA,
@@ -25,10 +33,74 @@ import {
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
+const ANTIGRAVITY_FALLBACK_CLI_VERSION = "1.1.5";
+const ANTIGRAVITY_USER_AGENT_REFRESH_MS = 60_000;
+let cachedAntigravityUserAgent = "";
+let cachedAntigravityUserAgentAt = 0;
 
 try {
   dns.setDefaultResultOrder("ipv4first");
 } catch {}
+
+function antigravityOsType(platform = process.platform) {
+  if (platform === "darwin") return "darwin";
+  if (platform === "win32") return "windows";
+  return platform || "linux";
+}
+
+export function parseAntigravityCliVersion(text) {
+  const matched = /(?:^|[^0-9])(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)(?:$|[^0-9])/.exec(String(text || ""));
+  return matched ? matched[1] : "";
+}
+
+export function detectAntigravityCliVersion({
+  exec = execFileSync,
+  home = os.homedir(),
+  platform = process.platform
+} = {}) {
+  const executable = platform === "win32" ? "agy.exe" : "agy";
+  const candidates = [
+    path.join(home, ".local", "bin", executable),
+    path.join(home, ".antigravity", "bin", executable),
+    executable
+  ];
+  for (const candidate of candidates) {
+    try {
+      // The CLI is only probed for its local semantic version. It is never
+      // asked to authenticate or contact the network from the gateway.
+      const output = exec(candidate, ["--version"], {
+        encoding: "utf8",
+        timeout: 1500,
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true
+      });
+      const version = parseAntigravityCliVersion(output);
+      if (version) return version;
+    } catch {
+      // Try the next normal installation location, then use a safe fallback.
+    }
+  }
+  return "";
+}
+
+export function buildAntigravityUserAgent({
+  cliVersion,
+  platform = process.platform,
+  arch = process.arch
+} = {}) {
+  const version = String(cliVersion || detectAntigravityCliVersion({ platform }) || ANTIGRAVITY_FALLBACK_CLI_VERSION);
+  return `antigravity/cli/${version} (aidev_client; os_type=${antigravityOsType(platform)}; arch=${arch || "unknown"})`;
+}
+
+function defaultAntigravityUserAgent() {
+  // Re-read periodically: after `agy update`, the next request picks up the
+  // new fingerprint within one minute without requiring a Switchyard restart.
+  if (!cachedAntigravityUserAgent || Date.now() - cachedAntigravityUserAgentAt >= ANTIGRAVITY_USER_AGENT_REFRESH_MS) {
+    cachedAntigravityUserAgent = buildAntigravityUserAgent();
+    cachedAntigravityUserAgentAt = Date.now();
+  }
+  return cachedAntigravityUserAgent;
+}
 
 export function resolveApiKey(provider) {
   if (provider?.authMode === "none") return "";
@@ -42,8 +114,10 @@ export function resolveApiKey(provider) {
 
 export function isCodexOAuthProvider(provider) {
   return provider?.authMode === "codex_oauth" ||
+    provider?.authMode === "codex_agent_identity" ||
     provider?.authProvider === "codex_oauth" ||
-    provider?.providerType === "codex_oauth";
+    provider?.providerType === "codex_oauth" ||
+    provider?.providerType === "codex_agent_identity";
 }
 
 export function isAnthropicOAuthProvider(provider) {
@@ -54,6 +128,11 @@ export function isAnthropicOAuthProvider(provider) {
 }
 
 export { isAccountPoolProvider };
+
+export function isCodexAgentIdentityProvider(provider) {
+  return provider?.authMode === "codex_agent_identity" ||
+    provider?.providerType === "codex_agent_identity";
+}
 
 export function codexAuthPath() {
   return codexLocalAuthPath();
@@ -171,6 +250,9 @@ export function anthropicOAuthHeaders(provider) {
 export { ensureAnthropicAccessToken, anthropicOAuthAuthPath };
 
 export function providerAuthHeaders(provider, scheme) {
+  // Agent Identity assertions are short-lived and therefore generated
+  // asynchronously immediately before an OpenAI Responses request.
+  if (isCodexAgentIdentityProvider(provider)) return {};
   if (isCodexOAuthProvider(provider)) return codexOAuthHeaders(provider);
   if (isAnthropicOAuthProvider(provider)) return anthropicOAuthHeaders(provider);
   const key = resolveApiKey(provider);
@@ -265,11 +347,11 @@ function shouldRetryFetchError(err) {
   return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "HPE_INVALID_EOF_STATE"].includes(code) || /fetch failed|terminated|HPE_INVALID_EOF_STATE/i.test(err?.message || "");
 }
 
-async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKeepAlive = false, retryOnFetchError = false } = {}) {
+async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKeepAlive = false, retryOnFetchError = false, acceptSse = Boolean(body?.stream) } = {}) {
   const doFetch = fetchImpl || globalThis.fetch;
   const requestHeaders = {
     "Content-Type": "application/json",
-    Accept: body && body.stream ? "text/event-stream" : "application/json",
+    Accept: acceptSse ? "text/event-stream" : "application/json",
     "Accept-Encoding": "identity",
     ...headers
   };
@@ -303,8 +385,9 @@ export async function callOpenAIChat(provider, body, opts) {
 export async function callOpenAIResponses(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/responses");
   const codexOAuth = isCodexOAuthProvider(provider);
+  const agentIdentity = isCodexAgentIdentityProvider(provider);
   // 本机 codex_oauth：发请求前尽量保证 access 未过期（可 refresh 时回写 auth.json）
-  if (codexOAuth && !provider._codexAccessToken) {
+  if (codexOAuth && !agentIdentity && !provider._codexAccessToken) {
     try {
       const ensured = await ensureCodexLocalAccessToken({
         provider,
@@ -326,11 +409,56 @@ export async function callOpenAIResponses(provider, body, opts) {
       // 刷新失败时仍用磁盘 access 尝试一次
     }
   }
-  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), {
+  const requestOptions = {
     ...opts,
     noKeepAlive: opts?.noKeepAlive ?? codexOAuth,
     retryOnFetchError: opts?.retryOnFetchError ?? codexOAuth
+  };
+  const send = async (activeProvider) => postJson(
+    url,
+    body,
+    await openAIResponsesHeaders(activeProvider, opts),
+    requestOptions
+  );
+  let response = await send(provider);
+  // A task in a restored backup can be invalidated by OpenAI. Re-register it
+  // once, persist only the new task id in the local pool, then retry with a
+  // fresh signed assertion. Do not retry generic 401s.
+  if (isCodexAgentIdentityProvider(provider) && await isInvalidAgentIdentityTaskResponse(response)) {
+    provider = await ensureProviderAgentIdentityTask(provider, opts, { force: true });
+    response = await send(provider);
+  }
+  return response;
+}
+
+async function openAIResponsesHeaders(provider, opts = {}) {
+  const base = buildOutboundAuthAndClientHeaders(provider, "bearer", opts);
+  if (!isCodexAgentIdentityProvider(provider)) return base;
+  const active = await ensureProviderAgentIdentityTask(provider, opts);
+  return {
+    ...base,
+    Authorization: buildAgentAssertion(active._agentIdentity)
+  };
+}
+
+async function ensureProviderAgentIdentityTask(provider, opts = {}, { force = false } = {}) {
+  const identity = provider?._agentIdentity;
+  if (!identity) throw new Error("agent identity credentials are missing");
+  const ensured = await ensureAgentIdentityTask(identity, {
+    force,
+    proxyUrl: provider.proxyUrl || opts?.proxyUrl || "",
+    fetchImpl: opts?.fetchImpl
   });
+  if (!ensured.registered) return provider;
+  const next = { ...provider, _agentIdentity: ensured.account };
+  if (provider?.id && provider?._accountId) {
+    updateAccountRuntime(provider.id, provider._accountId, {
+      agentTaskId: ensured.account.agentTaskId,
+      health: "healthy",
+      lastError: ""
+    }, { poolKind: "codex_oauth" });
+  }
+  return next;
 }
 
 export async function callAnthropicMessages(provider, body, opts) {
@@ -356,6 +484,38 @@ export async function callAnthropicMessages(provider, body, opts) {
     }
   }
   return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), opts);
+}
+
+/**
+ * Native Google Antigravity / Cloud Code Assist transport.
+ *
+ * The adapter has already converted the canonical Chat body into CCA's
+ * `v1internal:generateContent` envelope. Do not use the generic bearer client
+ * here: CCA needs its own endpoint and a first-party-shaped User-Agent.
+ */
+export async function callAntigravity(provider, envelope, opts = {}) {
+  const baseUrl = String(provider?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+  const method = opts.stream ? "streamGenerateContent?alt=sse" : "generateContent";
+  const url = `${baseUrl}/v1internal:${method}`;
+  const token = String(provider?._antigravityAccessToken || resolveApiKey(provider) || "").trim();
+  if (!token) throw new Error("Antigravity OAuth access token is missing");
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    // The HTTP UA is intentionally distinct from CCA envelope.userAgent.
+    // Match the locally installed `agy` version instead of pinning the
+    // desktop build to an old fingerprint. This avoids a gateway update every
+    // time Google raises Antigravity's minimum supported CLI version.
+    "User-Agent": String(process.env.SWITCHYARD_ANTIGRAVITY_USER_AGENT || defaultAntigravityUserAgent()),
+    ...requestOverrideHeaders(opts)
+  };
+  return postJson(url, envelope, headers, {
+    ...opts,
+    acceptSse: Boolean(opts.stream),
+    // Long-lived SSE connections are more reliable without a pooled keep-alive
+    // socket being reused after an idle intermediary has closed it.
+    noKeepAlive: opts.noKeepAlive ?? true,
+    retryOnFetchError: opts.retryOnFetchError ?? true
+  });
 }
 
 export function providerReady(provider) {

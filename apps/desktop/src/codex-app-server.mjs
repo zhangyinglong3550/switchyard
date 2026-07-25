@@ -24,20 +24,38 @@ export function resolveCodexBinary() {
   return "codex";
 }
 
+function resolveCodexDaemonSocket(home = os.homedir()) {
+  if (process.platform === "win32") return null;
+  const sock = path.join(home, ".codex", "ipc", "ipc.sock");
+  try { return fs.existsSync(sock) ? sock : null; } catch { return null; }
+}
+
 export class CodexAppServerClient {
-  constructor({ binary = resolveCodexBinary(), spawnProcess = spawn } = {}) {
+  constructor({ binary = resolveCodexBinary(), env, spawnProcess = spawn } = {}) {
     this.binary = binary;
+    this.env = env;
     this.spawnProcess = spawnProcess;
     this.child = null;
     this.buffer = "";
     this.stderr = [];
     this.nextId = 1;
     this.pending = new Map();
+    this.subscribers = new Set();
+    this.usingProxy = false;
   }
 
   async connect() {
     if (this.child) return;
-    const child = this.spawnProcess(this.binary, ["app-server", "--stdio"], { env: { ...process.env, HOME: os.homedir() } });
+    // 优先通过 proxy 接入已有 Desktop daemon（共享线程状态），
+    // 无 daemon socket 时退回独立 --stdio 进程。
+    const daemonSock = resolveCodexDaemonSocket(os.homedir());
+    const args = daemonSock
+      ? ["app-server", "proxy", "--sock", daemonSock]
+      : ["app-server", "--stdio"];
+    this.usingProxy = Boolean(daemonSock);
+    const child = this.spawnProcess(this.binary, args, {
+      env: { ...process.env, HOME: os.homedir(), ...(this.env || {}) }
+    });
     this.child = child;
     child.stdout.on("data", (chunk) => this.onStdout(chunk));
     child.stderr.on("data", (chunk) => {
@@ -68,6 +86,15 @@ export class CodexAppServerClient {
       if (!line) continue;
       let message;
       try { message = JSON.parse(line); } catch { continue; }
+      if (message?.method) {
+        this.emitFrame({
+          kind: message.id === undefined ? "notification" : "request",
+          id: message.id,
+          method: message.method,
+          params: message.params || {}
+        });
+        continue;
+      }
       const pending = this.pending.get(Number(message.id));
       if (!pending) continue;
       clearTimeout(pending.timer);
@@ -95,9 +122,33 @@ export class CodexAppServerClient {
     });
   }
 
+  request(method, params = {}, timeoutMs = 30000) {
+    return this.call(method, params, timeoutMs);
+  }
+
   notify(method, params) {
     if (!this.child) return;
     this.child.stdin.write(`${JSON.stringify(params === undefined ? { method } : { method, params })}\n`);
+  }
+
+  respond(id, result, error) {
+    if (!this.child || id === undefined || id === null) return;
+    const message = error
+      ? { id, error: typeof error === "object" ? error : { message: String(error) } }
+      : { id, result: result ?? {} };
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  subscribe(handler) {
+    if (typeof handler !== "function") throw new TypeError("subscriber 必须是函数");
+    this.subscribers.add(handler);
+    return () => this.subscribers.delete(handler);
+  }
+
+  emitFrame(frame) {
+    for (const handler of this.subscribers) {
+      try { handler(frame); } catch {}
+    }
   }
 
   rejectAll(error) {
@@ -113,6 +164,7 @@ export class CodexAppServerClient {
     this.rejectAll(new Error("Codex app-server 已关闭"));
     this.child.kill();
     this.child = null;
+    this.usingProxy = false;
   }
 }
 

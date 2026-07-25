@@ -1,18 +1,19 @@
 // 账号池选号、健康更新、绑定 provider 凭证。
-import os from "node:os";
-import path from "node:path";
 import {
   isAccessExpired,
   loadPool,
   savePool,
   updateAccountRuntime
 } from "./store.mjs";
+import { readAntigravityCpaCredential } from "./import-multi.mjs";
 import { refreshXaiTokens, XAI_API_BASE_URL } from "./oauth-xai.mjs";
 import { refreshGoogleTokens } from "./oauth-google.mjs";
 import { refreshCodexAccountTokens, CODEX_API_BASE_URL } from "./oauth-codex.mjs";
-import { syncAntigravityPoolToCliproxyDir } from "./import-multi.mjs";
+import { isAgentIdentityAccount } from "./agent-identity.mjs";
 
 const rrCursor = new Map();
+const sessionAffinity = new Map();
+const AFFINITY_TTL_MS = 60 * 60 * 1000;
 
 export const POOL_KIND_META = {
   xai_oauth: {
@@ -23,9 +24,9 @@ export const POOL_KIND_META = {
   },
   antigravity_oauth: {
     label: "Antigravity",
-    defaultBaseUrl: "http://127.0.0.1:8317/v1",
-    defaultApiFormat: "openai_chat",
-    emptyHint: "账号池为空：请先从 ~/.cli-proxy-api 导入 antigravity-*.json"
+    defaultBaseUrl: "https://daily-cloudcode-pa.googleapis.com",
+    defaultApiFormat: "antigravity",
+    emptyHint: "账号池为空：请先导入 Antigravity OAuth 凭证"
   },
   codex_oauth: {
     label: "Codex 订阅",
@@ -51,13 +52,45 @@ export function poolStrategyOf(provider, pool) {
   return String(provider?.poolStrategy || pool?.strategy || "weighted_round_robin").trim() || "weighted_round_robin";
 }
 
+function affinityKey(provider, sessionKey) {
+  const providerId = String(provider?.id || "").trim();
+  const key = String(sessionKey || "").trim();
+  return providerId && key ? `${providerId}::${key}` : "";
+}
+
+function clearExpiredAffinity() {
+  const now = Date.now();
+  for (const [key, item] of sessionAffinity) {
+    if (!item || item.expiresAt <= now) sessionAffinity.delete(key);
+  }
+}
+
+export function accountAffinityId(provider, sessionKey) {
+  clearExpiredAffinity();
+  return sessionAffinity.get(affinityKey(provider, sessionKey))?.accountId || "";
+}
+
+export function bindAccountAffinity(provider, sessionKey, accountId) {
+  const key = affinityKey(provider, sessionKey);
+  const id = String(accountId || "").trim();
+  if (!key || !id) return;
+  sessionAffinity.set(key, { accountId: id, expiresAt: Date.now() + AFFINITY_TTL_MS });
+}
+
+export function clearAccountAffinity(provider, sessionKey, accountId = "") {
+  const key = affinityKey(provider, sessionKey);
+  if (!key) return;
+  const current = sessionAffinity.get(key);
+  if (!accountId || current?.accountId === accountId) sessionAffinity.delete(key);
+}
+
 export function listEligibleAccounts(pool, { excludeIds = [], now = Date.now() } = {}) {
   const excluded = new Set((excludeIds || []).map(String));
   return (pool?.accounts || []).filter((account) => {
     if (!account || excluded.has(account.id)) return false;
     if (account.enabled === false) return false;
     if (account.health === "disabled") return false;
-    if (!account.accessToken && !account.refreshToken && !account.sessionToken) return false;
+    if (!account.accessToken && !account.refreshToken && !account.sessionToken && !isAgentIdentityAccount(account)) return false;
     if (account.health === "cooldown" && account.cooldownUntil) {
       const until = Date.parse(account.cooldownUntil);
       if (!Number.isNaN(until) && until > now) return false;
@@ -117,48 +150,89 @@ export async function ensureFreshAccount(account, {
   home
 } = {}) {
   if (!account) return { ok: false, error: "no-account" };
-  if (!force && account.accessToken && !isAccessExpired(account, skewMs)) {
-    return { ok: true, account, refreshed: false };
-  }
   const kind = poolKindOf(provider);
+  let current = account;
+  if (kind === "codex_oauth" && isAgentIdentityAccount(current)) {
+    return { ok: true, account: current, refreshed: false };
+  }
+  if (kind === "antigravity_oauth") {
+    const cpaCredential = readAntigravityCpaCredential(account, {
+      authDir: provider?.antigravityAuthDir || undefined
+    });
+    if (cpaCredential) {
+      const fromCpa = {
+        ...account,
+        accessToken: cpaCredential.accessToken,
+        refreshToken: cpaCredential.refreshToken || account.refreshToken,
+        tokenType: cpaCredential.tokenType || account.tokenType,
+        expiresAt: cpaCredential.expiresAt || account.expiresAt,
+        projectId: cpaCredential.projectId || account.projectId,
+        email: cpaCredential.email || account.email,
+        health: "healthy",
+        lastError: ""
+      };
+      if (
+        isAccessExpired(account, skewMs)
+        || fromCpa.accessToken !== account.accessToken
+        || fromCpa.expiresAt !== account.expiresAt
+      ) {
+        current = fromCpa;
+        if (provider?.id) {
+          updateAccountRuntime(provider.id, account.id, {
+            accessToken: current.accessToken,
+            refreshToken: current.refreshToken,
+            tokenType: current.tokenType,
+            expiresAt: current.expiresAt,
+            projectId: current.projectId,
+            email: current.email,
+            health: "healthy",
+            lastError: ""
+          }, { poolKind: kind, home });
+        }
+      }
+    }
+  }
+  if (!force && current.accessToken && !isAccessExpired(current, skewMs)) {
+    return { ok: true, account: current, refreshed: current !== account };
+  }
   const canRefresh =
-    Boolean(account.refreshToken) ||
-    (kind === "codex_oauth" && Boolean(account.sessionToken));
+    Boolean(current.refreshToken) ||
+    (kind === "codex_oauth" && Boolean(current.sessionToken));
   if (!canRefresh) {
-    if (account.accessToken && !isAccessExpired(account, 0)) {
-      return { ok: true, account, refreshed: false };
+    if (current.accessToken && !isAccessExpired(current, 0)) {
+      return { ok: true, account: current, refreshed: current !== account };
     }
     return {
       ok: false,
       error: kind === "codex_oauth" ? "missing-refresh-or-session-token" : "missing-refresh-token",
-      account
+      account: current
     };
   }
   const proxy = proxyUrl || provider?.proxyUrl || "";
   try {
     let tokens;
     if (kind === "antigravity_oauth") {
-      tokens = await refreshGoogleTokens(account.refreshToken, { proxyUrl: proxy, fetchImpl });
+      tokens = await refreshGoogleTokens(current.refreshToken, { proxyUrl: proxy, fetchImpl });
     } else if (kind === "codex_oauth") {
-      tokens = await refreshCodexAccountTokens(account, { proxyUrl: proxy, fetchImpl });
+      tokens = await refreshCodexAccountTokens(current, { proxyUrl: proxy, fetchImpl });
     } else {
-      tokens = await refreshXaiTokens(account.refreshToken, {
-        tokenEndpoint: account.tokenEndpoint || undefined,
+      tokens = await refreshXaiTokens(current.refreshToken, {
+        tokenEndpoint: current.tokenEndpoint || undefined,
         proxyUrl: proxy,
         fetchImpl
       });
     }
     const next = {
-      ...account,
+      ...current,
       accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken || account.refreshToken,
-      sessionToken: tokens.sessionToken || account.sessionToken,
-      tokenType: tokens.tokenType || account.tokenType,
+      refreshToken: tokens.refreshToken || current.refreshToken,
+      sessionToken: tokens.sessionToken || current.sessionToken,
+      tokenType: tokens.tokenType || current.tokenType,
       expiresAt: tokens.expiresAt,
-      email: tokens.email || account.email,
-      sub: tokens.sub || account.sub,
-      accountId: tokens.accountId || account.accountId || "",
-      idToken: tokens.idToken || account.idToken || "",
+      email: tokens.email || current.email,
+      sub: tokens.sub || current.sub,
+      accountId: tokens.accountId || current.accountId || "",
+      idToken: tokens.idToken || current.idToken || "",
       health: "healthy",
       lastError: ""
     };
@@ -176,15 +250,6 @@ export async function ensureFreshAccount(account, {
         health: "healthy",
         lastError: ""
       }, { poolKind: kind, home });
-      // Antigravity：刷新后同步回 CLIProxyAPI auth-dir
-      if (kind === "antigravity_oauth") {
-        try {
-          syncAntigravityPoolToCliproxyDir(provider.id, {
-            authDir: provider.cliproxyAuthDir || path.join(os.homedir(), ".cli-proxy-api"),
-            home
-          });
-        } catch {}
-      }
     }
     return { ok: true, account: next, refreshed: true };
   } catch (err) {
@@ -196,7 +261,7 @@ export async function ensureFreshAccount(account, {
         lastError: message
       }, { poolKind: poolKindOf(provider), home });
     }
-    return { ok: false, error: message, account };
+    return { ok: false, error: message, account: current };
   }
 }
 
@@ -204,7 +269,8 @@ export async function pickAndRefreshAccount(provider, {
   excludeIds = [],
   home,
   fetchImpl,
-  maxRefreshAttempts = 5
+  maxRefreshAttempts = 5,
+  sessionKey = ""
 } = {}) {
   if (!isAccountPoolProvider(provider)) {
     return { ok: false, error: "not-account-pool-provider" };
@@ -216,11 +282,18 @@ export async function pickAndRefreshAccount(provider, {
   let lastError = "no eligible accounts";
 
   for (let i = 0; i < maxRefreshAttempts; i += 1) {
-    const account = pickAccount(pool, {
-      strategy,
-      excludeIds: [...tried],
-      providerId: provider.id
-    });
+    const affinityId = poolKind === "antigravity_oauth" ? accountAffinityId(provider, sessionKey) : "";
+    let account = affinityId && !tried.has(affinityId)
+      ? listEligibleAccounts(pool, { excludeIds: [...tried] }).find((item) => item.id === affinityId)
+      : null;
+    if (!account) {
+      if (affinityId) clearAccountAffinity(provider, sessionKey, affinityId);
+      account = pickAccount(pool, {
+        strategy,
+        excludeIds: [...tried],
+        providerId: provider.id
+      });
+    }
     if (!account) break;
     tried.add(account.id);
     const fresh = await ensureFreshAccount(account, {
@@ -230,6 +303,7 @@ export async function pickAndRefreshAccount(provider, {
       home
     });
     if (fresh.ok) {
+      if (poolKind === "antigravity_oauth") bindAccountAffinity(provider, sessionKey, fresh.account.id);
       return {
         ok: true,
         account: fresh.account,
@@ -256,6 +330,25 @@ export function bindProviderToAccount(provider, account) {
 
   // Codex 多号：原生 Responses + OAuth headers
   if (kind === "codex_oauth") {
+    if (isAgentIdentityAccount(account)) {
+      return {
+        ...provider,
+        authMode: "codex_agent_identity",
+        providerType: "codex_agent_identity",
+        apiFormat: provider.apiFormat || "openai_responses",
+        baseUrl: provider.baseUrl || CODEX_API_BASE_URL,
+        apiKey: undefined,
+        apiKeyEnv: undefined,
+        _accountPool: true,
+        _accountId: account.id,
+        _accountEmail: account.email || "",
+        _agentIdentity: {
+          agentRuntimeId: account.agentRuntimeId,
+          agentPrivateKey: account.agentPrivateKey,
+          agentTaskId: account.agentTaskId
+        }
+      };
+    }
     return {
       ...provider,
       authMode: "codex_oauth",
@@ -273,25 +366,22 @@ export function bindProviderToAccount(provider, account) {
     };
   }
 
-  // Antigravity：协议翻译仍走 CLIProxyAPI；绑定本地 API Key，账号轮询由 CPA + 同步的 auth-dir 完成
+  // Antigravity：直连 Google Cloud Code Assist。账号池负责 token 刷新、
+  // 会话粘性和失败换号；不再依赖本机 CLIProxyAPI 8317。
   if (kind === "antigravity_oauth") {
-    const cliproxyKey =
-      provider.apiKey ||
-      (provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : "") ||
-      process.env.CLIPROXY_API_KEY ||
-      "sk-cliproxy-grok-local";
     return {
       ...provider,
-      authMode: "api_key",
-      apiKey: cliproxyKey,
+      authMode: "antigravity_oauth",
+      providerType: "antigravity_oauth",
+      apiKey: account.accessToken,
       apiKeyEnv: undefined,
-      apiFormat: provider.apiFormat || "openai_chat",
+      apiFormat: "antigravity",
       baseUrl: provider.baseUrl || meta.defaultBaseUrl,
       _accountPool: true,
       _accountId: account.id,
       _accountEmail: account.email || "",
-      _relay: "cliproxy",
-      _googleAccessToken: account.accessToken
+      _antigravityAccessToken: account.accessToken,
+      _antigravityProjectId: account.projectId || provider.projectId || provider.project || ""
     };
   }
 
@@ -356,6 +446,7 @@ export function accountPoolReady(provider, { home } = {}) {
 
 export function resetRoundRobinCursors() {
   rrCursor.clear();
+  sessionAffinity.clear();
 }
 
 /** 测试辅助：直接改池策略 */

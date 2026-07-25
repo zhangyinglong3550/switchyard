@@ -3,6 +3,8 @@
 // produce a chat-style payload that the client adapter can finish).
 import crypto from "node:crypto";
 import { contentToText, safeJsonParse } from "./utils.mjs";
+import { SseParser } from "./sse-parser.mjs";
+import { iterateUpstreamBody } from "./stream-idle-timeout.mjs";
 import { encodeAnthropicThinkingBlocks, reasoningBlocksFromMessage, thinkingSummaryText } from "./reasoning.mjs";
 
 function contentToResponsesContent(content) {
@@ -260,12 +262,13 @@ function functionCallFromResponsesItem(item) {
   };
 }
 
-export async function responsesStreamToChatResponse(upstream, upstreamModel) {
-  const decoder = new TextDecoder();
-  let buf = "";
+export async function responsesStreamToChatResponse(upstream, upstreamModel, options = {}) {
   let responsePayload = null;
   let text = "";
-  let sawDone = false;
+  let terminalSeen = false;
+  let terminalKind = null;
+  let failedSeen = false;
+  let sawMeaningfulEvent = false;
   let streamError = null;
   const functionCalls = new Map();
   const contentParts = new Map();
@@ -289,40 +292,52 @@ export async function responsesStreamToChatResponse(upstream, upstreamModel) {
   const handleData = (data) => {
     if (!data) return;
     if (data === "[DONE]") {
-      sawDone = true;
+      terminalSeen = true;
+      terminalKind = terminalKind || "done";
       return;
     }
     const event = safeJsonParse(data);
     if (!event || typeof event !== "object") return;
     if (event.type === "error" || event.error) {
+      failedSeen = true;
       const message = event.error?.message || event.message || "Responses stream returned an error";
       throw new Error(message);
     }
-    if (event.type === "response.failed") {
-      const message = event.response?.error?.message || event.error?.message || "Responses stream failed";
+    if (event.type === "response.failed" || event.type === "response.incomplete" || event.type === "response.cancelled") {
+      failedSeen = true;
+      const message = event.response?.error?.message || event.error?.message || event.response?.incomplete_details?.reason || "Responses stream failed";
       throw new Error(message);
     }
-    if ((event.type === "response.completed" || event.type === "response.done") && event.response) {
-      responsePayload = event.response;
-      const payloadText = outputTextFromResponsesPayload(event.response);
-      if (payloadText) text = payloadText;
-      sawDone = true;
+    if (event.type === "response.completed" || event.type === "response.done") {
+      terminalSeen = true;
+      terminalKind = terminalKind || event.type;
+      if (event.response) {
+        responsePayload = event.response;
+        const payloadText = outputTextFromResponsesPayload(event.response);
+        if (payloadText) text = payloadText;
+      }
       return;
     }
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+      if (event.delta) sawMeaningfulEvent = true;
       text += event.delta;
       return;
     }
     if (event.type === "response.output_text.done" && typeof event.text === "string") {
+      if (event.text) sawMeaningfulEvent = true;
       text = event.text;
       return;
     }
     if (event.type === "response.content_part.done" && event.part) {
       const partText = textFromResponsesContentPart(event.part);
-      if (partText) contentParts.set(contentPartKey(event), partText);
+      if (partText) {
+        sawMeaningfulEvent = true;
+        contentParts.set(contentPartKey(event), partText);
+      }
       return;
     }
     if (event.type === "response.output_item.done" && event.item) {
+      sawMeaningfulEvent = true;
       const payloadText = outputTextFromResponsesPayload({ output: [event.item] });
       if (payloadText) text = payloadText;
       const call = functionCallFromResponsesItem(event.item);
@@ -330,6 +345,7 @@ export async function responsesStreamToChatResponse(upstream, upstreamModel) {
       return;
     }
     if (event.type === "response.output_item.added" && event.item) {
+      sawMeaningfulEvent = true;
       const call = functionCallFromResponsesItem(event.item);
       if (call) mergeFunctionCall(functionCallKey(event, event.item), call);
       return;
@@ -338,6 +354,7 @@ export async function responsesStreamToChatResponse(upstream, upstreamModel) {
       const key = functionCallKey(event);
       const prev = functionCalls.get(key) || { id: event.item_id || "", call_id: "", name: event.name || "", arguments: "" };
       const delta = event.delta || event.arguments_delta || event.partial_json || "";
+      if (delta) sawMeaningfulEvent = true;
       functionCalls.set(key, { ...prev, arguments: `${prev.arguments || ""}${delta}` });
       return;
     }
@@ -348,35 +365,28 @@ export async function responsesStreamToChatResponse(upstream, upstreamModel) {
         name: event.name || functionCalls.get(key)?.name || "",
         arguments: event.arguments || functionCalls.get(key)?.arguments || "{}"
       });
+      sawMeaningfulEvent = true;
     }
   };
 
+  const parser = new SseParser((record) => handleData(String(record.data || "").trim()));
   try {
-    for await (const chunk of upstream.body || []) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split(/\r?\n/);
-      buf = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        handleData(line.slice(5).trim());
-      }
-    }
-    if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
+    for await (const chunk of iterateUpstreamBody(upstream?.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Responses stream"
+    })) parser.push(chunk);
+    parser.flush();
   } catch (err) {
-    streamError = err;
-  }
-  const flushed = decoder.decode();
-  if (flushed) {
-    try {
-      buf += flushed;
-      if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
-    } catch (err) {
-      streamError = streamError || err;
-    }
+    // Once a terminal event was observed, an iterator failure is usually the
+    // provider closing the socket after its final SSE frame. Do not turn that
+    // into a false negative, but never hide an explicit provider error event.
+    if (!terminalSeen || failedSeen) streamError = err;
   }
 
-  if (streamError && !text && !responsePayload) throw streamError;
-  if (!sawDone && !text && !responsePayload) throw new Error("Responses stream ended before completion");
+  if (!terminalSeen && !streamError) {
+    streamError = new Error("Responses stream ended before completion");
+  }
+  if (streamError) throw streamError;
   if (!text && contentParts.size) {
     text = Array.from(contentParts.entries())
       .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
@@ -454,6 +464,10 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
   let usage = null;
   let roleSent = false;
   let contentEmitted = false;
+  let terminalSeen = false;
+  let terminalKind = null;
+  let failed = false;
+  let sawMeaningfulEvent = false;
   let streamError = null;
   const functionCalls = new Map(); // key → { chatIndex, id, name, arguments }
   let nextToolIndex = 0;
@@ -538,11 +552,13 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
   const handleEvent = (event) => {
     if (!event || typeof event !== "object") return;
     if (event.type === "error" || event.error) {
+      failed = true;
       const message = event.error?.message || event.message || "Responses stream returned an error";
       throw new Error(message);
     }
-    if (event.type === "response.failed") {
-      const message = event.response?.error?.message || event.error?.message || "Responses stream failed";
+    if (event.type === "response.failed" || event.type === "response.incomplete" || event.type === "response.cancelled") {
+      failed = true;
+      const message = event.response?.error?.message || event.error?.message || event.response?.incomplete_details?.reason || "Responses stream failed";
       throw new Error(message);
     }
     if (event.type === "response.created" || event.type === "response.in_progress") {
@@ -554,6 +570,7 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       if (event.delta) {
         writeChatChunk({ content: event.delta });
         contentEmitted = true;
+        sawMeaningfulEvent = true;
       }
       if (!finishReason) finishReason = "stop";
       return;
@@ -564,6 +581,7 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
         ensureRole();
         writeChatChunk({ content: event.text });
         contentEmitted = true;
+        sawMeaningfulEvent = true;
         if (!finishReason) finishReason = "stop";
       }
       return;
@@ -575,11 +593,13 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
         ensureRole();
         writeChatChunk({ content: partText });
         contentEmitted = true;
+        sawMeaningfulEvent = true;
         if (!finishReason) finishReason = "stop";
       }
       return;
     }
     if (event.type === "response.output_item.added" && event.item) {
+      sawMeaningfulEvent = true;
       const call = functionCallFromResponsesItem(event.item);
       if (call) {
         const key = functionCallKey(event, event.item);
@@ -595,6 +615,7 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       return;
     }
     if (event.type === "response.output_item.done" && event.item) {
+      sawMeaningfulEvent = true;
       const call = functionCallFromResponsesItem(event.item);
       if (call) {
         const key = functionCallKey(event, event.item);
@@ -618,6 +639,7 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       if (event.item_id) state.id = state.id || event.item_id;
       announceFunctionCall(state);
       if (delta) {
+        sawMeaningfulEvent = true;
         state.arguments = `${state.arguments || ""}${delta}`;
         writeChatChunk({
           tool_calls: [{
@@ -629,6 +651,7 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       return;
     }
     if (event.type === "response.function_call_arguments.done") {
+      sawMeaningfulEvent = true;
       const key = functionCallKey(event);
       const state = ensureFunctionCall(key, {
         id: event.item_id || functionCalls.get(key)?.id || "",
@@ -638,7 +661,13 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       announceFunctionCall(state);
       return;
     }
-    if ((event.type === "response.completed" || event.type === "response.done") && event.response) {
+    if (event.type === "response.completed" || event.type === "response.done") {
+      terminalSeen = true;
+      terminalKind = terminalKind || event.type;
+      if (!event.response) {
+        if (!finishReason) finishReason = functionCalls.size ? "tool_calls" : "stop";
+        return;
+      }
       const mapped = mapUsage(event.response.usage);
       if (mapped) usage = mapped;
       // 若流里只有 completed 里的全文、没有 delta，补推一次
@@ -677,46 +706,44 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
     }
   };
 
-  const handleData = (data) => {
-    if (!data || data === "[DONE]") return;
+  const parser = new SseParser((record) => {
+    const data = String(record.data || "").trim();
+    if (!data) return;
+    if (data === "[DONE]") {
+      terminalSeen = true;
+      terminalKind = terminalKind || "done";
+      return;
+    }
     const event = safeJsonParse(data);
     handleEvent(event);
-  };
+  });
 
   try {
     if (!upstream?.body) {
       throw new Error(`Responses stream empty (status ${upstream?.status || 0})`);
     }
-    const decoder = new TextDecoder();
-    let buf = "";
-    for await (const chunk of upstream.body) {
-      buf += decoder.decode(chunk, { stream: true });
-      const lines = buf.split(/\r?\n/);
-      buf = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        handleData(line.slice(5).trim());
-      }
+    for await (const chunk of iterateUpstreamBody(upstream?.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Responses stream"
+    })) {
+      parser.push(chunk);
     }
-    if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
-    const flushed = decoder.decode();
-    if (flushed) {
-      buf += flushed;
-      if (buf.startsWith("data:")) handleData(buf.slice(5).trim());
-    }
+    parser.flush();
   } catch (err) {
-    streamError = err;
+    if (!terminalSeen || failed) streamError = err;
   }
 
-  if (streamError) {
+  if (!terminalSeen && !streamError) {
+    streamError = new Error("Responses stream ended before completion");
+  }
+  if (streamError || failed) {
+    writeChatStreamError(res, streamError || new Error("Responses stream returned an error"));
+  } else {
     ensureRole();
-    writeChatChunk({ content: `\n[stream error: ${streamError?.message || streamError}]` });
+    const finalFinish = finishReason || (functionCalls.size ? "tool_calls" : "stop");
+    writeChatChunk({}, { finishReason: finalFinish, usage: usage || undefined });
+    res.write("data: [DONE]\n\n");
   }
-
-  ensureRole();
-  const finalFinish = finishReason || (functionCalls.size ? "tool_calls" : "stop");
-  writeChatChunk({}, { finishReason: finalFinish, usage: usage || undefined });
-  res.write("data: [DONE]\n\n");
   res.end();
 
   if (typeof options.onStreamSummary === "function") {
@@ -724,9 +751,23 @@ export async function streamResponsesAsChat(upstream, res, requestedModel, optio
       options.onStreamSummary({
         protocol: "chat",
         usage,
-        sawTerminalEvent: true,
-        sawMeaningfulEvent: contentEmitted || functionCalls.size > 0
+        sawTerminalEvent: terminalSeen,
+        sawMeaningfulEvent: sawMeaningfulEvent || contentEmitted || functionCalls.size > 0,
+        failed: Boolean(streamError || failed),
+        terminalKind
       });
     } catch {}
   }
+}
+
+function writeChatStreamError(res, err) {
+  if (res.destroyed || res.writableEnded) return;
+  res.write("event: error\n");
+  res.write(`data: ${JSON.stringify({
+    type: "error",
+    error: {
+      type: "upstream_stream_error",
+      message: err?.message || String(err)
+    }
+  })}\n\n`);
 }

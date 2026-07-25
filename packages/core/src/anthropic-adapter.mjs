@@ -1,6 +1,13 @@
 // Adapter between Anthropic Messages API and OpenAI Chat Completions.
 import crypto from "node:crypto";
 import { contentToText, safeJsonParse } from "./utils.mjs";
+import { SseParser } from "./sse-parser.mjs";
+import { iterateUpstreamBody } from "./stream-idle-timeout.mjs";
+import {
+  ANTHROPIC_PING_MS,
+  startStreamKeepalive,
+  writeAnthropicPing
+} from "./stream-keepalive.mjs";
 import {
   SWITCHYARD_THINKING_KEY,
   cloneAnthropicThinkingBlocks,
@@ -154,7 +161,7 @@ export function chatToAnthropic(payload, requestedModel) {
   };
 }
 
-export async function streamChatAsAnthropic(upstream, res, requestedModel) {
+export async function streamChatAsAnthropic(upstream, res, requestedModel, options = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -176,6 +183,7 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel) {
   });
 
   let streamError = null;
+  let terminalSeen = false;
   let finishReason = null; // first non-null wins
   let textStarted = false;
   let textBlockStopped = false;
@@ -225,76 +233,333 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel) {
     }
   };
 
-  try {
-    for await (const chunk of upstream.body) {
-      const raw = Buffer.from(chunk).toString("utf8");
-      for (const line of raw.split(/\r?\n/)) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        const event = safeJsonParse(data);
-        if (!event) continue;
-        const choice = event.choices?.[0] || {};
-        const delta = choice.delta || {};
+  const parser = new SseParser((record) => {
+    const data = String(record.data || "").trim();
+    if (!data) return;
+    if (data === "[DONE]") {
+      terminalSeen = true;
+      return;
+    }
+    const event = safeJsonParse(data);
+    if (!event) return;
+    if (event.type === "error" || event.error) {
+      streamError = new Error(event.error?.message || event.message || "Chat stream returned an error");
+      return;
+    }
+    const choice = event.choices?.[0] || {};
+    const delta = choice.delta || {};
 
-        if (finishReason == null && choice.finish_reason != null) {
-          finishReason = choice.finish_reason;
-        }
+    if (finishReason == null && choice.finish_reason != null) {
+      finishReason = choice.finish_reason;
+      terminalSeen = true;
+    }
 
-        // text / reasoning fallback
-        const deltaContent = delta.content;
-        const deltaReasoning = delta.reasoning_content;
-        let deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
-        if (!deltaText && typeof deltaReasoning === "string" && deltaReasoning.length > 0) {
-          deltaText = deltaReasoning;
-        }
-        if (deltaText) {
-          const idx = ensureTextBlock();
+    const deltaContent = delta.content;
+    const deltaReasoning = delta.reasoning_content;
+    let deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
+    if (!deltaText && typeof deltaReasoning === "string" && deltaReasoning.length > 0) {
+      deltaText = deltaReasoning;
+    }
+    if (deltaText) {
+      const idx = ensureTextBlock();
+      writeEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index: idx,
+        delta: { type: "text_delta", text: deltaText }
+      });
+    }
+
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const entry = ensureToolBlock(tc);
+        if (tc?.id) entry.id = tc.id;
+        if (tc?.function?.name) entry.name = tc.function.name;
+        const argDelta = tc?.function?.arguments || "";
+        if (argDelta) {
+          entry.input += argDelta;
           writeEvent(res, "content_block_delta", {
             type: "content_block_delta",
-            index: idx,
-            delta: { type: "text_delta", text: deltaText }
+            index: entry.blockIndex,
+            delta: { type: "input_json_delta", partial_json: argDelta }
           });
-        }
-
-        // tool call streaming aggregation
-        if (Array.isArray(delta.tool_calls)) {
-          for (const tc of delta.tool_calls) {
-            const entry = ensureToolBlock(tc);
-            if (tc?.id) entry.id = tc.id;
-            if (tc?.function?.name) entry.name = tc.function.name;
-            const argDelta = tc?.function?.arguments || "";
-            if (argDelta) {
-              entry.input += argDelta;
-              writeEvent(res, "content_block_delta", {
-                type: "content_block_delta",
-                index: entry.blockIndex,
-                delta: { type: "input_json_delta", partial_json: argDelta }
-              });
-            }
-          }
         }
       }
     }
+  });
+
+  const keepalive = startStreamKeepalive(res, {
+    intervalMs: options.heartbeatMs || ANTHROPIC_PING_MS,
+    writeHeartbeat: writeAnthropicPing
+  });
+  try {
+    for await (const chunk of iterateUpstreamBody(upstream?.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Chat stream"
+    })) {
+      keepalive.touch();
+      parser.push(chunk);
+    }
+    parser.flush();
   } catch (err) {
     streamError = err;
+  } finally {
+    keepalive.stop();
   }
 
-  if (textStarted && !textBlockStopped) {
-    writeEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
-    textBlockStopped = true;
+  if (!terminalSeen && !streamError) {
+    streamError = new Error("Chat stream ended before completion");
   }
-  finalizeToolBlocks();
 
-  if (streamError) writeAnthropicErrorEvent(res, streamError);
-  const stopReason = finishReason === "tool_calls" ? "tool_use" : (finishReason || "end_turn");
-  writeEvent(res, "message_delta", {
-    type: "message_delta",
-    delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: 0 }
-  });
-  writeEvent(res, "message_stop", { type: "message_stop" });
+  if (terminalSeen && !streamError) {
+    if (textStarted && !textBlockStopped) {
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+      textBlockStopped = true;
+    }
+    finalizeToolBlocks();
+    const stopReason = finishReason === "tool_calls" ? "tool_use" : (finishReason || "end_turn");
+    writeEvent(res, "message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: 0 }
+    });
+    writeEvent(res, "message_stop", { type: "message_stop" });
+  } else {
+    writeAnthropicErrorEvent(res, streamError || new Error("Chat stream failed"));
+  }
   res.end();
+}
+
+// OpenAI Responses SSE → Anthropic Messages SSE. This is intentionally direct
+// instead of Responses → Chat → Anthropic: forwarding a second generated SSE
+// stream loses terminal/error semantics and is where Claude Code used to hang
+// after a partial response.
+export async function streamResponsesAsAnthropic(upstream, res, requestedModel, options = {}) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+  const id = `msg_${crypto.randomUUID()}`;
+  let textStarted = false;
+  let textEmitted = false;
+  let textBlockIndex = -1;
+  let terminalSeen = false;
+  let failed = false;
+  let streamError = null;
+  let nextBlockIndex = 0;
+  let outputTokens = 0;
+  const toolBlocks = new Map();
+
+  const writeStart = () => writeEvent(res, "message_start", {
+    type: "message_start",
+    message: {
+      id,
+      type: "message",
+      role: "assistant",
+      model: requestedModel,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 }
+    }
+  });
+  const ensureTextBlock = () => {
+    if (!textStarted) {
+      textStarted = true;
+      textBlockIndex = nextBlockIndex;
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index: textBlockIndex,
+        content_block: { type: "text", text: "" }
+      });
+      nextBlockIndex += 1;
+    }
+    return textBlockIndex;
+  };
+  const toolKey = (event, item) => (
+    Number.isInteger(event?.output_index) ? `output:${event.output_index}` :
+      Number.isInteger(event?.index) ? `output:${event.index}` :
+        event?.item_id || item?.id || item?.call_id || "output:0"
+  );
+  const ensureTool = (key, patch = {}) => {
+    let state = toolBlocks.get(key);
+    if (!state) {
+      state = { blockIndex: nextBlockIndex++, id: "", name: "", arguments: "", started: false, sentArguments: false };
+      toolBlocks.set(key, state);
+    }
+    Object.assign(state, patch);
+    return state;
+  };
+  const announceTool = (state) => {
+    if (state.started || !state.name) return;
+    state.started = true;
+    writeEvent(res, "content_block_start", {
+      type: "content_block_start",
+      index: state.blockIndex,
+      content_block: {
+        type: "tool_use",
+        id: state.id || `toolu_${crypto.randomUUID()}`,
+        name: state.name,
+        input: {}
+      }
+    });
+  };
+  const emitToolArguments = (state, value, { replace = false } = {}) => {
+    if (!value) return;
+    announceTool(state);
+    if (!state.started) return;
+    state.arguments = replace ? value : `${state.arguments || ""}${value}`;
+    state.sentArguments = true;
+    writeEvent(res, "content_block_delta", {
+      type: "content_block_delta",
+      index: state.blockIndex,
+      delta: { type: "input_json_delta", partial_json: value }
+    });
+  };
+  const emitText = (value) => {
+    if (!value) return;
+    const index = ensureTextBlock();
+    textEmitted = true;
+    writeEvent(res, "content_block_delta", {
+      type: "content_block_delta",
+      index,
+      delta: { type: "text_delta", text: value }
+    });
+  };
+  const textFromResponse = (response) => (response?.output || [])
+    .filter((item) => item?.type === "message")
+    .flatMap((item) => item.content || [])
+    .map((part) => part?.text || part?.output_text || "")
+    .filter(Boolean)
+    .join("");
+  const addCompletedTools = (response) => {
+    for (const item of response?.output || []) {
+      if (item?.type !== "function_call") continue;
+      const state = ensureTool(toolKey({}, item), {
+        id: item.call_id || item.id || "",
+        name: item.name || "",
+        arguments: item.arguments || ""
+      });
+      announceTool(state);
+      if (!state.sentArguments && state.arguments) emitToolArguments(state, state.arguments, { replace: true });
+    }
+  };
+
+  writeStart();
+  const handleEvent = (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "error" || event.error || event.type === "response.failed" || event.type === "response.incomplete" || event.type === "response.cancelled") {
+      failed = true;
+      throw new Error(event.response?.error?.message || event.error?.message || event.response?.incomplete_details?.reason || event.message || "Responses stream failed");
+    }
+    if (event.type === "response.output_text.delta") {
+      emitText(typeof event.delta === "string" ? event.delta : "");
+      return;
+    }
+    if (event.type === "response.output_text.done") {
+      if (!textEmitted) emitText(typeof event.text === "string" ? event.text : "");
+      return;
+    }
+    if (event.type === "response.content_part.done" && !textEmitted) {
+      emitText(event.part?.text || event.part?.output_text || "");
+      return;
+    }
+    if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
+      const item = event.item;
+      if (item?.type !== "function_call") return;
+      const state = ensureTool(toolKey(event, item), {
+        id: item.call_id || item.id || "",
+        name: item.name || "",
+        arguments: item.arguments || ""
+      });
+      announceTool(state);
+      if (event.type === "response.output_item.done" && !state.sentArguments && state.arguments) {
+        emitToolArguments(state, state.arguments, { replace: true });
+      }
+      return;
+    }
+    if (event.type === "response.function_call_arguments.delta" || event.type === "response.function_call_arguments.done") {
+      const value = event.type === "response.function_call_arguments.done"
+        ? (event.arguments || "")
+        : (event.delta || event.arguments_delta || event.partial_json || "");
+      const state = ensureTool(toolKey(event), {
+        id: event.call_id || event.item_id || "",
+        name: event.name || ""
+      });
+      if (event.type === "response.function_call_arguments.done" && !state.sentArguments) {
+        emitToolArguments(state, value, { replace: true });
+      } else if (event.type === "response.function_call_arguments.delta") {
+        emitToolArguments(state, value);
+      }
+      return;
+    }
+    if (event.type === "response.completed" || event.type === "response.done") {
+      terminalSeen = true;
+      const response = event.response || {};
+      outputTokens = response.usage?.output_tokens ?? response.usage?.completion_tokens ?? outputTokens;
+      if (!textEmitted) emitText(textFromResponse(response));
+      addCompletedTools(response);
+    }
+  };
+
+  const parser = new SseParser((record) => {
+    const data = String(record.data || "").trim();
+    if (!data) return;
+    if (data === "[DONE]") {
+      terminalSeen = true;
+      return;
+    }
+    handleEvent(safeJsonParse(data));
+  });
+
+  const keepalive = startStreamKeepalive(res, {
+    intervalMs: options.heartbeatMs || ANTHROPIC_PING_MS,
+    writeHeartbeat: writeAnthropicPing
+  });
+  try {
+    if (!upstream?.body) throw new Error(`Responses stream empty (status ${upstream?.status || 0})`);
+    for await (const chunk of iterateUpstreamBody(upstream?.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Responses stream"
+    })) {
+      keepalive.touch();
+      parser.push(chunk);
+    }
+    parser.flush();
+  } catch (err) {
+    if (!terminalSeen || failed) streamError = err;
+  } finally {
+    keepalive.stop();
+  }
+
+  if (!terminalSeen && !streamError) streamError = new Error("Responses stream ended before completion");
+  if (streamError || failed) {
+    writeAnthropicErrorEvent(res, streamError || new Error("Responses stream failed"));
+  } else {
+    if (textStarted) {
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: textBlockIndex });
+    }
+    for (const state of toolBlocks.values()) {
+      if (state.started) writeEvent(res, "content_block_stop", { type: "content_block_stop", index: state.blockIndex });
+    }
+    writeEvent(res, "message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: toolBlocks.size ? "tool_use" : "end_turn", stop_sequence: null },
+      usage: { output_tokens: outputTokens || 0 }
+    });
+    writeEvent(res, "message_stop", { type: "message_stop" });
+  }
+  res.end();
+
+  try {
+    options.onStreamSummary?.({
+      protocol: "anthropic_messages",
+      usage: outputTokens ? { output_tokens: outputTokens } : null,
+      sawTerminalEvent: terminalSeen,
+      sawMeaningfulEvent: textEmitted || Array.from(toolBlocks.values()).some((state) => state.started),
+      failed: Boolean(streamError || failed)
+    });
+  } catch {}
 }
 
 export function streamAnthropicError(res, err) {
@@ -400,7 +665,7 @@ export function countTokensApprox(body) {
 // Anthropic SSE → OpenAI Chat SSE 实时流式翻译器。
 // 读取 Anthropic Messages stream（event: xxx / data: {...} 格式），
 // 逐事件翻译成 OpenAI Chat Completions stream（data: {...} 格式）。
-export async function streamAnthropicAsChat(upstream, res, requestedModel) {
+export async function streamAnthropicAsChat(upstream, res, requestedModel, options = {}) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -411,10 +676,8 @@ export async function streamAnthropicAsChat(upstream, res, requestedModel) {
   // 追踪 content_block index → tool_call 状态
   const toolCalls = new Map(); // blockIndex → { id, name, argumentsBuffer, chatIndex }
   let nextToolCallIndex = 0;
-  const state = { finishReason: null };
+  const state = { finishReason: null, terminalSeen: false, failed: false };
   let streamError = null;
-  const decoder = new TextDecoder();
-  let buffer = "";
 
   // 写入一条 Chat SSE data 事件
   const writeChatChunk = (delta, opts = {}) => {
@@ -433,55 +696,41 @@ export async function streamAnthropicAsChat(upstream, res, requestedModel) {
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
   };
 
+  const parser = new SseParser((record) => {
+    const dataText = String(record.data || "").trim();
+    if (dataText === "[DONE]") {
+      state.terminalSeen = true;
+      return;
+    }
+    const data = dataText ? safeJsonParse(dataText) : {};
+    if (!data) return;
+    handleAnthropicEvent(
+      { event: record.event || "message", data },
+      { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++, state }
+    );
+  });
+
   try {
-    for await (const chunk of upstream.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      // SSE 记录以空行分隔
-      const records = buffer.split(/\r?\n\r?\n/);
-      buffer = records.pop() || "";
-      for (const record of records) {
-        const parsed = parseAnthropicSseRecord(record);
-        if (!parsed) continue;
-        handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++, state });
-      }
-    }
-    // 处理剩余 buffer
-    buffer += decoder.decode();
-    if (buffer.trim()) {
-      const parsed = parseAnthropicSseRecord(buffer);
-      if (parsed) handleAnthropicEvent(parsed, { writeChatChunk, toolCalls, getNextToolCallIndex: () => nextToolCallIndex++, state });
-    }
+    for await (const chunk of iterateUpstreamBody(upstream?.body, {
+      timeoutMs: options.idleTimeoutMs,
+      label: "Anthropic stream"
+    })) parser.push(chunk);
+    parser.flush();
   } catch (err) {
     streamError = err;
   }
 
-  // 如果上游报错或中断，发一个错误 delta
-  if (streamError) {
-    writeChatChunk({ content: `\n[stream error: ${streamError?.message || streamError}]` });
+  if (!state.terminalSeen && !streamError && !state.failed) {
+    streamError = new Error("Anthropic stream ended before message_stop");
   }
 
-  // 发送结束 chunk
-  writeChatChunk({}, { finishReason: state.finishReason || "stop" });
-  res.write("data: [DONE]\n\n");
+  if (streamError || state.failed) {
+    writeChatErrorEvent(res, streamError || new Error("Anthropic stream returned an error"));
+  } else {
+    writeChatChunk({}, { finishReason: state.finishReason || "stop" });
+    res.write("data: [DONE]\n\n");
+  }
   res.end();
-}
-
-// 解析一条 Anthropic SSE 记录，返回 { event, data } 或 null
-function parseAnthropicSseRecord(record) {
-  let eventName = "";
-  const dataLines = [];
-  for (const line of record.split(/\r?\n/)) {
-    if (line.startsWith("event:")) {
-      eventName = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-  if (!eventName && !dataLines.length) return null;
-  const dataText = dataLines.join("\n");
-  const data = dataText ? safeJsonParse(dataText) : {};
-  if (!data) return null;
-  return { event: eventName, data };
 }
 
 // 处理单个 Anthropic 事件，翻译成 Chat SSE chunk
@@ -559,12 +808,11 @@ function handleAnthropicEvent({ event, data }, ctx) {
       break;
     }
     case "message_stop": {
-      // finishReason 已在 message_delta 中设置
+      state.terminalSeen = true;
       break;
     }
     case "error": {
-      const msg = data?.error?.message || data?.error || "upstream error";
-      writeChatChunk({ content: `\n[upstream error: ${msg}]` });
+      state.failed = true;
       break;
     }
     case "ping":
@@ -588,4 +836,16 @@ function writeAnthropicErrorEvent(res, err) {
       message
     }
   });
+}
+
+function writeChatErrorEvent(res, err) {
+  const message = err?.message || String(err);
+  res.write("event: error\n");
+  res.write(`data: ${JSON.stringify({
+    type: "error",
+    error: {
+      type: "upstream_stream_error",
+      message
+    }
+  })}\n\n`);
 }

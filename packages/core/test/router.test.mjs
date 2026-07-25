@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mergeWithDefaults, validateConfig } from "../src/config.mjs";
-import { resolveRoute, buildRouter } from "../src/router.mjs";
+import { resolveRoute, buildRouter, isDeletedProviderModelRequest } from "../src/router.mjs";
 
 function makeConfig() {
   const cfg = mergeWithDefaults({
@@ -113,4 +113,11 @@ test("resolveRoute · 唯一短名仍可路由（单供应商兼容）", () => {
   const r = resolveRoute(cfg, "gpt-5.5");
   assert.equal(r.model.id, "only/gpt-5.5");
   assert.equal(r.provider.id, "only");
+});
+
+test("deleted provider detection only accepts a qualified id for an absent provider", () => {
+  const cfg = makeConfig();
+  assert.equal(isDeletedProviderModelRequest(cfg, "removed/gpt-5.6-sol"), true);
+  assert.equal(isDeletedProviderModelRequest(cfg, "p/missing"), false);
+  assert.equal(isDeletedProviderModelRequest(cfg, "gpt-5.6-sol"), false);
 });
