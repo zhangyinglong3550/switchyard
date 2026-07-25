@@ -520,7 +520,13 @@ export function createCodexRuntime({
       if (turnId) activeTurns.set(sid, turnId);
       return { accepted: true, turnId };
     } catch (error) {
-      if (local && attachments.some((attachment) => attachment.kind === "image")) {
+      // A Switchyard/CLI rollout is durable on disk and can be resumed by the
+      // native CLI even when the currently connected app-server does not own
+      // that thread (for example after Desktop or its proxy restarted). Keep
+      // the strict Desktop-owned branch above, but never strand a locally
+      // owned Switchyard thread behind an app-server-only "thread not found".
+      const missingThread = /thread not found|unknown thread|session not found/i.test(String(error?.message || error));
+      if (local && (attachments.some((attachment) => attachment.kind === "image") || missingThread)) {
         return sendNativeMessage(sid, local, { text, attachments });
       }
       throw error;

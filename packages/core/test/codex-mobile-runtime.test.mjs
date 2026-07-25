@@ -468,6 +468,37 @@ test("Codex runtime reconnects app-server before resuming a Desktop-owned thread
   });
 });
 
+test("Codex runtime falls back to native resume for a local Switchyard rollout missing from app-server", async () => {
+  const calls = [];
+  const child = fakeChild();
+  const runtime = createCodexRuntime({
+    client: {
+      async request(method) {
+        if (method === "thread/read" || method === "turn/start") throw new Error("thread not found: switchyard-thread");
+        return {};
+      },
+      subscribe() { return () => {}; }
+    },
+    command: "codex",
+    scanSessions: () => [{
+      sessionId: "switchyard-thread",
+      cwd: "/tmp/codex-switchyard-smoke",
+      filePath: "/tmp/rollout.jsonl",
+      title: "Switchyard 任务",
+      originator: "switchyard",
+      mtimeMs: 1
+    }],
+    spawnProcess(_command, args) {
+      calls.push(args);
+      queueMicrotask(() => child.emit("close", 0));
+      return child;
+    }
+  });
+
+  assert.deepEqual(await runtime.sendMessage("switchyard-thread", { text: "继续" }), { accepted: true });
+  assert.deepEqual(calls[0].slice(0, 4), ["exec", "resume", "switchyard-thread", "--json"]);
+});
+
 test("Codex runtime reports an unavailable Desktop thread without starting a native owner", async () => {
   let nativeSpawns = 0;
   let reconnects = 0;
