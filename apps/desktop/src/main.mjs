@@ -2437,9 +2437,10 @@ app.whenReady().then(async () => {
   }
   try {
     await startGateway();
-    if (process.env.SWITCHYARD_MOBILE_CONTROL_ENABLED === "1") {
-      await startMobileControl();
-    }
+    // The mobile control plane is part of Switchyard, not a second optional
+    // gateway. Always own it from this single desktop process so Settings can
+    // create pairing links against the same in-memory pairing store.
+    await startMobileControl();
     syncCodexArtifacts("app-start");
     startCodexArtifactMonitor();
     getProviderHealthMonitor().start({ immediate: true });
