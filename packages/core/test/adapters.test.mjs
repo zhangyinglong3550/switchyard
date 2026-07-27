@@ -236,6 +236,37 @@ test("streamChatAsResponses closes partial output and reports adapter EOF as inc
   assert.doesNotMatch(body, /data: \[DONE\]/);
 });
 
+test("streamChatAsResponses accepts a final usage footer as completion when an OpenAI relay omits terminal SSE markers", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"id":"chat_1","choices":[{"delta":{"content":"OK"},"finish_reason":null}]}',
+        "",
+        'data: {"id":"chat_1","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}',
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamChatAsResponses({ body: stream, ok: true, status: 200 }, res, "ke/GLM-5.2");
+
+  assert.match(body, /"text":"OK"/);
+  assert.match(body, /event: response.completed/);
+  assert.match(body, /"total_tokens":5/);
+  assert.match(body, /data: \[DONE\]/);
+  assert.doesNotMatch(body, /event: response.incomplete/);
+});
+
 test("streamChatAsResponses uses parser-visible heartbeats while upstream is silent", async () => {
   const stream = new ReadableStream({
     start(controller) {

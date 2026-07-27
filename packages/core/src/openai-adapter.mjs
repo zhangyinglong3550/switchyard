@@ -494,6 +494,12 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
       if (!capturedUsage.total_tokens) {
         capturedUsage.total_tokens = capturedUsage.prompt_tokens + capturedUsage.completion_tokens;
       }
+      // Several OpenAI-compatible relays (including the KE GLM route) end a
+      // stream right after the final usage chunk and omit both `[DONE]` and a
+      // choice.finish_reason. A non-empty usage footer is emitted only after
+      // generation is complete, so accept it as an implicit terminal marker
+      // instead of turning an otherwise complete Codex answer into adapter_eof.
+      if (capturedUsage.total_tokens > 0) terminalSeen = true;
       if (capturedUsage.total_tokens > 0 && onUsage) {
         try { onUsage(capturedUsage); } catch {}
       }
