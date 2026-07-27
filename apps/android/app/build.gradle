@@ -48,6 +48,7 @@ android {
       minifyEnabled false
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
       if (releaseSigningReady) signingConfig signingConfigs.release
+      else signingConfig signingConfigs.debug
     }
   }
 }

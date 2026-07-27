@@ -28,7 +28,7 @@ cd apps/android
 
 ## Release APK
 
-默认可构建**未签名** release APK，适合本机安装验证：
+未配置正式 keystore 时，`assembleRelease` 会使用 Android 默认 debug keystore 签名，生成**可直接安装的内部测试 release APK**；它不能用于应用商店发布：
 
 ```bash
 cd apps/android
@@ -36,7 +36,7 @@ cd apps/android
 npm --prefix ../.. run android:release:check
 ```
 
-产物位于 `app/build/outputs/apk/release/`。检查脚本会读取 Gradle 输出元数据，报告 APK 路径、`versionCode`、`versionName` 和签名状态。
+产物位于 `app/build/outputs/apk/release/`。检查脚本会读取 Gradle 输出元数据，报告 APK 路径、`versionCode`、`versionName` 和签名状态；只有显示 `signed (installable)` 的 APK 才应分发给测试手机。
 
 可通过环境变量（或同名 Gradle property）覆盖版本，不会修改已提交的构建文件：
 

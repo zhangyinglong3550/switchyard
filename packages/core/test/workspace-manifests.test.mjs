@@ -26,8 +26,11 @@ test("Android release build uses environment-driven versioning and a local verif
   assert.match(gradle, /SWITCHYARD_ANDROID_VERSION_NAME/);
   assert.match(gradle, /SWITCHYARD_ANDROID_STORE_FILE/);
   assert.match(gradle, /signingConfigs/);
+  assert.match(gradle, /else signingConfig signingConfigs\.debug/);
   assert.equal(packageJson.scripts["android:release:check"], "bash apps/android/scripts/verify-release.sh");
-  assert.equal(fs.existsSync(path.join(repositoryRoot, "apps/android/scripts/verify-release.sh")), true);
+  const script = fs.readFileSync(path.join(repositoryRoot, "apps/android/scripts/verify-release.sh"), "utf8");
+  assert.match(script, /ApkVerifier/);
+  assert.match(script, /signed \(installable/);
   assert.match(readme, /assembleRelease/);
   assert.match(readme, /android:release:check/);
 });
