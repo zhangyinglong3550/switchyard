@@ -130,10 +130,15 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /sessionDetailCache/);
   assert.match(js, /INITIAL_MESSAGE_LIMIT = 120/);
   assert.match(js, /loadEarlierMessages/);
-  assert.match(html, /app\.js\?v=57/);
+  assert.match(html, /app\.js\?v=58/);
   assert.match(html, /id="session-select-toggle"/);
   assert.match(html, /id="session-selection-bar"/);
   assert.match(html, /id="session-delete-sheet"/);
+  assert.match(html, /id="stop-session-sheet"/);
+  assert.match(html, /id="stop-session-name"/);
+  assert.match(js, /function renderStopSessionSheet/);
+  assert.match(js, /stopSessionQueueCount/);
+  assert.match(css, /\.stop-session-sheet\{/);
   assert.match(html, /id="pull-to-refresh"/);
   assert.match(js, /function requestSessionDeletion/);
   assert.match(js, /function confirmSessionDeletion/);

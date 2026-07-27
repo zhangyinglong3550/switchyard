@@ -225,8 +225,24 @@ function hideStopSessionSheet() {
   sheet.style.display = "none";
 }
 
+function stopSessionQueueCount() { return Array.isArray(current?.queue) ? current.queue.length : 0; }
+function renderStopSessionSheet() {
+  const queueCount = stopSessionQueueCount();
+  const queueNote = $("#stop-session-queue-note");
+  const sessionName = current?.title || "此会话";
+  $("#stop-session-name").textContent = sessionName;
+  $("#stop-session-copy").textContent = queueCount
+    ? "停止会中断正在执行的操作；你可以选择是否清空后续的排队指令。"
+    : "停止后，正在执行的当前轮无法继续完成。";
+  $("#stop-session-clear-label").textContent = queueCount ? `停止并清空 ${queueCount} 条队列` : "停止当前任务";
+  $("#stop-session-clear-hint").textContent = queueCount ? "当前操作与排队指令都会被移除" : "中断正在执行的操作";
+  queueNote.hidden = !queueCount;
+  if (queueCount) $("#stop-session-queue-copy").textContent = `有 ${queueCount} 条排队指令等待执行。保留队列后，可稍后回到此会话继续。`;
+  $(".stop-session-keep").hidden = !queueCount;
+}
 function showStopSessionSheet() {
   const sheet = $("#stop-session-sheet");
+  renderStopSessionSheet();
   sheet.hidden = false;
   sheet.setAttribute("aria-hidden", "false");
   sheet.style.display = "flex";
