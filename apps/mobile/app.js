@@ -36,6 +36,12 @@ let browsedWorkspace = null;
 let selectedFilter = "all";
 let pendingApprovals = [];
 let archivedView = false;
+let sessionSelectionMode = false;
+const selectedSessionIds = new Set();
+let pendingDeleteSessionIds = [];
+let mobileRefreshInProgress = false;
+let pullRefreshStartY = null;
+let pullRefreshDistance = 0;
 const collapsedGroups = new Set();
 let eventLoopStopped = false;
 let refreshTimer = null;
@@ -187,6 +193,8 @@ function page(name) {
   hideStopSessionSheet();
   hideMessageModeSheet();
   hideConversationBehaviorSheet();
+  hideSessionDeleteSheet();
+  if (name !== "sessions") { sessionSelectionMode = false; selectedSessionIds.clear(); }
   closeSessionSwitcher();
   workspaceSheet(false);
   hideCommandPicker();
@@ -302,8 +310,11 @@ function closeAllSwipe() {
 function sessionRowHtml(session) {
   const running = ["running", "queued"].includes(session.state);
   const waiting = session.state === "waiting_for_approval";
+  const selected = selectedSessionIds.has(session.id);
   const tag = running ? '<span class="tag tag-run">RUNNING</span>' : waiting ? '<span class="tag tag-wait">待审批</span>' : `<span class="tag tag-agent">${escapeHtml(agentLabel(session.agent).replace(" Build", "").replace(" Code", "").toUpperCase())}</span>`;
-  return `<div class="swipe-item" data-swipe-id="${escapeHtml(session.id)}"><div class="swipe-actions"><button type="button" class="swipe-btn rename" data-session-action="rename" data-id="${escapeHtml(session.id)}">重命名</button><button type="button" class="swipe-btn archive" data-session-action="archive" data-id="${escapeHtml(session.id)}">${archivedView ? "取消归档" : "归档"}</button><button type="button" class="swipe-btn danger" data-session-action="delete" data-id="${escapeHtml(session.id)}">删除</button></div><button class="session-row swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button"><span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta"><time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button></div>`;
+  const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""}" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta"><time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
+  if (sessionSelectionMode) return `<div class="session-select-item">${row}</div>`;
+  return `<div class="swipe-item" data-swipe-id="${escapeHtml(session.id)}"><div class="swipe-actions"><button type="button" class="swipe-btn rename" data-session-action="rename" data-id="${escapeHtml(session.id)}">重命名</button><button type="button" class="swipe-btn archive" data-session-action="archive" data-id="${escapeHtml(session.id)}">${archivedView ? "取消归档" : "归档"}</button><button type="button" class="swipe-btn danger" data-session-action="delete" data-id="${escapeHtml(session.id)}">删除</button></div>${row}</div>`;
 }
 
 function activeSessionRows() { return allSessions.filter((session) => ["running", "queued", "waiting_for_approval"].includes(session.state)); }
@@ -336,7 +347,35 @@ async function refreshSessionsInBackground() {
   try { await loadSessions({ background: true }); } catch {}
 }
 
+function renderSessionSelectionControls() {
+  const toggle = $("#session-select-toggle");
+  const bar = $("#session-selection-bar");
+  const count = $("#session-selection-count");
+  const remove = $("#session-selection-delete");
+  if (!toggle || !bar || !count || !remove) return;
+  toggle.textContent = sessionSelectionMode ? "取消" : "选择";
+  toggle.classList.toggle("active", sessionSelectionMode);
+  bar.hidden = !sessionSelectionMode;
+  count.textContent = `已选 ${selectedSessionIds.size} 个`;
+  remove.disabled = selectedSessionIds.size === 0;
+}
+
+function setSessionSelectionMode(active) {
+  sessionSelectionMode = active;
+  if (!active) selectedSessionIds.clear();
+  closeAllSwipe();
+  renderSessionList();
+}
+
+function toggleSessionSelection(id) {
+  if (selectedSessionIds.has(id)) selectedSessionIds.delete(id); else selectedSessionIds.add(id);
+  renderSessionList();
+}
+
 function renderSessionList() {
+  const knownIds = new Set(allSessions.map((session) => session.id));
+  for (const id of selectedSessionIds) if (!knownIds.has(id)) selectedSessionIds.delete(id);
+  renderSessionSelectionControls();
   if (!$("#session-switcher").hidden) renderSessionSwitcher();
   const query = $("#search").value.trim().toLowerCase();
   const matchingRows = allSessions.filter((session) => (selectedFilter === "all" || session.agent === selectedFilter) && (!query || `${session.title} ${session.agent} ${session.project || ""}`.toLowerCase().includes(query)));
@@ -383,6 +422,97 @@ function renderStatusSummary() {
   if (!running && !waiting) { strip.hidden = true; strip.innerHTML = ""; return; }
   strip.hidden = false;
   strip.innerHTML = `${running ? '<span class="spin"></span>' : ""}${running ? `${running} 个任务正在运行` : ""}${running && waiting ? " · " : ""}${waiting ? `<b>${waiting} 个等待你审批</b>` : ""}`;
+}
+
+function requestSessionDeletion(ids) {
+  const uniqueIds = [...new Set(ids || [])].filter(Boolean);
+  if (!uniqueIds.length) return;
+  pendingDeleteSessionIds = uniqueIds;
+  const count = uniqueIds.length;
+  $("#session-delete-title").textContent = count === 1 ? "删除会话" : `删除 ${count} 个会话`;
+  $("#session-delete-description").textContent = count === 1
+    ? "部分 Agent 的桌面历史无法物理删除，仍会从手机列表移除。"
+    : "将逐个删除所选会话。部分 Agent 的桌面历史无法物理删除，仍会从手机列表移除。";
+  $("#confirm-session-delete").textContent = count === 1 ? "删除会话" : `删除 ${count} 个会话`;
+  setSheetVisible("#session-delete-sheet", true);
+}
+
+function hideSessionDeleteSheet() {
+  pendingDeleteSessionIds = [];
+  setSheetVisible("#session-delete-sheet", false);
+}
+
+async function confirmSessionDeletion() {
+  const ids = [...pendingDeleteSessionIds];
+  if (!ids.length) return;
+  const confirmButton = $("#confirm-session-delete");
+  confirmButton.disabled = true;
+  confirmButton.textContent = "正在删除…";
+  try {
+    const results = await Promise.allSettled(ids.map(async (id) => ({ id, result: await api(`/mobile/v1/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }) })));
+    const successful = results.filter((entry) => entry.status === "fulfilled");
+    const hiddenOnly = successful.filter((entry) => entry.value.result?.hiddenOnly).length;
+    const failed = results.length - successful.length;
+    for (const id of ids) selectedSessionIds.delete(id);
+    if (current && successful.some((entry) => entry.value.id === current.id)) { current = null; page("sessions"); }
+    hideSessionDeleteSheet();
+    await loadSessions();
+    if (successful.length) toast(failed ? `已处理 ${successful.length} 个会话，${failed} 个删除失败` : hiddenOnly === successful.length ? `已从手机列表移除 ${successful.length} 个会话` : `已删除 ${successful.length} 个会话`);
+    else toast("删除失败，请稍后重试");
+  } finally {
+    confirmButton.disabled = false;
+    confirmButton.textContent = ids.length === 1 ? "删除会话" : `删除 ${ids.length} 个会话`;
+  }
+}
+
+async function refreshMobileData({ feedback = true, refreshCurrent = true } = {}) {
+  if (mobileRefreshInProgress) return;
+  mobileRefreshInProgress = true;
+  const button = $("#refresh");
+  button?.classList.add("is-refreshing");
+  if (button) { button.disabled = true; button.setAttribute("aria-busy", "true"); }
+  try {
+    await Promise.all([loadSessions(), loadApprovals()]);
+    if (refreshCurrent && current) await openSession(current.id, { activate: false });
+    if (feedback) toast("已刷新");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    mobileRefreshInProgress = false;
+    button?.classList.remove("is-refreshing");
+    if (button) { button.disabled = false; button.removeAttribute("aria-busy"); }
+  }
+}
+
+function setPullRefreshState(distance = 0, refreshing = false) {
+  const target = $("#pull-to-refresh");
+  if (!target) return;
+  target.classList.toggle("visible", distance > 0 || refreshing);
+  target.classList.toggle("ready", distance >= 72 && !refreshing);
+  target.classList.toggle("refreshing", refreshing);
+  target.querySelector("span:last-child").textContent = refreshing ? "正在刷新…" : distance >= 72 ? "松开即可刷新" : "下拉刷新";
+}
+
+function setupPullToRefresh() {
+  document.addEventListener("touchstart", (event) => {
+    if (!$(".page[data-page=\"sessions\"]")?.classList.contains("active") || window.scrollY > 0 || event.touches.length !== 1) return;
+    pullRefreshStartY = event.touches[0].clientY;
+    pullRefreshDistance = 0;
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (pullRefreshStartY === null) return;
+    pullRefreshDistance = Math.max(0, Math.min(96, event.touches[0].clientY - pullRefreshStartY));
+    setPullRefreshState(pullRefreshDistance);
+  }, { passive: true });
+  document.addEventListener("touchend", () => {
+    if (pullRefreshStartY === null) return;
+    const shouldRefresh = pullRefreshDistance >= 72;
+    pullRefreshStartY = null;
+    pullRefreshDistance = 0;
+    if (!shouldRefresh) return setPullRefreshState();
+    setPullRefreshState(0, true);
+    refreshMobileData().finally(() => setPullRefreshState());
+  }, { passive: true });
 }
 
 function approvalCardHtml(approval, { sessionScoped = false } = {}) {
@@ -1113,13 +1243,7 @@ document.addEventListener("click", async (event) => {
         toast(archivedView ? "已取消归档" : "已归档");
         return loadSessions();
       }
-      if (action === "delete") {
-        if (!confirm("确认删除这个会话？\n\n部分 Agent 的桌面历史不能物理删除，会从手机列表隐藏。")) return;
-        const result = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
-        if (current?.id === id) { current = null; page("sessions"); }
-        toast(result?.hiddenOnly ? "已从手机列表移除" : "已删除");
-        return loadSessions();
-      }
+      if (action === "delete") { requestSessionDeletion([id]); return; }
     }
     const workspaceRename = event.target.closest("[data-workspace-rename]");
     if (workspaceRename) {
@@ -1162,7 +1286,13 @@ document.addEventListener("click", async (event) => {
       $("#composer").requestSubmit();
       return;
     }
-    const card = event.target.closest(".session-row[data-id]"); if (card) { closeAllSwipe(); return openSession(card.dataset.id); }
+    const sessionSelect = event.target.closest("[data-session-select]");
+    if (sessionSelect) { toggleSessionSelection(sessionSelect.dataset.sessionSelect); return; }
+    const card = event.target.closest(".session-row[data-id]"); if (card) { if (sessionSelectionMode) { toggleSessionSelection(card.dataset.id); return; } closeAllSwipe(); return openSession(card.dataset.id); }
+    if (event.target.closest("#session-select-toggle")) { setSessionSelectionMode(!sessionSelectionMode); return; }
+    if (event.target.closest("#session-selection-delete")) { requestSessionDeletion([...selectedSessionIds]); return; }
+    if (event.target.closest("#close-session-delete-sheet") || event.target.closest("#cancel-session-delete") || event.target === $("#session-delete-sheet")) { hideSessionDeleteSheet(); return; }
+    if (event.target.closest("#confirm-session-delete")) { await confirmSessionDeletion(); return; }
     if (event.target.closest("#more")) { $("#session-menu").hidden = !$("#session-menu").hidden; return; }
     if (event.target.closest("#open-model-sheet") || event.target.closest("#retry-model-sheet")) return openModelSheet();
     if (event.target.closest("#close-model-sheet") || event.target === $("#model-sheet")) { hideModelSheet(); return; }
@@ -1210,14 +1340,17 @@ document.addEventListener("click", async (event) => {
     }
     const action = event.target.dataset.action; if (!action || !current) return;
     if (action === "cancel") { showStopSessionSheet(); return; }
-    let body = {}; if (action === "rename") body.title = prompt("会话名称", current.title) || current.title; if (action === "delete" && !confirm("确认删除这个会话？\n\n部分 Agent 的桌面历史不能物理删除，会从手机列表隐藏。")) return;
-    const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}${action === "delete" ? "" : `/${action}`}`, { method: action === "delete" ? "DELETE" : "POST", body: action === "delete" ? undefined : JSON.stringify(body) });
-    if (["archive", "delete"].includes(action)) { current = null; page("sessions"); toast(action === "delete" && result?.hiddenOnly ? "已从手机列表移除" : action === "delete" ? "已删除" : "已归档"); return loadSessions(); } if (action === "fork" && result.sessionId) return openSession(result.sessionId); await openSession(current.id);
+    if (action === "refresh") { $("#session-menu").hidden = true; return refreshMobileData(); }
+    if (action === "delete") { $("#session-menu").hidden = true; requestSessionDeletion([current.id]); return; }
+    let body = {}; if (action === "rename") body.title = prompt("会话名称", current.title) || current.title;
+    const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    if (action === "archive") { current = null; page("sessions"); toast("已归档"); return loadSessions(); } if (action === "fork" && result.sessionId) return openSession(result.sessionId); await openSession(current.id);
   } catch (error) { toast(error.message); }
 });
 
-$("#refresh").addEventListener("click", () => Promise.all([loadSessions(), loadApprovals()]).catch((error) => toast(error.message)));
-$("#show-archive").addEventListener("click", async () => { archivedView = !archivedView; sessionDisplayLimit = SESSION_PAGE_SIZE; $("#show-archive").textContent = archivedView ? "最近" : "归档"; await loadSessions().catch((error) => toast(error.message)); });
+$("#refresh").addEventListener("click", () => refreshMobileData());
+setupPullToRefresh();
+$("#show-archive").addEventListener("click", async () => { archivedView = !archivedView; sessionSelectionMode = false; selectedSessionIds.clear(); sessionDisplayLimit = SESSION_PAGE_SIZE; $("#show-archive").textContent = archivedView ? "最近" : "归档"; await loadSessions().catch((error) => toast(error.message)); });
 $("#search").addEventListener("input", renderSessionList);
 $("#session-switcher-search").addEventListener("input", renderSessionSwitcher);
 for (const input of [$("#message"), $("#prompt")]) {
