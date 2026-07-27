@@ -7,6 +7,9 @@ const PINNED_PROJECTS_KEY = "switchyard_mobile_pinned_projects";
 function hasNativeTokenStore() {
   try { return typeof window.SwitchyardNative?.getToken === "function"; } catch { return false; }
 }
+function nativeVoiceInputAvailable() {
+  try { return typeof window.SwitchyardNative?.startVoiceInput === "function"; } catch { return false; }
+}
 function nativePairingEditAvailable() {
   try { return typeof window.SwitchyardNative?.editPairingLink === "function"; } catch { return false; }
 }
@@ -43,6 +46,7 @@ const selectedSessionIds = new Set();
 let pendingDeleteSessionIds = [];
 let mobileRefreshInProgress = false;
 let pullRefreshStartY = null;
+let pullRefreshStartX = null;
 let pullRefreshDistance = 0;
 function localStringSet(key) {
   try { return new Set(JSON.parse(localStorage.getItem(key) || "[]").filter((value) => typeof value === "string")); } catch { return new Set(); }
@@ -52,7 +56,7 @@ function localGroupStates() {
 }
 let groupStates = localGroupStates();
 const pinnedProjects = localStringSet(PINNED_PROJECTS_KEY);
-function isGroupCollapsed(name) { return groupStates[name] !== false; }
+function isGroupCollapsed(name) { return groupStates[name] === true; }
 function setGroupCollapsed(name, collapsed) { groupStates[name] = Boolean(collapsed); localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupStates)); }
 function setProjectPinned(name, pinned) { if (pinned) pinnedProjects.add(name); else pinnedProjects.delete(name); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
 function renameProjectPreferences(oldName, newName) {
@@ -61,6 +65,7 @@ function renameProjectPreferences(oldName, newName) {
   if (pinnedProjects.delete(oldName)) { pinnedProjects.add(newName); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
 }
 let eventLoopStopped = false;
+let eventLoopRevoked = false;
 let refreshTimer = null;
 let activeAttachments = [];
 let newAttachments = [];
@@ -77,6 +82,27 @@ const commandCache = new Map();
 let commandPickerState = null;
 let commandRequestSeq = 0;
 let preferences = { conversationSendMode: "ask", sync: true };
+const LAST_TASK_KEY = "switchyard_mobile_last_task";
+const THEME_KEY = "switchyard_mobile_theme";
+const THEME_ORDER = ["system", "light", "dark"];
+function currentTheme() { const value = localStorage.getItem(THEME_KEY) || "system"; return THEME_ORDER.includes(value) ? value : "system"; }
+function themeLabel(theme = currentTheme()) { return ({ system: "跟随系统", light: "浅色", dark: "深色" })[theme]; }
+function applyTheme() {
+  const theme = currentTheme();
+  const resolved = theme === "system"
+    ? (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+    : theme;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = resolved === "dark" ? "#1b1915" : "#f7f4ef";
+  const label = $("#theme-label"); if (label) label.textContent = themeLabel();
+}
+window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (currentTheme() === "system") applyTheme(); });
+function lastTaskPrefs() { try { return JSON.parse(localStorage.getItem(LAST_TASK_KEY) || "{}") || {}; } catch { return {}; } }
+function rememberLastTask() {
+  try { localStorage.setItem(LAST_TASK_KEY, JSON.stringify({ agent: selectedAgent, workspace: selectedWorkspace, model: $("#model-select")?.value || "" })); } catch {}
+}
 
 function escapeHtml(value) { return String(value || "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]); }
 function agentKey(agent) { return String(agent || "").toLowerCase(); }
@@ -90,6 +116,16 @@ function hasComposerContent() { return Boolean($("#message")?.value.trim() || ac
 function stateLabel(state) { return ({ queued: "正在排队", running: "正在生成", waiting_for_approval: "等待审批", completed: "已完成", failed: "已失败", cancelled: "已停止", incomplete: "未完成" })[state] || ""; }
 function avatar(agent) { return `<span class="agent-avatar ${agentClass(agent)}">${escapeHtml(agentInitial(agent))}</span>`; }
 function icon(name) { return name === "folder" ? '<svg viewBox="0 0 24 24"><path d="M3 6.5h6l2 2h10v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6.5Z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>'; }
+function setConnectionStatus(text, ok = true) {
+  const el = $("#connection"); if (el) el.textContent = text;
+  const detail = $("#detail-conn");
+  if (detail) {
+    const show = Boolean(text) && text !== "已安全连接";
+    detail.hidden = !show;
+    detail.textContent = show ? `· ${text}` : "";
+    detail.classList.toggle("off", !ok);
+  }
+}
 function toast(message) { const el = $("#toast"); el.textContent = message; el.classList.add("toast-show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("toast-show"), 2900); }
 
 // Android System WebView can lag behind Chrome and may not expose crypto.randomUUID().
@@ -197,12 +233,13 @@ async function api(url, options = {}) {
     error.status = response.status; error.code = body.error || "";
     throw error;
   }
-  $("#connection").textContent = "已安全连接";
+  setConnectionStatus("已安全连接");
   $("#connection-detail").textContent = "已连接";
   return body;
 }
 
 function page(name) {
+  document.querySelector(".app-shell").dataset.page = name;
   document.querySelectorAll(".page").forEach((element) => element.classList.toggle("active", element.dataset.page === name));
   document.querySelectorAll("[data-tab]").forEach((element) => element.classList.toggle("active", element.dataset.tab === name));
   $("#session-menu").hidden = true;
@@ -211,6 +248,7 @@ function page(name) {
   hideMessageModeSheet();
   hideConversationBehaviorSheet();
   hideSessionDeleteSheet();
+  closeInputSheet(null);
   if (name !== "sessions") { sessionSelectionMode = false; selectedSessionIds.clear(); }
   closeSessionSwitcher();
   workspaceSheet(false);
@@ -265,6 +303,28 @@ function showStopSessionSheet() {
   sheet.style.display = "flex";
 }
 
+let inputSheetResolver = null;
+function showInputSheet({ title = "输入", description = "", value = "", confirmLabel = "确定", mode = "input", danger = false } = {}) {
+  return new Promise((resolve) => {
+    inputSheetResolver = resolve;
+    $("#input-sheet-title").textContent = title;
+    $("#input-sheet-description").textContent = description;
+    const sheet = $("#input-sheet");
+    sheet.classList.toggle("danger", danger);
+    $("#confirm-input-sheet").textContent = confirmLabel;
+    const text = $("#input-sheet-text");
+    text.hidden = mode !== "input";
+    text.value = value;
+    setSheetVisible("#input-sheet", true);
+    if (mode === "input") setTimeout(() => { text.focus(); text.setSelectionRange(text.value.length, text.value.length); }, 60);
+  });
+}
+function closeInputSheet(result) {
+  if (!inputSheetResolver) { setSheetVisible("#input-sheet", false); return; }
+  const resolve = inputSheetResolver; inputSheetResolver = null;
+  setSheetVisible("#input-sheet", false);
+  resolve(result);
+}
 function setSheetVisible(id, visible) {
   const sheet = $(id); if (!sheet) return;
   sheet.hidden = !visible;
@@ -344,7 +404,7 @@ function sessionRowHtml(session) {
   const running = ["running", "queued"].includes(session.state);
   const waiting = session.state === "waiting_for_approval";
   const selected = selectedSessionIds.has(session.id);
-  const tag = running ? '<span class="tag tag-run">RUNNING</span>' : waiting ? '<span class="tag tag-wait">待审批</span>' : `<span class="tag tag-agent">${escapeHtml(agentLabel(session.agent).replace(" Build", "").replace(" Code", "").toUpperCase())}</span>`;
+  const tag = running ? '<span class="tag tag-run">运行中</span>' : waiting ? '<span class="tag tag-wait">待审批</span>' : session.state === "failed" ? '<span class="tag tag-fail">已失败</span>' : `<span class="tag tag-agent">${escapeHtml(agentLabel(session.agent).replace(" Build", "").replace(" Code", "").toUpperCase())}</span>`;
   const pinned = session.pinned ? '<span class="session-pinned" aria-label="已置顶">⌖</span>' : "";
   const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""} swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta">${pinned}<time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
   if (sessionSelectionMode) return `<div class="session-select-item">${row}</div>`;
@@ -406,6 +466,29 @@ function toggleSessionSelection(id) {
   renderSessionList();
 }
 
+function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+let contentSearchSeq = 0;
+let contentSearchTimer = null;
+function scheduleContentSearch(query) {
+  clearTimeout(contentSearchTimer);
+  contentSearchSeq += 1;
+  document.querySelector(".content-search")?.remove();
+  if (query.length >= 2) contentSearchTimer = setTimeout(() => renderContentHits(query), 300);
+}
+async function renderContentHits(query) {
+  const seq = ++contentSearchSeq;
+  let hits = [];
+  try { hits = await api(`/mobile/v1/sessions/search?q=${encodeURIComponent(query)}`); } catch { return; }
+  if (seq !== contentSearchSeq) return;
+  document.querySelector(".content-search")?.remove();
+  if (!Array.isArray(hits) || !hits.length) return;
+  const pattern = new RegExp(`(${escapeRegExp(escapeHtml(query))})`, "gi");
+  const rows = hits.map((hit) => {
+    const snippet = escapeHtml(hit.snippet || "");
+    return `<button type="button" class="content-hit" data-open-session="${escapeHtml(hit.id)}"><span class="ch-title">${escapeHtml(hit.title || "会话")}</span><span class="ch-snippet">${snippet.replace(pattern, "<em>$1</em>")}</span><span class="ch-meta">${escapeHtml(agentLabel(hit.agent))}${hit.project ? ` · ${escapeHtml(hit.project)}` : ""}${hit.matchCount > 1 ? ` · ${hit.matchCount} 处匹配` : ""}</span></button>`;
+  }).join("");
+  $("#session-list").insertAdjacentHTML("beforeend", `<div class="content-search"><div class="content-search-head">消息内容匹配</div>${rows}</div>`);
+}
 function renderSessionList() {
   const knownIds = new Set(allSessions.map((session) => session.id));
   for (const id of selectedSessionIds) if (!knownIds.has(id)) selectedSessionIds.delete(id);
@@ -448,6 +531,7 @@ function renderSessionList() {
   if (hasMore) {
     $("#session-list").insertAdjacentHTML("beforeend", `<button id="load-more-sessions" class="load-more-sessions" type="button">显示更多会话（已显示 ${rows.length}/${matchingRows.length}）</button>`);
   }
+  scheduleContentSearch(query);
   renderStatusSummary();
 }
 
@@ -533,11 +617,15 @@ function setupPullToRefresh() {
   document.addEventListener("touchstart", (event) => {
     if (!$(".page[data-page=\"sessions\"]")?.classList.contains("active") || window.scrollY > 0 || event.touches.length !== 1) return;
     pullRefreshStartY = event.touches[0].clientY;
+    pullRefreshStartX = event.touches[0].clientX;
     pullRefreshDistance = 0;
   }, { passive: true });
   document.addEventListener("touchmove", (event) => {
     if (pullRefreshStartY === null) return;
-    pullRefreshDistance = Math.max(0, Math.min(96, event.touches[0].clientY - pullRefreshStartY));
+    const dy = event.touches[0].clientY - pullRefreshStartY;
+    // Horizontal-dominant gestures belong to swipe actions, not pull-to-refresh.
+    if (Math.abs(event.touches[0].clientX - pullRefreshStartX) > Math.abs(dy)) { pullRefreshStartY = null; setPullRefreshState(); return; }
+    pullRefreshDistance = Math.max(0, Math.min(96, dy));
     setPullRefreshState(pullRefreshDistance);
   }, { passive: true });
   document.addEventListener("touchend", () => {
@@ -554,9 +642,10 @@ function setupPullToRefresh() {
 function approvalCardHtml(approval, { sessionScoped = false } = {}) {
   const session = allSessions.find((item) => item.id === approval.sessionId);
   const title = sessionScoped ? "等待你的授权" : session?.title || approval.title || "待审批任务";
+  const titleHtml = sessionScoped || !approval.sessionId ? escapeHtml(title) : `<button type="button" class="sess-link" data-open-session="${escapeHtml(approval.sessionId)}">${escapeHtml(title)}</button>`;
   const actions = `<div class="approval-actions"><button data-approval="${escapeHtml(approval.id)}" data-decision="deny_once" type="button">拒绝</button><button class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once" type="button">允许一次</button></div>`;
   const detail = approval.detail?.content ? `<section class="approval-detail"><span>${escapeHtml(approval.detail.label || "请求内容")}</span><pre>${escapeHtml(approval.detail.content)}</pre></section>` : "";
-  return `<article class="approval-card" data-approval-card="${escapeHtml(approval.id)}"><div class="r1"><i></i>${escapeHtml(title)}</div><div class="r2">${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</div>${detail}${actions}</article>`;
+  return `<article class="approval-card" data-approval-card="${escapeHtml(approval.id)}"><div class="r1"><i></i>${titleHtml}</div><div class="r2">${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</div>${detail}${actions}</article>`;
 }
 function renderApprovalInbox() {
   $("#approval-inbox").innerHTML = pendingApprovals.map((approval) => approvalCardHtml(approval)).join("");
@@ -620,7 +709,11 @@ function renderWorkspaces() {
     const path = workspace.path || workspace.id;
     return `<button class="workspace-choice ${selected ? "selected" : ""}" type="button" data-workspace="${escapeHtml(workspace.id)}">${icon("folder")}<span><strong>${escapeHtml(workspace.name)}</strong><small>${escapeHtml(agentLabel(workspace.agent))}</small></span><span class="check">${selected ? "✓" : ""}</span></button>`;
   }).join("") || '<div class="empty">没有最近项目。你可以浏览本机文件夹后直接选择。</div>';
-  if (!selectedWorkspace && rows[0]) selectedWorkspace = rows[0].id;
+  if (!selectedWorkspace) {
+    const last = lastTaskPrefs();
+    if (last.workspace && workspaces.some((item) => item.id === last.workspace || item.path === last.workspace)) selectedWorkspace = last.workspace;
+    else if (rows[0]) selectedWorkspace = rows[0].id;
+  }
 }
 function workspaceSheet(show) { const sheet = $("#workspace-sheet"); sheet.hidden = !show; sheet.setAttribute("aria-hidden", String(!show)); sheet.style.display = show ? "flex" : "none"; }
 function renderWorkspaceBrowser() {
@@ -740,7 +833,6 @@ function finalizeStreamingNode(node, selector) {
 function messageKey(message, index = 0) { return message.id || `${message.role || "assistant"}:${message.kind || "message"}:${index}`; }
 function firstLine(value) { return String(value || "").split(/\n/).map((line) => line.trim()).filter(Boolean)[0] || ""; }
 function toolStatusLabel(status) { return ({ pending: "等待中", running: "执行中", waiting_for_approval: "待审批", completed: "已完成", failed: "失败", cancelled: "已取消" })[status] || "已完成"; }
-function toolDetailBlock(label, value, className = "") { const text = String(value || "").trim(); return text ? `<section class="tool-section ${className}"><b>${label}</b><pre>${escapeHtml(text)}</pre></section>` : ""; }
 function assetUrl(assetId) { return `/mobile/v1/assets/${encodeURIComponent(assetId)}`; }
 function nativeAssetActionAvailable(action) {
   try { return typeof window.SwitchyardNative?.[action] === "function"; } catch { return false; }
@@ -894,31 +986,164 @@ function toolActivitySummary(messages = []) {
   if (counts.other) parts.push(`完成 ${counts.other} 项操作`);
   return `已${parts.join("，") || "完成工具调用"}`;
 }
+const TOOL_ROW_ICONS = { read: "读", search: "⌕", edit: "✎", command: "›_", other: "⚙" };
+
+function isPlanToolMessage(message) {
+  const name = String(message?.tool?.name || "");
+  return /^update[_-]?plan$/i.test(name);
+}
+
+function parsePlanArguments(tool) {
+  try {
+    const parsed = JSON.parse(String(tool?.arguments || ""));
+    const plan = parsed?.plan || parsed?.steps;
+    if (!Array.isArray(plan) || !plan.length) return null;
+    const items = plan.map((item) => ({
+      step: String(item?.step || item?.title || item?.task || "").trim(),
+      status: String(item?.status || "pending").toLowerCase()
+    })).filter((item) => item.step);
+    return items.length ? items : null;
+  } catch { return null; }
+}
+
+function renderPlanCard(message, key) {
+  const plan = parsePlanArguments(message?.tool);
+  if (!plan) return renderToolItem(message, key);
+  const isDone = (status) => ["completed", "done", "complete"].includes(status);
+  const isDoing = (status) => ["in_progress", "running", "doing"].includes(status);
+  const done = plan.filter((item) => isDone(item.status)).length;
+  const items = plan.map((item) => {
+    const cls = isDone(item.status) ? "done" : isDoing(item.status) ? "doing" : "todo";
+    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
+  }).join("");
+  return `<div class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"><div class="plan-head"><span class="ic">☰</span><b>执行计划</b><span class="prog">${done}/${plan.length}</span></div><div class="plan-items">${items}</div></div>`;
+}
+
+// Parse Codex apply_patch blocks and standard unified diffs into row models
+// for the diff card. Returns null when the source is not a recognizable patch.
+function parseEditPatch(source) {
+  const text = String(source || "");
+  if (!text) return null;
+  if (text.includes("*** Begin Patch")) {
+    const fileMatch = text.match(/\*\*\* (?:Update File|Add File|Delete File): (.+)/);
+    const fileCount = (text.match(/\*\*\* (?:Update File|Add File|Delete File): /g) || []).length;
+    let adds = 0; let dels = 0; const rows = [];
+    for (const line of text.split("\n")) {
+      if (line.startsWith("***")) continue;
+      if (line.startsWith("@@")) { rows.push({ type: "hunk", text: line }); continue; }
+      if (line.startsWith("+")) { adds += 1; rows.push({ type: "add", text: line.slice(1) }); }
+      else if (line.startsWith("-")) { dels += 1; rows.push({ type: "del", text: line.slice(1) }); }
+      else if (line.startsWith(" ")) rows.push({ type: "ctx", text: line.slice(1) });
+    }
+    if (!adds && !dels && !rows.length) return null;
+    return { fileName: (fileMatch?.[1] || "修改内容").trim() + (fileCount > 1 ? ` 等 ${fileCount} 个文件` : ""), adds, dels, rows: rows.slice(0, 240) };
+  }
+  if (/^--- /m.test(text) && /^\+\+\+ /m.test(text)) {
+    let adds = 0; let dels = 0; const rows = []; let fileName = "";
+    for (const line of text.split("\n")) {
+      if (line.startsWith("+++ ")) { fileName = line.slice(4).replace(/^[ab]\//, "").trim(); continue; }
+      if (line.startsWith("--- ") || line.startsWith("index ")) continue;
+      if (line.startsWith("@@")) { rows.push({ type: "hunk", text: line }); continue; }
+      if (line.startsWith("+")) { adds += 1; rows.push({ type: "add", text: line.slice(1) }); }
+      else if (line.startsWith("-")) { dels += 1; rows.push({ type: "del", text: line.slice(1) }); }
+      else if (line.startsWith(" ")) rows.push({ type: "ctx", text: line.slice(1) });
+    }
+    if (!adds && !dels) return null;
+    return { fileName: fileName || "修改内容", adds, dels, rows: rows.slice(0, 240) };
+  }
+  return null;
+}
+
+function renderDiffCard(patch) {
+  const rows = patch.rows.map((row) => {
+    if (row.type === "hunk") return `<tr class="hunk"><td colspan="2">${escapeHtml(row.text)}</td></tr>`;
+    const ln = row.type === "add" ? "+" : row.type === "del" ? "−" : " ";
+    return `<tr class="${row.type}"><td class="ln">${ln}</td><td>${escapeHtml(row.text)}</td></tr>`;
+  }).join("");
+  const stat = `${patch.adds ? `<span class="plus">+${patch.adds}</span>` : ""}${patch.dels ? ` <span class="minus">−${patch.dels}</span>` : ""}`;
+  return `<div class="diff"><div class="diff-head"><span class="fname">${escapeHtml(patch.fileName || "修改内容")}</span><span class="stat">${stat}</span></div><div class="diff-table-wrap"><table>${rows}</table></div></div>`;
+}
+
+function toolRowSubtitle(tool, activity) {
+  const status = tool.status || "completed";
+  if (status === "running" || status === "pending") return "正在执行…";
+  if (status === "waiting_for_approval") return "等待你的授权";
+  if (status === "cancelled") return "已取消";
+  if (status === "failed") return firstLine(tool.error).slice(0, 90) || "执行失败";
+  const files = Array.isArray(tool.files) ? tool.files : [];
+  const pathOf = (file) => file?.path || file?.name || "";
+  if (activity === "edit" && files.length) return pathOf(files[0]) ? String(pathOf(files[0])).split("/").pop() : "已修改";
+  if (activity === "read" && files.length > 1) return `${files.length} 个文件`;
+  if (activity === "read" && files.length === 1) return String(pathOf(files[0])).split("/").pop() || "已读取";
+  const outputLine = firstLine(tool.output).slice(0, 90);
+  return outputLine || "已完成";
+}
+
+function renderToolDetail(message, activity, patch) {
+  const tool = message.tool || {};
+  const assetFiles = (Array.isArray(tool.files) ? tool.files : []).filter((file) => file?.id);
+  const filesHtml = assetFiles.length ? renderToolFiles(assetFiles) : "";
+  if (activity === "command") {
+    const command = String(tool.command || "").trim();
+    const output = String(tool.output || "").trim();
+    const error = String(tool.error || "").trim();
+    if (!command && !output && !error) return '<div class="pv"><pre>Agent 未提供命令或输出详情</pre></div>';
+    return `<div class="term">${command ? `<div class="term-cmd"><span class="ps">$</span><span>${escapeHtml(command)}</span></div>` : ""}${output || error ? `<div class="term-out">${error ? `<span class="err">${escapeHtml(error.slice(0, 6000))}</span>` : escapeHtml(output.slice(0, 6000))}</div>` : ""}<div class="term-foot"><span>${escapeHtml(toolStatusLabel(tool.status))}</span><span>${escapeHtml(tool.name || "")}</span></div></div>`;
+  }
+  if (activity === "edit" && patch) return renderDiffCard(patch) + filesHtml;
+  const blocks = [];
+  const head = activity === "read" ? "读取内容" : activity === "search" ? "搜索结果" : activity === "edit" ? "修改内容" : "详情";
+  const text = String(tool.output || "").trim() || String(tool.error || "").trim() || String(tool.arguments || "").trim() || String(tool.command || "").trim();
+  if (text) blocks.push(`<div class="pv"><div class="pv-head">${escapeHtml(head)}</div><pre>${escapeHtml(text.slice(0, 5000))}</pre></div>`);
+  blocks.push(filesHtml);
+  return blocks.join("") || '<div class="pv"><pre>Agent 未提供命令或参数详情</pre></div>';
+}
+
 function renderToolItem(message, key, position = "") {
   const tool = message.tool || {}; const status = tool.status || "completed";
+  const activity = toolActivity(message);
   const title = tool.title || tool.name || firstLine(message.text) || "工具调用";
-  const command = tool.command || "";
-  const argumentsText = tool.arguments && tool.arguments !== command ? tool.arguments : "";
-  const details = [toolDetailBlock("命令", command, "tool-command"), toolDetailBlock("参数", argumentsText), toolDetailBlock("输出", tool.output, "tool-output"), toolDetailBlock("错误", tool.error, "tool-error"), renderToolFiles(tool.files)].join("");
-  return `<details class="tool-item status-${escapeHtml(status)}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}" data-tool-activity="${escapeHtml(toolActivity(message))}"><summary><span class="tool-index">${escapeHtml(position)}</span><span class="tool-item-head"><b>${escapeHtml(title)}</b><small>${escapeHtml(tool.name && tool.name !== title ? tool.name : command || "未提供命令摘要")}</small></span><span class="tool-item-state">${escapeHtml(toolStatusLabel(status))}</span><span class="tool-item-chevron">›</span></summary><div class="tool-item-detail">${details || '<div class="tool-empty">Agent 未提供命令或参数详情</div>'}</div></details>`;
+  const patch = activity === "edit" ? parseEditPatch(tool.arguments) : null;
+  const stateHtml = (status === "running" || status === "pending") ? '<span class="spin"></span>'
+    : status === "failed" ? '<span class="no">✕</span>'
+    : status === "waiting_for_approval" ? '<span class="wait">!</span>'
+    : patch && (patch.adds || patch.dels) ? `${patch.adds ? `<span class="badge">+${patch.adds}</span>` : ""}${patch.dels ? `<span class="badge minus">−${patch.dels}</span>` : ""}`
+    : '<span class="ok">✓</span>';
+  const rowClass = `tl${status === "failed" ? " failed" : ""}${status === "running" || status === "pending" ? " running" : ""}${status === "failed" ? " open" : ""}`;
+  return `<div class="${rowClass}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}" data-tool-activity="${escapeHtml(activity)}" data-tool-title="${escapeHtml(title)}"><div class="tl-row"><span class="tl-ic ${escapeHtml(activity)}">${escapeHtml(TOOL_ROW_ICONS[activity] || TOOL_ROW_ICONS.other)}</span><span class="tl-main"><span class="tl-title${activity === "command" ? " mono" : ""}">${escapeHtml(title)}</span><span class="tl-sub">${escapeHtml(toolRowSubtitle(tool, activity))}</span></span><span class="tl-state">${stateHtml}</span></div><div class="tl-detail">${renderToolDetail(message, activity, patch)}</div></div>`;
 }
+
 function aggregateToolStatus(messages = []) {
   const statuses = messages.map((message) => message.tool?.status || "completed");
   return ["failed", "waiting_for_approval", "running", "pending", "cancelled"].find((status) => statuses.includes(status)) || "completed";
 }
-function toolGroupSubtitle(messages = []) {
-  const running = messages.filter((message) => ["running", "pending"].includes(message.tool?.status)).length;
-  const failed = messages.filter((message) => message.tool?.status === "failed").length;
-  if (failed) return `${failed} 个失败，点击查看详情`;
-  if (running) return `${running} 个执行中，点击查看详情`;
-  return "点击展开调用详情";
+
+function workHeadHtml(messages, status = aggregateToolStatus(messages)) {
+  const count = messages.length;
+  const runningItem = messages.find((message) => ["running", "pending"].includes(message.tool?.status));
+  const failedCount = messages.filter((message) => message.tool?.status === "failed").length;
+  let iconHtml; let title; let sub;
+  if (status === "running" || status === "pending") {
+    iconHtml = '<span class="spin"></span>';
+    title = `正在工作 · 第 ${count} 项`;
+    sub = runningItem?.tool?.title || runningItem?.tool?.name || "执行中";
+  } else if (status === "failed") {
+    iconHtml = "✕"; title = `${failedCount} 项失败 · 共 ${count} 项`; sub = "点击展开查看详情";
+  } else if (status === "waiting_for_approval") {
+    iconHtml = "!"; title = "等待你的授权"; sub = "点击查看待审批操作";
+  } else {
+    iconHtml = "✓"; title = `已完成 ${count} 项操作`; sub = toolActivitySummary(messages).replace(/^已/, "");
+  }
+  return `<button class="work-head" type="button"><span class="work-ic">${iconHtml}</span><span class="work-title"><b>${escapeHtml(title)}</b><small>${escapeHtml(sub || "")}</small></span><span class="work-meta"><span class="chev">⌄</span></span></button>`;
 }
+
 function renderToolGroup(messages, startIndex = 0) {
   const status = aggregateToolStatus(messages);
-  const open = status === "failed" || status === "waiting_for_approval";
+  const open = ["failed", "waiting_for_approval", "running", "pending"].includes(status);
   const items = messages.map((message, offset) => renderToolItem(message, messageKey(message, startIndex + offset), offset + 1)).join("");
-  return `<div class="tool-group-wrap"><details class="tool status-${escapeHtml(status)} tool-group" data-tool-count="${messages.length}"${open ? " open" : ""}><summary><span class="ic">‹/›</span><span class="tool-head"><b>${escapeHtml(toolActivitySummary(messages))}</b><small>${escapeHtml(toolGroupSubtitle(messages))}</small></span><span class="tool-state">${escapeHtml(toolStatusLabel(status))}</span><span class="chevron">›</span></summary><div class="tool-detail"><div class="tool-group-items">${items}</div></div></details>${renderProducedFiles(messages)}</div>`;
+  return `<div class="work-group-wrap"><div class="work-group status-${escapeHtml(status)}${open ? " open" : ""}" data-message-key="${escapeHtml(messageKey(messages[0], startIndex))}-group" data-tool-count="${messages.length}">${workHeadHtml(messages, status)}<div class="work-items">${items}</div></div>${renderProducedFiles(messages)}</div>`;
 }
+
 function renderMessage(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
@@ -939,22 +1164,48 @@ function renderSessionQueue() {
 function updateComposerQueueState() {
   const queueing = isSessionRunning(); const stopping = queueing && !hasComposerContent();
   const send = $("#send"); const composer = $("#composer");
+  send.disabled = !queueing && !hasComposerContent();
   send.classList.toggle("is-queue", queueing && !stopping); send.classList.toggle("is-stop", stopping); composer.dataset.queueing = String(queueing);
   const label = stopping ? "停止会话" : queueing ? "发送后续消息" : "发送";
   send.setAttribute("aria-label", label); send.title = label;
 }
 
 function renderMessages(rows = [], { hasMore = false, total = rows.length } = {}) {
+  // Preserve expanded cards across full re-renders (queue updates, status polls).
+  const openKeys = new Set();
+  document.querySelectorAll("#messages [data-message-key]").forEach((node) => {
+    if (node.classList?.contains("open") || node.open === true) openKeys.add(node.dataset.messageKey);
+  });
   const html = [];
   if (hasMore) html.push(`<button id="load-earlier-messages" class="load-earlier-messages" type="button">加载更早记录（共 ${Number(total) || rows.length} 条）</button>`);
   for (let index = 0; index < rows.length;) {
     if (!isToolMessage(rows[index])) { html.push(renderMessage(rows[index], "", index)); index += 1; continue; }
     let end = index + 1;
     while (end < rows.length && isToolMessage(rows[end])) end += 1;
-    html.push(renderToolGroup(rows.slice(index, end), index));
+    // update_plan renders as a standalone checklist card, not inside the work group.
+    const group = rows.slice(index, end);
+    let bucket = []; let bucketStart = index;
+    const flush = () => { if (bucket.length) { html.push(renderToolGroup(bucket, bucketStart)); bucket = []; } };
+    group.forEach((message, offset) => {
+      if (isPlanToolMessage(message)) {
+        flush();
+        html.push(renderPlanCard(message, messageKey(message, index + offset)));
+      } else {
+        if (!bucket.length) bucketStart = index + offset;
+        bucket.push(message);
+      }
+    });
+    flush();
     index = end;
   }
-  $("#messages").innerHTML = html.join(""); lastDetailFingerprint = messageFingerprint(rows); renderSessionQueue(); updateComposerQueueState(); void hydrateAttachmentPreviews($("#messages"));
+  $("#messages").innerHTML = html.join("");
+  for (const key of openKeys) {
+    const node = $("#messages").querySelector(`[data-message-key="${CSS.escape(key)}"]`);
+    if (!node) continue;
+    if (node.matches("details")) node.open = true;
+    else node.classList.add("open");
+  }
+  lastDetailFingerprint = messageFingerprint(rows); renderSessionQueue(); updateComposerQueueState(); void hydrateAttachmentPreviews($("#messages"));
 }
 function syncMessages(rows = [], options = {}) {
   const fingerprint = messageFingerprint(rows);
@@ -981,7 +1232,9 @@ async function pair() {
 
 async function loadAgents() {
   agents = await api("/mobile/v1/agents");
-  if (!selectedAgent || !agents.some((agent) => agent.id === selectedAgent)) selectedAgent = agents[0]?.id || "";
+  const last = lastTaskPrefs();
+  if (last.agent && agents.some((agent) => agent.id === last.agent)) selectedAgent = last.agent;
+  else if (!selectedAgent || !agents.some((agent) => agent.id === selectedAgent)) selectedAgent = agents[0]?.id || "";
   renderFilters(); renderAgentPicker(); renderAgentNotices(); await loadModels();
 }
 
@@ -989,12 +1242,18 @@ async function loadModels() {
   if (!selectedAgent) return;
   const models = await api(`/mobile/v1/models?agent=${encodeURIComponent(selectedAgent)}`);
   $("#model-select").innerHTML = models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.name)}</option>`).join("") || '<option value="">暂无可用模型</option>';
-  const preferred = agents.find((agent) => agent.id === selectedAgent)?.defaultModelId;
-  if (preferred && models.some((model) => model.id === preferred)) $("#model-select").value = preferred;
+  const last = lastTaskPrefs();
+  if (last.model && models.some((model) => model.id === last.model)) $("#model-select").value = last.model;
+  else {
+    const preferred = agents.find((agent) => agent.id === selectedAgent)?.defaultModelId;
+    if (preferred && models.some((model) => model.id === preferred)) $("#model-select").value = preferred;
+  }
 }
 
 async function loadSessions({ background = false } = {}) {
-  const rows = await api(`/mobile/v1/sessions${archivedView ? "?archived=true" : ""}`);
+  let rows;
+  try { rows = await api(`/mobile/v1/sessions${archivedView ? "?archived=true" : ""}`); }
+  catch (error) { if (!allSessions.length) $("#session-list").innerHTML = `<div class="empty">会话列表加载失败。<br>${escapeHtml(error.message || "请下拉重试")}</div>`; throw error; }
   // Keep the full lightweight metadata list for search/switching, but only
   // create DOM for one page. Rendering 1,000+ WeChat-style rows at once can
   // freeze Android WebView long enough to look like the app never entered.
@@ -1024,14 +1283,14 @@ function scheduleDetailPreload(rows = []) {
   if (typeof requestIdleCallback === "function") requestIdleCallback(preload, { timeout: 1200 });
   else setTimeout(preload, 1_500);
 }
-function applySessionDetail(detail, { activate = true, instant = false } = {}) {
+function applySessionDetail(detail, { activate = true, instant = false, anchor = false } = {}) {
   current = detail;
   $("#detail-title").textContent = current.title;
   $("#detail-meta").textContent = `${agentLabel(current.agent)}${current.model ? ` · ${current.model}` : ""}`;
   $("#chat-state-dot").className = current.state || "";
   renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); updateComposerQueueState();
   const options = { hasMore: Boolean(current.hasMoreMessages), total: current.messagesTotal };
-  if (activate) { renderMessages(current.messages || [], options); page("detail"); scrollMessages({ force: true, instant }); }
+  if (activate) { renderMessages(current.messages || [], options); page("detail"); if (!anchor) scrollMessages({ force: true, instant }); }
   else syncMessages(current.messages || [], options);
 }
 async function fetchSessionDetail(id, { messageLimit = INITIAL_MESSAGE_LIMIT } = {}) {
@@ -1040,7 +1299,7 @@ async function fetchSessionDetail(id, { messageLimit = INITIAL_MESSAGE_LIMIT } =
   return detail;
 }
 let openSessionSeq = 0;
-async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE_LIMIT } = {}) {
+async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE_LIMIT, anchor = false } = {}) {
   const seq = ++openSessionSeq;
   const cached = sessionDetailCache.get(id);
   const cacheFresh = cached && Date.now() - cached.at < SESSION_DETAIL_CACHE_TTL_MS;
@@ -1050,19 +1309,23 @@ async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE
     else {
       $("#detail-title").textContent = "载入中…";
       $("#detail-meta").textContent = "";
-      $("#messages").innerHTML = '<div class="empty">正在载入会话…</div>';
+      $("#messages").innerHTML = '<div class="skel-msg"><div class="skel m1"></div><div class="skel m2"></div><div class="skel m3"></div></div><div class="skel-msg" style="width:64%"><div class="skel m1"></div><div class="skel m2"></div></div><div class="skel-msg" style="width:78%"><div class="skel m1"></div><div class="skel m3"></div></div>';
     }
   }
   const detail = await fetchSessionDetail(id, { messageLimit });
   if (seq !== openSessionSeq) return;
-  applySessionDetail(detail, { activate, instant: true });
+  applySessionDetail(detail, { activate, instant: true, anchor });
   // Approval data is independent: never delay the first message paint on it.
   void loadApprovals().catch(() => {});
 }
 async function loadEarlierMessages() {
   if (!current?.id || !current.hasMoreMessages) return;
   const button = $("#load-earlier-messages"); if (button) { button.disabled = true; button.textContent = "正在加载更早记录…"; }
-  await openSession(current.id, { messageLimit: 500 });
+  // Anchor the viewport: older messages insert above, so compensate for the
+  // height delta instead of jumping to the newest message.
+  const distanceFromBottom = document.documentElement.scrollHeight - window.scrollY;
+  await openSession(current.id, { messageLimit: 500, anchor: true });
+  requestAnimationFrame(() => window.scrollTo({ top: Math.max(0, document.documentElement.scrollHeight - distanceFromBottom), behavior: "auto" }));
 }
 
 async function openModelSheet() {
@@ -1104,7 +1367,7 @@ function appendEvent(event) {
     if (knownStates.has(status)) {
       current.state = status;
       updateComposerQueueState();
-      $("#connection").textContent = stateLabel(status) || "已安全连接";
+      setConnectionStatus(stateLabel(status) || "已安全连接");
       $("#chat-state-dot").className = status;
     }
   }
@@ -1114,18 +1377,22 @@ function appendEvent(event) {
   }
   if (event.type === "error") { $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", text: `发送失败：${event.summary}` }, "failed")); toast("消息没有发送成功，请重试"); }
   if (event.type === "tool") {
-    const selector = event.tool?.id ? `.tool-item[data-tool-id="${CSS.escape(event.tool.id)}"]` : "";
-    const existing = selector ? $("#messages").querySelector(selector) : null;
     const message = { id: event.id, role: "tool", kind: "tool", text: event.summary || "正在使用工具", tool: event.tool || null };
-    if (existing) {
-      const group = existing.closest(".tool-group");
+    const toolId = event.tool?.id ? CSS.escape(event.tool.id) : "";
+    const existing = toolId ? $("#messages").querySelector(`[data-tool-id="${toolId}"]`) : null;
+    if (isPlanToolMessage(message)) {
+      if (existing) existing.outerHTML = renderPlanCard(message, messageKey(message));
+      else $("#messages").insertAdjacentHTML("beforeend", renderPlanCard(message, messageKey(message)));
+    } else if (existing) {
+      const group = existing.closest(".work-group");
       existing.outerHTML = renderToolItem(message, messageKey(message));
       refreshToolGroup(group);
     } else {
-      const last = $("#messages").lastElementChild;
-      if (last?.classList.contains("tool-group")) {
-        last.querySelector(".tool-group-items")?.insertAdjacentHTML("beforeend", renderToolItem(message, messageKey(message)));
-        refreshToolGroup(last);
+      const wrap = $("#messages").lastElementChild;
+      const group = wrap?.classList.contains("work-group-wrap") ? wrap.querySelector(":scope > .work-group") : null;
+      if (group) {
+        group.querySelector(":scope > .work-items")?.insertAdjacentHTML("beforeend", renderToolItem(message, messageKey(message)));
+        refreshToolGroup(group);
       } else $("#messages").insertAdjacentHTML("beforeend", renderToolGroup([message]));
     }
     scrollMessages();
@@ -1134,24 +1401,17 @@ function appendEvent(event) {
 
 function refreshToolGroup(group) {
   if (!group) return;
-  const items = [...group.querySelectorAll(":scope .tool-item")];
-  const messages = items.map((item) => ({ tool: { status: item.dataset.toolStatus || "completed" }, activity: item.dataset.toolActivity || "other" }));
+  const items = [...group.querySelectorAll(":scope > .work-items > .tl")];
+  if (!items.length) return;
+  const messages = items.map((item) => ({
+    tool: { status: item.dataset.toolStatus || "completed", title: item.dataset.toolTitle || "", name: item.dataset.toolTitle || "", activity: item.dataset.toolActivity || "other" }
+  }));
   const status = aggregateToolStatus(messages);
-  group.dataset.toolCount = String(items.length);
   for (const name of ["failed", "waiting_for_approval", "running", "pending", "cancelled", "completed"]) group.classList.toggle(`status-${name}`, name === status);
-  const counts = { read: 0, search: 0, edit: 0, command: 0, other: 0 };
-  for (const item of items) counts[item.dataset.toolActivity || "other"] += 1;
-  const parts = [];
-  if (counts.read) parts.push(`检查 ${counts.read} 个文件`);
-  if (counts.search) parts.push(`${counts.search} 次搜索`);
-  if (counts.edit) parts.push(`修改 ${counts.edit} 个文件`);
-  if (counts.command) parts.push(`运行 ${counts.command} 个命令`);
-  if (counts.other) parts.push(`完成 ${counts.other} 项操作`);
-  group.querySelector("summary .tool-head b").textContent = `已${parts.join("，") || "完成工具调用"}`;
-  group.querySelector("summary .tool-head small").textContent = toolGroupSubtitle(messages);
-  group.querySelector("summary .tool-state").textContent = toolStatusLabel(status);
-  items.forEach((item, index) => { const marker = item.querySelector(".tool-index"); if (marker) marker.textContent = String(index + 1); });
-  if (["failed", "waiting_for_approval"].includes(status)) group.open = true;
+  group.dataset.toolCount = String(items.length);
+  const head = group.querySelector(":scope > .work-head");
+  if (head) head.outerHTML = workHeadHtml(messages, status);
+  if (["failed", "waiting_for_approval", "running", "pending"].includes(status)) group.classList.add("open");
 }
 
 function finalizeStreamingMessages() {
@@ -1184,7 +1444,7 @@ async function handleEvent(event) {
       current.state = "waiting_for_approval";
       updateComposerQueueState();
       $("#chat-state-dot").className = current.state;
-      $("#connection").textContent = stateLabel(current.state);
+      setConnectionStatus(stateLabel(current.state));
       toast("有操作等待你的授权");
     }
   }
@@ -1192,7 +1452,7 @@ async function handleEvent(event) {
   scheduleFinalReconcile(event);
 }
 async function readEventStream(response) { if (!response.ok || !response.body) throw new Error(`事件流 HTTP ${response.status}`); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let boundary; while ((boundary = buffer.indexOf("\n\n")) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (data) await handleEvent(JSON.parse(data)); } } }
-async function connectEvents() { while (token && !eventLoopStopped) { const controller = new AbortController(); const reconnect = setTimeout(() => controller.abort(), 20_000); try { await readEventStream(await fetch(`/mobile/v1/events?after=${eventCursor}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal: controller.signal })); } catch (error) { if (error.name !== "AbortError") $("#connection").textContent = "正在重连"; } finally { clearTimeout(reconnect); } await new Promise((resolve) => setTimeout(resolve, 800)); } }
+async function connectEvents() { while (token && !eventLoopStopped) { const controller = new AbortController(); const reconnect = setTimeout(() => controller.abort(), 20_000); try { await readEventStream(await fetch(`/mobile/v1/events?after=${eventCursor}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal: controller.signal })); } catch (error) { if (error.name !== "AbortError") setConnectionStatus("正在重连", false); } finally { clearTimeout(reconnect); } await new Promise((resolve) => setTimeout(resolve, 800)); } }
 
 function closeWorkspaceMenus(except = null) {
   document.querySelectorAll(".group-menu:not([hidden])").forEach((menu) => { if (menu !== except) menu.hidden = true; });
@@ -1202,6 +1462,10 @@ document.addEventListener("click", async (event) => {
   try {
     const commandOption = event.target.closest("[data-command-index]");
     if (commandOption) { chooseCommand(Number(commandOption.dataset.commandIndex)); return; }
+    const workHead = event.target.closest(".work-head");
+    if (workHead) { workHead.closest(".work-group")?.classList.toggle("open"); return; }
+    const toolRow = event.target.closest(".tl > .tl-row");
+    if (toolRow) { toolRow.parentElement.classList.toggle("open"); return; }
     if (!event.target.closest("#command-picker") && !event.target.matches("#message,#prompt")) hideCommandPicker();
     const workspaceMenuButton = event.target.closest("[data-workspace-menu]");
     if (workspaceMenuButton) {
@@ -1249,12 +1513,12 @@ document.addEventListener("click", async (event) => {
       closeAllSwipe();
       const target = workspaceDelete.dataset.workspaceDelete;
       const name = target.split("/").pop();
-      if (!confirm(`确认删除文件夹「${name}」？\n\n如果里面有文件，会继续询问是否强制删除。`)) return;
+      if (!await showInputSheet({ title: `删除文件夹「${name}」？`, description: "如果里面有文件，会继续询问是否强制删除。", mode: "confirm", confirmLabel: "删除", danger: true })) return;
       try {
         await api(`/mobile/v1/workspaces/directories?path=${encodeURIComponent(target)}`, { method: "DELETE" });
       } catch (error) {
         if (!/不为空|NOT_EMPTY|force/i.test(error.message || "")) throw error;
-        if (!confirm(`「${name}」不是空文件夹。\n\n是否强制删除其中全部内容？此操作不可恢复。`)) return;
+        if (!await showInputSheet({ title: `「${name}」不是空文件夹`, description: "是否强制删除其中全部内容？此操作不可恢复。", mode: "confirm", confirmLabel: "强制删除", danger: true })) return;
         await api(`/mobile/v1/workspaces/directories?path=${encodeURIComponent(target)}&force=1`, { method: "DELETE" });
       }
       if (selectedWorkspace === target) selectedWorkspace = browsedWorkspace?.path || "";
@@ -1264,7 +1528,7 @@ document.addEventListener("click", async (event) => {
       toast("目录已删除");
       return;
     }
-    if (event.target.closest("#workspace-create") && browsedWorkspace?.path) { const name = prompt("新建文件夹名称"); if (!name?.trim()) return; const created = await api("/mobile/v1/workspaces/directories", { method: "POST", body: JSON.stringify({ parent: browsedWorkspace.path, name }) }); selectedWorkspace = created.path; await browseWorkspace(browsedWorkspace.path); renderWorkspaces(); toast("文件夹已创建并选中"); return; }
+    if (event.target.closest("#workspace-create") && browsedWorkspace?.path) { const name = await showInputSheet({ title: "新建文件夹", description: "在当前目录下创建" }); if (!name?.trim()) return; const created = await api("/mobile/v1/workspaces/directories", { method: "POST", body: JSON.stringify({ parent: browsedWorkspace.path, name: name.trim() }) }); selectedWorkspace = created.path; await browseWorkspace(browsedWorkspace.path); renderWorkspaces(); toast("文件夹已创建并选中"); return; }
     const sessionAction = event.target.closest("[data-session-action]");
     if (sessionAction) {
       const id = sessionAction.dataset.id;
@@ -1278,7 +1542,7 @@ document.addEventListener("click", async (event) => {
       }
       if (action === "rename") {
         const session = allSessions.find((item) => item.id === id);
-        const title = prompt("会话名称", session?.title || "");
+        const title = await showInputSheet({ title: "重命名会话", value: session?.title || "" });
         if (!title?.trim()) return;
         await api(`/mobile/v1/sessions/${encodeURIComponent(id)}/rename`, { method: "POST", body: JSON.stringify({ title: title.trim() }) });
         toast("已重命名");
@@ -1296,7 +1560,7 @@ document.addEventListener("click", async (event) => {
       closeAllSwipe();
       const oldPath = workspaceRename.dataset.workspaceRename;
       const oldName = workspaceRename.dataset.workspaceName || oldPath.split("/").pop();
-      const name = prompt("文件夹新名称", oldName);
+      const name = await showInputSheet({ title: "重命名文件夹", value: oldName });
       if (!name?.trim() || name.trim() === oldName) return;
       const result = await api("/mobile/v1/workspaces/directories/rename", { method: "POST", body: JSON.stringify({ path: oldPath, name: name.trim() }) });
       renameProjectPreferences(oldName, name.trim());
@@ -1310,7 +1574,7 @@ document.addEventListener("click", async (event) => {
     const queueEdit = event.target.closest("[data-queue-edit]");
     if (queueEdit && current) {
       const item = (current.queue || []).find((row) => row.id === queueEdit.dataset.queueEdit);
-      const text = prompt("编辑排队指令", item?.text || "");
+      const text = await showInputSheet({ title: "编辑排队指令", value: item?.text || "" });
       if (text === null || (!text.trim() && !item?.attachments?.length)) return;
       await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/queue/${encodeURIComponent(queueEdit.dataset.queueEdit)}`, { method: "POST", body: JSON.stringify({ text: text.trim() }) });
       await openSession(current.id, { activate: false }); toast("已更新排队指令"); return;
@@ -1335,6 +1599,8 @@ document.addEventListener("click", async (event) => {
     }
     const sessionSelect = event.target.closest("[data-session-select]");
     if (sessionSelect) { toggleSessionSelection(sessionSelect.dataset.sessionSelect); return; }
+    const openSwipeItem = document.querySelector(".swipe-item.open");
+    if (openSwipeItem && event.target.closest(".swipe-item") && !event.target.closest(".swipe-actions") && !sessionSelectionMode) { closeAllSwipe(); return; }
     const card = event.target.closest(".session-row[data-id]"); if (card) { if (sessionSelectionMode) { toggleSessionSelection(card.dataset.id); return; } closeAllSwipe(); return openSession(card.dataset.id); }
     if (event.target.closest("#session-select-toggle")) { setSessionSelectionMode(!sessionSelectionMode); return; }
     if (event.target.closest("#session-selection-delete")) { requestSessionDeletion([...selectedSessionIds]); return; }
@@ -1353,6 +1619,8 @@ document.addEventListener("click", async (event) => {
       return;
     }
     const model = event.target.closest("[data-model]"); if (model && current) { await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/model`, { method: "POST", body: JSON.stringify({ model: model.dataset.model }) }); current.model = model.dataset.model; $("#detail-meta").textContent = `${agentLabel(current.agent)} · ${current.model}`; renderRuntimeShortcut(); hideModelSheet(); toast("模型将在下一轮生效"); return; }
+    const openApprovalSession = event.target.closest("[data-open-session]");
+    if (openApprovalSession) { await openSession(openApprovalSession.dataset.openSession); return; }
     const approval = event.target.closest("[data-approval]"); if (approval) {
       await api(`/mobile/v1/approvals/${encodeURIComponent(approval.dataset.approval)}/resolve`, { method: "POST", body: JSON.stringify({ decision: approval.dataset.decision }) });
       await loadApprovals(); if (current) await openSession(current.id, { activate: false });
@@ -1390,12 +1658,15 @@ document.addEventListener("click", async (event) => {
     if (action === "pin") { const pinned = !current.pinned; $("#session-menu").hidden = true; await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }); current.pinned = pinned; await loadSessions(); toast(pinned ? "已置顶会话" : "已取消置顶会话"); return; }
     if (action === "refresh") { $("#session-menu").hidden = true; return refreshMobileData(); }
     if (action === "delete") { $("#session-menu").hidden = true; requestSessionDeletion([current.id]); return; }
-    let body = {}; if (action === "rename") body.title = prompt("会话名称", current.title) || current.title;
+    let body = {}; if (action === "rename") { const title = await showInputSheet({ title: "重命名会话", value: current.title }); body.title = title?.trim() || current.title; }
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/${action}`, { method: "POST", body: JSON.stringify(body) });
     if (action === "archive") { current = null; page("sessions"); toast("已归档"); return loadSessions(); } if (action === "fork" && result.sessionId) return openSession(result.sessionId); await openSession(current.id);
   } catch (error) { toast(error.message); }
 });
 
+$("#confirm-input-sheet").addEventListener("click", () => closeInputSheet($("#input-sheet-text").hidden ? true : $("#input-sheet-text").value));
+$("#cancel-input-sheet").addEventListener("click", () => closeInputSheet(null));
+$("#close-input-sheet").addEventListener("click", () => closeInputSheet(null));
 $("#refresh").addEventListener("click", () => refreshMobileData());
 setupPullToRefresh();
 $("#show-archive").addEventListener("click", async () => { archivedView = !archivedView; sessionSelectionMode = false; selectedSessionIds.clear(); sessionDisplayLimit = SESSION_PAGE_SIZE; $("#show-archive").textContent = archivedView ? "最近" : "归档"; await loadSessions().catch((error) => toast(error.message)); });
@@ -1411,8 +1682,37 @@ for (const input of [$("#message"), $("#prompt")]) {
 // inserted the command or Skill into the textarea.
 $("#command-picker").addEventListener("pointerdown", (event) => event.preventDefault());
 window.addEventListener("resize", () => { if (commandPickerState) positionCommandPicker(commandPickerState.input); });
+// Android 壳语音识别回调：结果插入当前光标处，状态驱动麦克风按钮颜色。
+window.SwitchyardVoice = {
+  onResult(text) {
+    const input = $("#message"); if (!input) return;
+    const value = String(text || "").trim(); if (!value) return;
+    const start = input.selectionStart ?? input.value.length;
+    input.value = `${input.value.slice(0, start)}${input.value.slice(0, start) && !input.value.slice(0, start).endsWith("\n") && start > 0 ? " " : ""}${value}${input.value.slice(start)}`;
+    input.focus(); input.dispatchEvent(new Event("input", { bubbles: true }));
+    updateComposerQueueState();
+  },
+  onState(state) {
+    const button = $("#voice-control"); if (!button) return;
+    button.classList.toggle("listening", state === "listening");
+    if (state === "listening") toast("正在聆听，请说话…");
+  }
+};
+$("#voice-control").addEventListener("click", () => {
+  if (!nativeVoiceInputAvailable()) { toast("语音输入仅在 Android App 内可用"); return; }
+  try { window.SwitchyardNative.startVoiceInput(); } catch { toast("无法启动语音识别"); }
+});
 window.addEventListener("popstate", () => {
   if (!$("#attachment-viewer").hidden) closeAttachmentViewer({ fromHistory: true });
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { eventLoopStopped = true; return; }
+  if (!token || eventLoopRevoked || !eventLoopStopped) return;
+  eventLoopStopped = false;
+  connectEvents();
+  refreshSessionsInBackground();
+  void loadApprovals().catch(() => {});
+  if (current) openSession(current.id, { activate: false }).catch(() => {});
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#attachment-viewer").hidden) { event.preventDefault(); closeAttachmentViewer(); }
@@ -1447,17 +1747,18 @@ $("#new-session").addEventListener("submit", async (event) => {
     if (!selectedAgent) throw new Error("请选择 Agent"); if (!cwd) throw new Error("请选择或输入工作区"); if (!promptText && !newAttachments.length) throw new Error("请输入任务或添加附件");
     const sent = newAttachments;
     const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: promptText, attachments: sent.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: createClientMessageId() }) });
+    rememberLastTask();
     newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview)); await openSession(result.sessionId);
   } catch (error) { toast(error.message); } finally { submit.disabled = false; }
 });
 async function submitComposerMessage(deliveryMode = "") {
   const input = $("#message"); const text = input.value.trim(); if ((!text && !activeAttachments.length) || !current) return;
   const id = createClientMessageId(); const sentAttachments = activeAttachments; input.value = ""; activeAttachments = []; renderAttachments(); $("#send").disabled = true;
-  $("#messages").insertAdjacentHTML("beforeend", renderMessage({ id, role: "user", text, attachments: sentAttachments })); $("#connection").textContent = "正在发送"; scrollMessages();
+  $("#messages").insertAdjacentHTML("beforeend", renderMessage({ id, role: "user", text, attachments: sentAttachments })); setConnectionStatus("正在发送"); scrollMessages();
   try {
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id, ...(deliveryMode ? { deliveryMode } : {}) }) });
     if (result.queued) { toast(result.deliveryMode === "guide" ? "已添加引导，当前步骤结束后优先执行" : "已加入排队指令"); await openSession(current.id, { activate: false }); }
-    else $("#connection").textContent = "正在生成";
+    else setConnectionStatus("正在生成");
     input.blur();
   } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = text; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
   finally { $("#send").disabled = false; updateComposerQueueState(); }
@@ -1469,19 +1770,25 @@ $("#composer").addEventListener("submit", async (event) => {
   if (isSessionRunning() && preferences.conversationSendMode === "ask") { showMessageModeSheet(); return; }
   await submitComposerMessage(isSessionRunning() ? preferences.conversationSendMode : "");
 });
+$("#theme-toggle").addEventListener("click", () => {
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme();
+  toast(`外观已切换为${themeLabel(next)}`);
+});
 $("#edit-pairing-link").addEventListener("click", async () => {
   if (!nativePairingEditAvailable()) {
     toast("请在 Android App 内使用此功能；浏览器版可撤销设备后重新打开新的配对链接");
     return;
   }
-  if (!confirm("更换配对链接会清除本机授权，并回到配对输入页。继续吗？")) return;
-  eventLoopStopped = true;
+  if (!await showInputSheet({ title: "更换配对链接", description: "会清除本机授权，并回到配对输入页。继续吗？", mode: "confirm", confirmLabel: "继续", danger: true })) return;
+  eventLoopStopped = true; eventLoopRevoked = true;
   try { await api("/mobile/v1/devices/self/revoke", { method: "POST" }); } catch {}
   persistToken("");
   localStorage.removeItem(CURSOR_KEY);
   window.SwitchyardNative.editPairingLink();
 });
-$("#revoke").addEventListener("click", async () => { if (!confirm("确定撤销这台手机的访问权限？")) return; await api("/mobile/v1/devices/self/revoke", { method: "POST" }); eventLoopStopped = true; persistToken(""); localStorage.removeItem(CURSOR_KEY); location.reload(); });
+$("#revoke").addEventListener("click", async () => { if (!await showInputSheet({ title: "撤销此设备", description: "确定撤销这台手机的访问权限？", mode: "confirm", confirmLabel: "撤销", danger: true })) return; await api("/mobile/v1/devices/self/revoke", { method: "POST" }); eventLoopStopped = true; eventLoopRevoked = true; persistToken(""); localStorage.removeItem(CURSOR_KEY); location.reload(); });
 
 function bindSwipe() {
   let startX = 0; let startY = 0; let item = null; let locked = false;
@@ -1512,19 +1819,21 @@ function bindSwipe() {
   });
 }
 
+applyTheme();
 async function boot() {
   try {
     hideModelSheet(); bindSwipe(); await pair();
-    if (!token) { $("#connection").textContent = "等待配对"; return; }
+    if (!token) { setConnectionStatus("等待配对", false); return; }
+    if (nativeVoiceInputAvailable()) $("#voice-control").hidden = false;
     // Sessions are the landing screen. Do not make their first paint wait for
     // workspaces, models, preferences, or the approval inbox.
     await loadSessions();
     void Promise.all([loadAgents(), loadWorkspaces(), loadApprovals(), loadPreferences()]).catch((error) => {
-      $("#connection").textContent = "部分数据加载失败";
+      setConnectionStatus("部分数据加载失败", false);
       console.warn("mobile background bootstrap failed", error);
     });
     connectEvents();
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
-  } catch (error) { $("#connection").textContent = "连接失败"; toast(error.message); }
+  } catch (error) { setConnectionStatus("连接失败", false); toast(error.message); }
 }
 boot();

@@ -884,9 +884,66 @@ export function createSessionRegistry({
     return { ok: true };
   };
 
+  // Full-text search over the mobile event ledger (sanitized message summaries).
+  // Session metadata comes from the disk index so a search never triggers a
+  // fresh Agent history scan.
+  const searchSessionContents = async (query = "") => {
+    const needle = String(query || "").trim().toLowerCase();
+    if (needle.length < 2) return [];
+    const batches = [];
+    let cursor = 0;
+    while (batches.length < 20_000) {
+      const batch = ledger.list({ after: cursor, limit: 2000 });
+      if (!batch.length) break;
+      batches.push(...batch);
+      cursor = batch.at(-1).id;
+      if (batch.length < 2000) break;
+    }
+    const index = loadDiskIndex();
+    const meta = new Map((index.rows || []).map((row) => [String(row.id || ""), row]));
+    const hits = new Map();
+    for (const event of batches) {
+      if (event.type !== "message" || !event.summary) continue;
+      const haystack = String(event.summary);
+      const at = haystack.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      const sessionId = String(event.sessionId || "");
+      if (!sessionId) continue;
+      const start = Math.max(0, at - 48);
+      const end = Math.min(haystack.length, at + needle.length + 72);
+      const snippet = `${start > 0 ? "…" : ""}${haystack.slice(start, end).replace(/\s+/g, " ").trim()}${end < haystack.length ? "…" : ""}`;
+      const entry = hits.get(sessionId) || { sessionId, matchCount: 0, lastEventId: 0, snippet: "", role: "assistant" };
+      entry.matchCount += 1;
+      if (event.id >= entry.lastEventId) {
+        entry.lastEventId = event.id;
+        entry.snippet = snippet;
+        entry.role = event.role || "assistant";
+        entry.createdAt = event.createdAt || null;
+      }
+      hits.set(sessionId, entry);
+    }
+    return [...hits.values()]
+      .sort((a, b) => b.lastEventId - a.lastEventId)
+      .slice(0, 20)
+      .map((hit) => {
+        const row = meta.get(hit.sessionId) || {};
+        return {
+          id: hit.sessionId,
+          title: row.title || hit.sessionId,
+          agent: row.agent || "",
+          project: row.project || "",
+          snippet: hit.snippet,
+          role: hit.role,
+          matchCount: hit.matchCount,
+          updatedAt: row.updatedAt || hit.createdAt || null
+        };
+      });
+  };
+
   return {
     listSessions,
     readSession,
+    searchSessionContents,
     createSession,
     availableModels,
     listCommands,
