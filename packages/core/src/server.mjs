@@ -980,11 +980,22 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
     return streamChatAsResponses(result.upstream, res, body.model, {
       namespaceMap,
       idleTimeoutMs: streamIdleTimeoutMs(config, route),
+      // KE's Kimi K3 relay may end with a usage footer but no `[DONE]` or
+      // finish_reason. Do not convert that ambiguous terminal state into a
+      // successful Codex response; keep the partial output and surface it as
+      // incomplete instead.
+      acceptUsageFooterAsTerminal: !(route.provider.id === "ke" && route.upstreamModel === "kimi-k3"),
       onUsage: (usage) => {
         applyUsageToRequestRecord(requestRecord, usage);
         if (!requestRecord.responseSummary) requestRecord.responseSummary = {};
         requestRecord.responseSummary.usage = normalizeResponseUsage(usage);
         requestRecord.responseSummary.stream = true;
+      },
+      onStreamEnd: (diagnostics) => {
+        if (!requestRecord.requestSummary) requestRecord.requestSummary = {};
+        requestRecord.requestSummary.chatStreamTerminal = diagnostics;
+        if (!requestRecord.responseSummary) requestRecord.responseSummary = {};
+        requestRecord.responseSummary.chatStreamTerminal = diagnostics;
       }
     });
   }

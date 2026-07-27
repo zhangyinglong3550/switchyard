@@ -119,6 +119,27 @@ export function projectMobileSession(row = {}, overlay = {}) {
   };
 }
 
+function projectGoal(value) {
+  if (!value || typeof value !== "object") return null;
+  const plan = Array.isArray(value.plan) ? value.plan.map((item) => ({
+    step: cleanMobileText(item?.step || "", 500),
+    status: ["pending", "in_progress", "running", "doing", "completed", "complete", "done"].includes(String(item?.status || "").toLowerCase()) ? String(item.status).toLowerCase() : "pending"
+  })).filter((item) => item.step) : [];
+  const objective = cleanMobileText(value.objective || "", 500);
+  if (!objective && !plan.length) return null;
+  return {
+    objective: objective || "执行计划",
+    status: ["in_progress", "complete", "blocked"].includes(String(value.status)) ? String(value.status) : "in_progress",
+    createdAt: value.createdAt ? String(value.createdAt) : null,
+    updatedAt: value.updatedAt ? String(value.updatedAt) : null,
+    completedAt: value.completedAt ? String(value.completedAt) : null,
+    blockedReason: cleanMobileText(value.blockedReason || "", 1000) || null,
+    tokenBudget: Number.isFinite(Number(value.tokenBudget)) ? Number(value.tokenBudget) : null,
+    tokenUsage: Number.isFinite(Number(value.tokenUsage)) ? Number(value.tokenUsage) : null,
+    plan
+  };
+}
+
 export function projectMobileEvent(event = {}) {
   return {
     id: Number(event.id) || 0,
@@ -136,6 +157,7 @@ export function projectMobileEvent(event = {}) {
     } : {}),
     ...(Array.isArray(event.attachments) ? { attachments: event.attachments.map(projectAsset).filter(Boolean) } : {}),
     ...(event.delivery ? { delivery: projectAsset(event.delivery) } : {}),
-    ...(event.tool ? { tool: projectTool(event.tool) } : {})
+    ...(event.tool ? { tool: projectTool(event.tool) } : {}),
+    ...(projectGoal(event.goal) ? { goal: projectGoal(event.goal) } : {})
   };
 }

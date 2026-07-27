@@ -401,6 +401,7 @@ export function createSessionRegistry({
       settings: runtime.getSettings?.(nativeId) || null,
       queue: store.listQueue?.(mobileSessionId) || [],
       queuePaused: isQueuePaused(mobileSessionId),
+      goal: detail.goal || null,
       ...(activeSessions.has(mobileSessionId) ? { state: "running" } : {})
     };
     if (isLiveState(base.state)) activeSessions.add(mobileSessionId);

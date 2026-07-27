@@ -23,6 +23,7 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(html, /关闭预览/);
   assert.match(html, /id="session-approval-inbox"/);
   assert.match(html, /id="session-queue"/);
+  assert.match(html, /id="goal-panel"/);
   assert.match(html, /id="session-switcher"/);
   assert.match(html, /id="open-session-switcher"/);
   assert.match(html, /id="continue-current-session"/);
@@ -56,6 +57,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function renderDiffCard/);
   assert.match(js, /isPlanToolMessage/);
   assert.match(js, /function renderSessionQueue/);
+  assert.match(js, /function renderGoalPanel/);
+  assert.match(css, /\.goal-card\{/);
   assert.match(js, /data-queue-edit/);
   assert.match(js, /data-queue-cancel/);
   assert.match(js, /data-queue-resume/);
@@ -79,6 +82,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(css, /\.term-cmd\{/);
   assert.match(css, /\.diff-head\{/);
   assert.match(css, /\.plan-card\{/);
+  assert.match(css, /\.plan-progress-pill\{/);
+  assert.match(js, /第 <strong>\$\{currentStep\}<\/strong> \/ \$\{plan\.length\} 步/);
   assert.match(css, /\.tl-state \.badge\{/);
   assert.match(js, /richTextCache/);
   assert.match(js, /instant: true/);
@@ -141,7 +146,7 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /sessionDetailCache/);
   assert.match(js, /INITIAL_MESSAGE_LIMIT = 120/);
   assert.match(js, /loadEarlierMessages/);
-  assert.match(html, /app\.js\?v=60/);
+  assert.match(html, /app\.js\?v=62/);
   assert.match(html, /id="session-select-toggle"/);
   assert.match(html, /id="session-selection-bar"/);
   assert.match(html, /id="session-delete-sheet"/);

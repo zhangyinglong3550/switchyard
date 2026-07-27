@@ -347,6 +347,11 @@ class ThinkTagStreamSplitter {
 export async function streamChatAsResponses(upstream, res, requestedModel, options = {}) {
   const namespaceMap = options.namespaceMap || {};
   const onUsage = typeof options.onUsage === "function" ? options.onUsage : null;
+  const onStreamEnd = typeof options.onStreamEnd === "function" ? options.onStreamEnd : null;
+  // Some OpenAI-compatible relays omit both standard terminal markers after a
+  // final usage chunk. Keep the historical compatibility by default, but let
+  // callers opt out for routes where that pattern masks truncated output.
+  const acceptUsageFooterAsTerminal = options.acceptUsageFooterAsTerminal !== false;
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -473,9 +478,14 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     return entry;
   };
   let terminalSeen = false;
+  let sawDoneMarker = false;
+  let sawFinishReason = false;
+  let sawUsageFooter = false;
+  let usageFooterAccepted = false;
   const handleData = (data) => {
     if (!data) return;
     if (data === "[DONE]") {
+      sawDoneMarker = true;
       terminalSeen = true;
       return;
     }
@@ -496,10 +506,14 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
       }
       // Several OpenAI-compatible relays (including the KE GLM route) end a
       // stream right after the final usage chunk and omit both `[DONE]` and a
-      // choice.finish_reason. A non-empty usage footer is emitted only after
-      // generation is complete, so accept it as an implicit terminal marker
-      // instead of turning an otherwise complete Codex answer into adapter_eof.
-      if (capturedUsage.total_tokens > 0) terminalSeen = true;
+      // choice.finish_reason. This compatibility is deliberately opt-in per
+      // route: Kimi K3 has also shown this pattern when an answer is cut off,
+      // so treating its usage-only tail as complete would hide the problem.
+      sawUsageFooter = capturedUsage.total_tokens > 0;
+      if (sawUsageFooter && acceptUsageFooterAsTerminal) {
+        usageFooterAccepted = true;
+        terminalSeen = true;
+      }
       if (capturedUsage.total_tokens > 0 && onUsage) {
         try { onUsage(capturedUsage); } catch {}
       }
@@ -507,7 +521,10 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     const choice = event.choices?.[0] || {};
     const rawDelta = choice.delta || {};
     const finishReason = choice.finish_reason;
-    if (finishReason != null) terminalSeen = true;
+    if (finishReason != null) {
+      sawFinishReason = true;
+      terminalSeen = true;
+    }
     const reasoningDelta = extractReasoningSummaryText(rawDelta);
     if (reasoningDelta) appendReasoning(reasoningDelta);
     // Handle streaming tool calls (OpenAI Chat SSE format)
@@ -672,6 +689,16 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     streamError = err;
   } finally {
     keepalive.stop();
+  }
+  const streamEndDiagnostics = {
+    sawDoneMarker,
+    sawFinishReason,
+    sawUsageFooter,
+    usageFooterAccepted,
+    acceptUsageFooterAsTerminal
+  };
+  if (onStreamEnd) {
+    try { onStreamEnd(streamEndDiagnostics); } catch {}
   }
   if (!terminalSeen && !streamError) {
     streamError = Object.assign(new Error("Chat stream ended before completion"), {

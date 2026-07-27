@@ -635,3 +635,30 @@ test("tool normalization extracts file paths for mobile file links", () => {
     { path: "/tmp/demo/src/other.js", activity: "edit" }
   ]);
 });
+
+test("Codex rollout live projection emits assistant text and update_plan tool events", async () => {
+  const { projectCodexRolloutLiveEntry } = await import("../../../apps/desktop/src/mobile-control/codex-runtime.mjs");
+  const message = projectCodexRolloutLiveEntry({
+    type: "event_msg",
+    payload: { type: "agent_message", message: "正在实时输出" }
+  });
+  const plan = projectCodexRolloutLiveEntry({
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      id: "plan-live",
+      name: "update_plan",
+      arguments: JSON.stringify({ plan: [{ step: "同步输出", status: "in_progress" }] })
+    }
+  });
+  assert.deepEqual(message, {
+    type: "message",
+    role: "assistant",
+    summary: "正在实时输出",
+    runtimeEvent: "codex/rollout-agent-message"
+  });
+  assert.equal(plan.type, "tool");
+  assert.equal(plan.tool.id, "plan-live");
+  assert.equal(plan.tool.name, "update_plan");
+  assert.equal(plan.tool.status, "running");
+});

@@ -5,6 +5,7 @@ import { spawn as spawnChild, spawnSync } from "node:child_process";
 import { scanCodexSessions } from "./local-session-scan.mjs";
 import { mergeTool, reasoningText, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
+import { applyGoalTool, deriveGoalFromMessages } from "./goal-state.mjs";
 
 const CAPABILITIES = Object.freeze({
   sendMessage: true,
@@ -225,6 +226,50 @@ function localMessages(row) {
   return parseCodexRollout(lines);
 }
 
+function rolloutMessageText(payload = {}) {
+  return (Array.isArray(payload.content) ? payload.content : [])
+    .map((part) => part?.text || part?.output_text || "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Desktop Codex writes its rollout JSONL while generating, but its separate
+// app-server does not always forward those notifications to Switchyard. This
+// normalizes just-appended rollout records into the same live event shape used
+// by CLI-owned sessions so the phone can follow a Desktop-owned thread.
+export function projectCodexRolloutLiveEntry(entry = {}) {
+  const payload = entry?.payload || {};
+  if (entry.type === "response_item") {
+    const itemType = String(payload.type || "").toLowerCase();
+    if (itemType === "message" && payload.role === "assistant") {
+      const summary = rolloutMessageText(payload);
+      return summary ? { type: "message", role: "assistant", summary, runtimeEvent: "codex/rollout-message" } : null;
+    }
+    if (itemType.includes("reasoning")) {
+      const summary = reasoningText(payload);
+      return summary ? { type: "thinking", role: "assistant", summary, runtimeEvent: "codex/rollout-reasoning" } : null;
+    }
+    if (itemType === "function_call" || itemType === "custom_tool_call" || itemType.includes("tool") || itemType.includes("command")) {
+      const tool = toolFrom(payload, "running");
+      return { type: "tool", role: "tool", summary: tool.title || tool.name || "工具调用", tool, runtimeEvent: "codex/rollout-tool" };
+    }
+    if (itemType.endsWith("_output")) {
+      const tool = toolFrom(payload, "completed");
+      return { type: "tool", role: "tool", summary: tool.title || tool.name || "工具调用", tool, runtimeEvent: "codex/rollout-tool-output" };
+    }
+  }
+  if (entry.type === "event_msg") {
+    if (payload.type === "agent_message" && payload.message) {
+      return { type: "message", role: "assistant", summary: String(payload.message), runtimeEvent: "codex/rollout-agent-message" };
+    }
+    if (["turn_completed", "turn_failed", "turn_cancelled"].includes(String(payload.type || ""))) {
+      const status = payload.type === "turn_failed" ? "failed" : payload.type === "turn_cancelled" ? "cancelled" : "completed";
+      return { type: "status", summary: status, runtimeEvent: `codex/rollout-${payload.type}` };
+    }
+  }
+  return null;
+}
+
 function splitLines(onLine) {
   let buffer = "";
   return (chunk) => {
@@ -238,29 +283,63 @@ function splitLines(onLine) {
   };
 }
 
-function eventSummary(frame) {
+function notificationItem(frame = {}) {
+  const params = frame.params || {};
+  return params.item || params.outputItem || null;
+}
+
+function notificationItemType(frame = {}) {
+  return String(notificationItem(frame)?.type || "").toLowerCase();
+}
+
+function eventType(frame = {}) {
+  const name = String(frame.method || "");
+  const itemType = notificationItemType(frame);
+  if (name.includes("requestApproval")) return "approval";
+  // Desktop Codex commonly emits generic `item/updated` notifications. The
+  // concrete item type — not the notification method — carries whether it is
+  // streamed assistant text, reasoning, a tool call, or an execution plan.
+  if (itemType === "agent_message" || itemType === "agentmessage" || itemType === "message") return "message";
+  if (itemType.includes("reasoning") || itemType.includes("thought")) return "thinking";
+  if (itemType === "function_call" || itemType === "custom_tool_call" || itemType.includes("tool") || itemType.includes("command")) return "tool";
+  if (itemType === "error") return "error";
+  if (name.toLowerCase().includes("reasoning") || name.toLowerCase().includes("thought")) return "thinking";
+  if (name.includes("agentMessage") || name.includes("message")) return "message";
+  if (name.includes("command") || name.includes("tool")) return "tool";
+  if (name.includes("failed") || name.includes("error")) return "error";
+  return "status";
+}
+
+function eventSummary(frame, type = eventType(frame)) {
   const params = frame.params || {};
   const method = String(frame.method || "");
-  if (method.toLowerCase().includes("reasoning") || method.toLowerCase().includes("thought")) {
-    return reasoningText(params.item || params);
+  const item = notificationItem(frame);
+  if (type === "thinking") return reasoningText(item || params);
+  if (type === "message") {
+    // Delta events carry only the newly generated text. Generic item updates
+    // tend to carry the accumulated item text and are de-duplicated below.
+    return textValue(params.delta?.text ?? params.delta ?? params.text ?? item?.delta ?? item?.text ?? item?.content ?? "");
   }
-  if (method.includes("delta")) {
-    return textValue(params.delta?.text ?? params.delta ?? params.text ?? "");
-  }
+  if (type === "tool") return toolFrom(item || params, method.includes("completed") ? "completed" : "running").title || "工具调用";
   if (method.includes("completed")) return String(params.turn?.status || params.status || "completed");
   if (method.includes("failed")) return String(params.error?.message || params.error || "failed");
   if (method.includes("requestApproval")) return String(params.reason || params.command || "等待审批");
   return String(params.message || params.status || method);
 }
 
-function eventType(method) {
-  const name = String(method || "");
-  if (name.includes("requestApproval")) return "approval";
-  if (name.toLowerCase().includes("reasoning") || name.toLowerCase().includes("thought")) return "thinking";
-  if (name.includes("agentMessage") || name.includes("message")) return "message";
-  if (name.includes("command") || name.includes("tool")) return "tool";
-  if (name.includes("failed") || name.includes("error")) return "error";
-  return "status";
+function streamedItemDelta({ sessionId, type, frame, summary, snapshots }) {
+  if (!summary || !["message", "thinking"].includes(type)) return summary;
+  const method = String(frame.method || "").toLowerCase();
+  if (method.includes("delta")) return summary;
+  const item = notificationItem(frame);
+  const itemId = String(item?.id || item?.item_id || "");
+  if (!itemId) return summary;
+  const key = `${sessionId}:${type}:${itemId}`;
+  const previous = snapshots.get(key) || "";
+  snapshots.set(key, summary);
+  if (summary === previous) return "";
+  if (previous && summary.startsWith(previous)) return summary.slice(previous.length);
+  return summary;
 }
 
 export function createCodexRuntime({
@@ -279,13 +358,70 @@ export function createCodexRuntime({
   const selectedModels = new Map();
   const selectedEfforts = new Map();
   const selectedPermissions = new Map();
+  const streamedItemSnapshots = new Map();
+  const rolloutTails = new Map();
+  const recentRolloutEvents = new Map();
+  const liveGoals = new Map();
+  let rolloutPollTimer = null;
   const mentionPaths = new Map();
   let mentionCache = { at: 0, cwd: "", rows: [] };
 
-  const emit = (event) => {
-    for (const subscriber of subscribers) {
-      try { subscriber(event); } catch {}
+  const emit = (event, frame = null) => {
+    const sessionId = String(event?.sessionId || "");
+    let goal = event?.goal || null;
+    if (sessionId && event?.tool) {
+      goal = applyGoalTool(liveGoals.get(sessionId), event.tool);
+      if (goal) liveGoals.set(sessionId, goal);
     }
+    const projected = goal ? { ...event, goal } : event;
+    for (const subscriber of subscribers) {
+      try { subscriber(projected, frame); } catch {}
+    }
+  };
+  const emitRolloutEvent = (sessionId, event) => {
+    if (!event?.summary && event?.type !== "tool") return;
+    const fingerprint = `${sessionId}:${event.type}:${event.tool?.id || ""}:${event.summary || ""}`;
+    const seenAt = recentRolloutEvents.get(fingerprint) || 0;
+    if (Date.now() - seenAt < 2_000) return;
+    recentRolloutEvents.set(fingerprint, Date.now());
+    if (recentRolloutEvents.size > 500) {
+      for (const [key, at] of recentRolloutEvents) if (Date.now() - at > 10_000) recentRolloutEvents.delete(key);
+    }
+    emit({ sessionId, ...event });
+  };
+  const pollRolloutTails = () => {
+    for (const [sessionId, tail] of rolloutTails) {
+      let stat;
+      try { stat = fs.statSync(tail.filePath); } catch { rolloutTails.delete(sessionId); continue; }
+      if (stat.size < tail.offset) tail.offset = 0;
+      if (stat.size === tail.offset) continue;
+      let chunk = "";
+      try {
+        const length = stat.size - tail.offset;
+        const fd = fs.openSync(tail.filePath, "r");
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, tail.offset);
+        fs.closeSync(fd);
+        chunk = `${tail.buffer}${buffer.toString("utf8")}`;
+        tail.offset = stat.size;
+        tail.buffer = "";
+      } catch { continue; }
+      const lines = chunk.split(/\r?\n/);
+      tail.buffer = lines.pop() || "";
+      for (const line of lines) {
+        try {
+          const event = projectCodexRolloutLiveEntry(JSON.parse(line));
+          if (event) emitRolloutEvent(sessionId, event);
+        } catch {}
+      }
+    }
+  };
+  const trackDesktopRollout = (sessionId, local) => {
+    if (!local?.filePath || rolloutTails.has(sessionId)) return;
+    let offset = 0;
+    try { offset = fs.statSync(local.filePath).size; } catch { return; }
+    rolloutTails.set(sessionId, { filePath: local.filePath, offset, buffer: "" });
+    if (!rolloutPollTimer) rolloutPollTimer = setInterval(pollRolloutTails, 650);
   };
   // The app-server is the shared Codex thread authority. Disk rollout scanning
   // is only a compatibility fallback for older desktop threads or when the
@@ -331,12 +467,22 @@ export function createCodexRuntime({
     if (sessionId && String(frame.method || "").match(/completed|failed|cancelled|canceled/)) {
       activeTurns.delete(sessionId);
     }
-    const type = eventType(frame.method);
-    const toolSource = params.item || params.command || params.toolCall || params.tool || params;
+    const type = eventType(frame);
+    const toolSource = notificationItem(frame) || params.command || params.toolCall || params.tool || params;
+    const summary = streamedItemDelta({
+      sessionId,
+      type,
+      frame,
+      summary: eventSummary(frame, type),
+      snapshots: streamedItemSnapshots
+    });
+    // An item/updated notification with no new text must not create an empty
+    // phone bubble. Tool updates still flow so the existing card can refresh.
+    if (!summary && ["message", "thinking"].includes(type)) return;
     const event = {
       sessionId,
       type,
-      summary: eventSummary(frame),
+      summary,
       runtimeEvent: frame.method,
       turnId: turnId || null,
       ...(type === "approval" && frame.kind === "request" ? {
@@ -345,9 +491,7 @@ export function createCodexRuntime({
       } : {}),
       ...(type === "tool" ? { tool: toolFrom(toolSource, String(frame.method || "").includes("completed") ? "completed" : "running") } : {})
     };
-    for (const subscriber of subscribers) {
-      try { subscriber(event, frame); } catch {}
-    }
+    emit(event, frame);
   });
 
   const listSessions = async ({ cursor, limit = 100, archived = false } = {}) => {
@@ -380,6 +524,10 @@ export function createCodexRuntime({
   const readSession = async (sessionId, { messageLimit = 500 } = {}) => {
     const sid = String(sessionId);
     const limit = Math.min(500, Math.max(1, Number(messageLimit) || 500));
+    const local = readNativeFallback(sid);
+    // Start tailing only after the phone opened the Desktop thread. This keeps
+    // idle cost bounded while giving the active conversation live updates.
+    if (isDesktopOwned(local)) trackDesktopRollout(sid, local);
     let nativeError;
     // Always try the shared app-server first. This works for both threads
     // created on the phone and threads created in the desktop Codex UI.
@@ -391,19 +539,20 @@ export function createCodexRuntime({
           ...normalizeThread(thread),
           model: selectedModels.get(sid) || thread.model || "",
           messages: normalizeMessages(thread, { limit }),
+          goal: (() => { const value = deriveGoalFromMessages(normalizeMessages(thread, { limit: 500 })); if (value) liveGoals.set(sid, value); return value; })(),
           turns: Array.isArray(thread.turns) ? thread.turns.length : 0
         };
       }
     } catch (error) {
       nativeError = error;
     }
-    const local = readNativeFallback(sid);
     if (local) {
       const row = localThread(local);
       return {
         ...row,
         model: selectedModels.get(sid) || row.model,
-        messages: localMessages(local)
+        messages: localMessages(local),
+        goal: (() => { const value = deriveGoalFromMessages(localMessages(local)); if (value) liveGoals.set(sid, value); return value; })()
       };
     }
     throw nativeError || new Error(`Codex 线程不存在：${sid}`);
@@ -703,6 +852,9 @@ export function createCodexRuntime({
       return () => subscribers.delete(handler);
     },
     close() {
+      if (rolloutPollTimer) clearInterval(rolloutPollTimer);
+      rolloutPollTimer = null;
+      rolloutTails.clear();
       for (const child of activeNative.values()) child.kill("SIGTERM");
       activeNative.clear();
     }

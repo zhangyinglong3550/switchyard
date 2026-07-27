@@ -46,6 +46,7 @@
         <div id="session-menu" class="session-menu" hidden><button data-action="refresh">刷新当前对话</button><button id="session-pin-action" data-action="pin">置顶会话</button><button data-action="rename">重命名</button><button data-action="archive">归档会话</button><button data-action="fork">从这里分支</button><button data-action="cancel">停止会话</button><button data-action="delete" class="danger-text">删除会话</button></div>
         <div id="session-approval-inbox" class="approval-inbox session-approval-inbox" aria-label="当前会话审批"></div>
         <section id="session-queue" class="session-queue" hidden aria-label="排队指令"></section>
+        <section id="goal-panel" class="goal-panel" hidden aria-label="任务目标"></section>
         <div id="messages" class="messages" aria-live="polite"></div>
         <form id="composer" class="composer"><div id="attachment-preview" class="attachment-preview" hidden></div><input id="attachment-input" type="file" multiple accept="image/*,.txt,.md,.markdown,.json,.yaml,.yml,.js,.jsx,.ts,.tsx,.py,.go,.rs,.java,.c,.cc,.cpp,.h,.html,.css,.sql,.sh" hidden><button id="open-model-sheet" class="runtime-shortcut" type="button" aria-label="切换模型与对话设置"><span><strong>模型与对话设置</strong><small id="composer-runtime-summary">点击切换模型、权限与思考程度</small></span><svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button><button id="voice-control" class="voice-control" type="button" aria-label="语音输入" hidden><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="attach-control" class="attach-control" type="button" aria-label="添加图片或文件"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><textarea id="message" rows="1" placeholder="继续这项工作" aria-label="输入消息"></textarea><button id="send" class="send-button" type="submit" aria-label="发送"><svg class="send-icon" viewBox="0 0 24 24"><path d="m5 12 14-7-4 14-3-5-5-2Z"/><path d="m12 12 3-3"/></svg><span class="stop-icon" aria-hidden="true"></span></button></form>
       </section>
@@ -63,6 +64,6 @@
   <div id="input-sheet" class="bottom-sheet-backdrop" hidden aria-hidden="true" style="display:none"><div class="bottom-sheet input-sheet" role="dialog" aria-modal="true" aria-labelledby="input-sheet-title"><div class="sheet-handle"></div><div class="sheet-title"><div><strong id="input-sheet-title">输入</strong><span id="input-sheet-description"></span></div><button id="close-input-sheet" class="icon-control" type="button" aria-label="关闭">×</button></div><div class="sheet-body"><textarea id="input-sheet-text" rows="3"></textarea><div class="sheet-actions"><button id="cancel-input-sheet" class="cancel" type="button">取消</button><button id="confirm-input-sheet" class="confirm" type="button">确定</button></div></div></div></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="command-picker" class="command-picker" hidden role="listbox" aria-label="命令与 Skills"></div>
-  <script type="module" src="/app.js?v=60"></script>
+  <script type="module" src="/app.js?v=62"></script>
 </body>
 </html>

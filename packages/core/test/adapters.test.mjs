@@ -267,6 +267,47 @@ test("streamChatAsResponses accepts a final usage footer as completion when an O
   assert.doesNotMatch(body, /event: response.incomplete/);
 });
 
+test("streamChatAsResponses reports a usage-only Kimi-style tail as incomplete when compatibility is disabled", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"id":"chat_1","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}',
+        "",
+        'data: {"id":"chat_1","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}',
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  let terminal = null;
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+
+  await streamChatAsResponses({ body: stream, ok: true, status: 200 }, res, "ke/kimi-k3", {
+    acceptUsageFooterAsTerminal: false,
+    onStreamEnd: (diagnostics) => { terminal = diagnostics; }
+  });
+
+  assert.match(body, /"text":"partial"/);
+  assert.match(body, /event: response.incomplete/);
+  assert.match(body, /"reason":"adapter_eof"/);
+  assert.doesNotMatch(body, /event: response.completed/);
+  assert.deepEqual(terminal, {
+    sawDoneMarker: false,
+    sawFinishReason: false,
+    sawUsageFooter: true,
+    usageFooterAccepted: false,
+    acceptUsageFooterAsTerminal: false
+  });
+});
+
 test("streamChatAsResponses uses parser-visible heartbeats while upstream is silent", async () => {
   const stream = new ReadableStream({
     start(controller) {

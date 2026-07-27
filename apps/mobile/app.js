@@ -1012,11 +1012,15 @@ function renderPlanCard(message, key) {
   const isDone = (status) => ["completed", "done", "complete"].includes(status);
   const isDoing = (status) => ["in_progress", "running", "doing"].includes(status);
   const done = plan.filter((item) => isDone(item.status)).length;
-  const items = plan.map((item) => {
+  const activeIndex = plan.findIndex((item) => isDoing(item.status));
+  // Keep a concrete current-step indicator even before the runtime marks an
+  // item in progress. This mirrors Codex Desktop's "第 n / total 步" affordance.
+  const currentStep = activeIndex >= 0 ? activeIndex + 1 : Math.min(plan.length, Math.max(1, done + 1));
+  const items = plan.map((item, index) => {
     const cls = isDone(item.status) ? "done" : isDoing(item.status) ? "doing" : "todo";
-    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
+    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : cls === "todo" ? String(index + 1) : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
   }).join("");
-  return `<div class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"><div class="plan-head"><span class="ic">☰</span><b>执行计划</b><span class="prog">${done}/${plan.length}</span></div><div class="plan-items">${items}</div></div>`;
+  return `<div class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"><div class="plan-head"><span class="ic">☰</span><b>执行计划</b><span class="plan-progress-pill" aria-label="当前第 ${currentStep} 步，共 ${plan.length} 步">第 <strong>${currentStep}</strong> / ${plan.length} 步</span></div><div class="plan-items">${items}</div><div class="plan-foot"><span>${done === plan.length ? "全部步骤已完成" : `已完成 ${done} 项`}</span><span class="prog">${done}/${plan.length}</span></div></div>`;
 }
 
 // Parse Codex apply_patch blocks and standard unified diffs into row models
@@ -1153,6 +1157,34 @@ function renderMessage(message, extraClass = "", index = 0) {
   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
 function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}|${JSON.stringify(message.delivery || null)}`).join("\u001f"); }
+function goalStatusLabel(status) { return ({ in_progress: "进行中", complete: "已完成", blocked: "需要处理" })[status] || "进行中"; }
+function goalStepClass(status) {
+  const value = String(status || "").toLowerCase();
+  if (["completed", "complete", "done"].includes(value)) return "done";
+  if (["in_progress", "running", "doing", "active"].includes(value)) return "doing";
+  return "todo";
+}
+function renderGoalPanel() {
+  const host = $("#goal-panel"); const goal = current?.goal;
+  if (!host) return;
+  if (!goal?.objective && !goal?.plan?.length) { host.hidden = true; host.innerHTML = ""; return; }
+  const plan = Array.isArray(goal.plan) ? goal.plan : [];
+  const done = plan.filter((item) => goalStepClass(item.status) === "done").length;
+  const activeIndex = plan.findIndex((item) => goalStepClass(item.status) === "doing");
+  const step = plan.length ? (activeIndex >= 0 ? activeIndex + 1 : Math.min(plan.length, Math.max(1, done + (goal.status === "complete" ? 0 : 1)))) : 0;
+  const percent = plan.length ? Math.round((done / plan.length) * 100) : 0;
+  const collapsed = goal.status === "complete";
+  const steps = plan.map((item, index) => {
+    const cls = goalStepClass(item.status);
+    const mark = cls === "done" ? "✓" : cls === "todo" ? String(index + 1) : "";
+    return `<li class="goal-step ${cls}"><span>${mark}</span><b>${escapeHtml(item.step)}</b></li>`;
+  }).join("");
+  const blocked = goal.status === "blocked" && goal.blockedReason ? `<p class="goal-blocked">${escapeHtml(goal.blockedReason)}</p>` : "";
+  const budget = Number.isFinite(goal.tokenUsage) && Number.isFinite(goal.tokenBudget) ? `<small>${goal.tokenUsage} / ${goal.tokenBudget} tokens</small>` : "";
+  host.hidden = false;
+  host.innerHTML = `<details class="goal-card ${escapeHtml(goal.status || "in_progress")}"${collapsed ? "" : " open"}><summary><span class="goal-icon">${goal.status === "complete" ? "✓" : goal.status === "blocked" ? "!" : "◎"}</span><span class="goal-copy"><b>目标模式</b><strong>${escapeHtml(goal.objective)}</strong></span><span class="goal-state">${escapeHtml(goalStatusLabel(goal.status))}<i>⌄</i></span></summary><div class="goal-body">${plan.length ? `<div class="goal-progress"><span>第 <b>${step}</b> / ${plan.length} 步</span><em>${percent}%</em></div><div class="goal-track"><i style="width:${percent}%"></i></div><ol>${steps}</ol>` : ""}${blocked}<footer><span>${goal.status === "complete" ? "目标已完成" : `已完成 ${done} 项`}</span>${budget}</footer></div></details>`;
+}
+
 function renderSessionQueue() {
   const host = $("#session-queue");
   const queue = Array.isArray(current?.queue) ? current.queue : [];
@@ -1288,7 +1320,7 @@ function applySessionDetail(detail, { activate = true, instant = false, anchor =
   $("#detail-title").textContent = current.title;
   $("#detail-meta").textContent = `${agentLabel(current.agent)}${current.model ? ` · ${current.model}` : ""}`;
   $("#chat-state-dot").className = current.state || "";
-  renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); updateComposerQueueState();
+  renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); renderGoalPanel(); updateComposerQueueState();
   const options = { hasMore: Boolean(current.hasMoreMessages), total: current.messagesTotal };
   if (activate) { renderMessages(current.messages || [], options); page("detail"); if (!anchor) scrollMessages({ force: true, instant }); }
   else syncMessages(current.messages || [], options);
@@ -1348,6 +1380,10 @@ async function openModelSheet() {
 function appendEvent(event) {
   if (!current || event.sessionId !== current.id) return;
   sessionDetailCache.delete(current.id);
+  if (event.goal) {
+    current.goal = event.goal;
+    renderGoalPanel();
+  }
   if (event.type === "message" && event.summary) {
     const role = event.role || "assistant"; const last = $("#messages").lastElementChild;
     if (role === "user" && last?.classList.contains("me") && last.querySelector(".msg-body")?.textContent === event.summary) return;

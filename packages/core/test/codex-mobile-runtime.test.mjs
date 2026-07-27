@@ -757,3 +757,79 @@ test("Codex runtime normalizes notifications and tracks the active turn", async 
     }
   ]);
 });
+
+test("Codex runtime maps generic item updates to streamed messages and plan tool cards", () => {
+  const client = fakeRuntimeClient(() => ({}));
+  const runtime = createCodexRuntime({ client, scanSessions: () => [] });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+
+  client.emit({
+    kind: "notification",
+    method: "item/updated",
+    params: {
+      threadId: "desktop-thread",
+      turnId: "turn-live",
+      item: { id: "msg-live", type: "agent_message", text: "正在" }
+    }
+  });
+  client.emit({
+    kind: "notification",
+    method: "item/updated",
+    params: {
+      threadId: "desktop-thread",
+      turnId: "turn-live",
+      item: { id: "msg-live", type: "agent_message", text: "正在处理" }
+    }
+  });
+  client.emit({
+    kind: "notification",
+    method: "item/updated",
+    params: {
+      threadId: "desktop-thread",
+      turnId: "turn-live",
+      item: {
+        id: "plan-call",
+        type: "function_call",
+        name: "update_plan",
+        arguments: JSON.stringify({
+          plan: [
+            { step: "检查现状", status: "completed" },
+            { step: "实现实时同步", status: "in_progress" },
+            { step: "回归验证", status: "pending" }
+          ]
+        })
+      }
+    }
+  });
+
+  assert.deepEqual(events.map((event) => ({ type: event.type, summary: event.summary, tool: event.tool && { id: event.tool.id, name: event.tool.name, status: event.tool.status } })), [
+    { type: "message", summary: "正在", tool: undefined },
+    { type: "message", summary: "处理", tool: undefined },
+    { type: "tool", summary: "更新执行计划", tool: { id: "plan-call", name: "update_plan", status: "running" } }
+  ]);
+});
+
+test("Codex goal tools project a durable goal with live plan progress", async () => {
+  const { applyGoalTool } = await import("../../../apps/desktop/src/mobile-control/goal-state.mjs");
+  const initial = applyGoalTool(null, {
+    name: "create_goal",
+    arguments: JSON.stringify({ objective: "让手机端展示任务目标", token_budget: 12000 })
+  }, { at: "2026-07-27T10:00:00.000Z" });
+  const running = applyGoalTool(initial, {
+    name: "update_plan",
+    arguments: JSON.stringify({ plan: [
+      { step: "解析目标工具", status: "completed" },
+      { step: "渲染顶部进度卡", status: "in_progress" }
+    ] })
+  }, { at: "2026-07-27T10:01:00.000Z" });
+  const complete = applyGoalTool(running, {
+    name: "update_goal",
+    arguments: JSON.stringify({ status: "complete", token_usage: 8100 })
+  }, { at: "2026-07-27T10:02:00.000Z" });
+  assert.equal(initial.objective, "让手机端展示任务目标");
+  assert.equal(initial.tokenBudget, 12000);
+  assert.equal(running.plan[1].status, "in_progress");
+  assert.equal(complete.status, "complete");
+  assert.equal(complete.tokenUsage, 8100);
+});
