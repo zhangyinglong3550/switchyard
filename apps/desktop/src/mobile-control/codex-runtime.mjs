@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn as spawnChild, spawnSync } from "node:child_process";
 import { scanCodexSessions } from "./local-session-scan.mjs";
-import { mergeTool, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
+import { mergeTool, reasoningText, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
 
 const CAPABILITIES = Object.freeze({
@@ -124,12 +124,19 @@ function normalizeItem(item = {}) {
   return text ? { role: item.role || "assistant", text, kind: type || "message" } : null;
 }
 
-function normalizeMessages(thread = {}) {
+function normalizeMessages(thread = {}, { limit = 500 } = {}) {
+  // Thread/read returns whole turns. Work backwards and stop once the phone's
+  // bounded history window is full, instead of normalizing every item in a
+  // months-long conversation before the registry can render its first screen.
   const messages = [];
-  for (const turn of thread.turns || []) {
-    for (const item of turn.items || []) {
-      const message = normalizeItem(item);
-      if (message?.text) messages.push({ ...message, turnId: turn.id || null });
+  const max = Math.max(1, Number(limit) || 500);
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  for (let turnIndex = turns.length - 1; turnIndex >= 0 && messages.length < max; turnIndex -= 1) {
+    const turn = turns[turnIndex] || {};
+    const items = Array.isArray(turn.items) ? turn.items : [];
+    for (let itemIndex = items.length - 1; itemIndex >= 0 && messages.length < max; itemIndex -= 1) {
+      const message = normalizeItem(items[itemIndex]);
+      if (message?.text) messages.unshift({ ...message, turnId: turn.id || null });
     }
   }
   return messages;
@@ -187,7 +194,7 @@ export function parseCodexRollout(lines) {
           messages.push({ role: partType.includes("reasoning") ? "assistant" : role, text, kind: partType.includes("reasoning") ? "thinking" : "text" });
         }
       } else if (type.includes("reasoning")) {
-        const text = textValue(item.text || item.summary || item.content);
+        const text = reasoningText(item);
         if (text) messages.push({ role: "assistant", text, kind: "thinking" });
       } else if (type === "function_call_output" || type === "custom_tool_call_output" || type.endsWith("_output")) {
         const id = String(item.call_id || item.tool_call_id || item.id || "");
@@ -234,8 +241,11 @@ function splitLines(onLine) {
 function eventSummary(frame) {
   const params = frame.params || {};
   const method = String(frame.method || "");
+  if (method.toLowerCase().includes("reasoning") || method.toLowerCase().includes("thought")) {
+    return reasoningText(params.item || params);
+  }
   if (method.includes("delta")) {
-    return String(params.delta?.text || params.delta || params.text || "");
+    return textValue(params.delta?.text ?? params.delta ?? params.text ?? "");
   }
   if (method.includes("completed")) return String(params.turn?.status || params.status || "completed");
   if (method.includes("failed")) return String(params.error?.message || params.error || "failed");
@@ -367,8 +377,9 @@ export function createCodexRuntime({
     return [...rows.values()];
   };
 
-  const readSession = async (sessionId) => {
+  const readSession = async (sessionId, { messageLimit = 500 } = {}) => {
     const sid = String(sessionId);
+    const limit = Math.min(500, Math.max(1, Number(messageLimit) || 500));
     let nativeError;
     // Always try the shared app-server first. This works for both threads
     // created on the phone and threads created in the desktop Codex UI.
@@ -379,7 +390,7 @@ export function createCodexRuntime({
         return {
           ...normalizeThread(thread),
           model: selectedModels.get(sid) || thread.model || "",
-          messages: normalizeMessages(thread),
+          messages: normalizeMessages(thread, { limit }),
           turns: Array.isArray(thread.turns) ? thread.turns.length : 0
         };
       }
@@ -560,9 +571,12 @@ export function createCodexRuntime({
         try {
           const frame = JSON.parse(line);
           const item = frame.item || {};
-          if (frame.type === "item.completed" || frame.type === "item.updated") {
+          if (String(frame.type || "").startsWith("item.")) {
             if (item.type === "agent_message" && item.text) emit({ sessionId: sid, type: "message", role: "assistant", summary: String(item.text), runtimeEvent: "codex/cli-agent-message" });
-            else if (String(item.type || "").includes("reasoning") && (item.text || item.summary)) emit({ sessionId: sid, type: "thinking", role: "assistant", summary: String(item.text || item.summary), runtimeEvent: "codex/cli-reasoning" });
+            else if (String(item.type || "").toLowerCase().includes("reasoning")) {
+              const summary = reasoningText(item);
+              if (summary) emit({ sessionId: sid, type: "thinking", role: "assistant", summary, runtimeEvent: "codex/cli-reasoning" });
+            }
             else if (String(item.type || "").includes("command") || String(item.type || "").includes("tool")) {
               const tool = toolFrom(item, frame.type === "item.updated" ? "running" : "completed");
               emit({ sessionId: sid, type: "tool", role: "tool", summary: String(tool.title || tool.name || "工具调用"), tool, runtimeEvent: "codex/cli-tool" });

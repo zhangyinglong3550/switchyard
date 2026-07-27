@@ -7,7 +7,7 @@ const DEFAULT_INITIALIZE = Object.freeze({
   clientInfo: {
     name: "switchyard",
     title: "Switchyard",
-    version: "2.2.20"
+    version: "2.2.31"
   }
 });
 

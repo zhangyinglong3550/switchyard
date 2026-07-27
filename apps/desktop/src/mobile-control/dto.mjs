@@ -121,6 +121,13 @@ export function projectMobileEvent(event = {}) {
     role: ["user", "assistant", "tool", "system"].includes(event.role) ? event.role : null,
     createdAt: event.createdAt ? String(event.createdAt) : null,
     summary: cleanMobileText(event.summary || "", 4000),
+    ...(event.approval && typeof event.approval === "object" ? {
+      approval: {
+        id: cleanMobileText(event.approval.id || "", 240),
+        requiresDesktop: Boolean(event.approval.requiresDesktop),
+        summary: cleanMobileText(event.approval.summary || "", 1000)
+      }
+    } : {}),
     ...(Array.isArray(event.attachments) ? { attachments: event.attachments.map(projectAsset).filter(Boolean) } : {}),
     ...(event.tool ? { tool: projectTool(event.tool) } : {})
   };

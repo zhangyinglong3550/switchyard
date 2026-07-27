@@ -40,6 +40,8 @@ test("mobile store consumes pairing challenge once and revocation is immediate",
 
   store.revokeDevice(device.id);
   assert.throws(() => store.authenticate(device.token), /已撤销/);
+  assert.deepEqual(store.listDevices(), []);
+  assert.equal(store.listDevices({ includeRevoked: true })[0].revokedAt, "2026-07-23T12:00:00.000Z");
 
   const persisted = fs.readFileSync(path.join(root, "state.json"), "utf8");
   assert.doesNotMatch(persisted, new RegExp(device.token));
@@ -333,4 +335,36 @@ test("mobile event DTO keeps safe structured tool fields and redacts secrets", a
   assert.equal(event.tool.activity, "command");
   assert.doesNotMatch(event.tool.command, /secret-token|\/Users\/alice/);
   assert.doesNotMatch(event.tool.arguments, /sk-secret123456/);
+});
+
+test("mobile store persists FIFO queue items and supports edit/remove", (t) => {
+  const root = tempRoot(t);
+  const store = createMobileControlStore({ root, now: () => NOW });
+  const attachment = store.putAttachment({
+    sessionId: "s1", messageId: "m1", name: "note.txt", mimeType: "text/plain", kind: "text",
+    data: Buffer.from("note").toString("base64")
+  });
+  store.enqueueQueueItem({ sessionId: "s1", id: "q1", messageId: "m1", text: "先做 A", attachments: [attachment] });
+  store.enqueueQueueItem({ sessionId: "s1", id: "q2", messageId: "m2", text: "再做 B" });
+  assert.deepEqual(store.listQueue("s1").map((item) => [item.id, item.text, item.attachments.length]), [["q1", "先做 A", 1], ["q2", "再做 B", 0]]);
+  store.updateQueueItem({ sessionId: "s1", itemId: "q2", text: "改成 B" });
+  assert.equal(store.shiftQueueItem("s1").id, "q1");
+  assert.equal(createMobileControlStore({ root }).listQueue("s1")[0].text, "改成 B");
+  assert.equal(store.removeQueueItem({ sessionId: "s1", itemId: "q2" }).messageId, "m2");
+  assert.deepEqual(store.clearQueue("s1"), { cleared: 0 });
+  store.setQueuePaused("s1", true);
+  assert.equal(createMobileControlStore({ root }).isQueuePaused("s1"), true);
+  store.setQueuePaused("s1", false);
+  assert.equal(store.isQueuePaused("s1"), false);
+});
+
+test("mobile store persists per-device conversation send preference", (t) => {
+  const root = tempRoot(t);
+  const store = createMobileControlStore({ root, randomBytes: (size) => Buffer.alloc(size, 9) });
+  const challenge = store.createChallenge();
+  const device = store.completePairing({ challenge: challenge.secret, name: "iPhone" });
+  assert.deepEqual(store.getDevicePreferences(device.id), { conversationSendMode: "ask" });
+  assert.deepEqual(store.updateDevicePreferences(device.id, { conversationSendMode: "guide" }), { conversationSendMode: "guide" });
+  assert.deepEqual(createMobileControlStore({ root }).getDevicePreferences(device.id), { conversationSendMode: "guide" });
+  assert.throws(() => store.updateDevicePreferences(device.id, { conversationSendMode: "interrupt" }), /无效/);
 });

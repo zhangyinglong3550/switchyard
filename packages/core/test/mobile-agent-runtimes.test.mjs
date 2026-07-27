@@ -69,7 +69,7 @@ test("ACP client negotiates protocol and separates responses, notifications and 
     params: {
       protocolVersion: 1,
       clientCapabilities: {},
-      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.20" }
+      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.31" }
     }
   });
   child.stdout.emit("data", `${JSON.stringify({
@@ -595,6 +595,15 @@ test("agent histories preserve structured tool details and collapsible reasoning
   assert.equal(claude[0].tool.name, "Bash");
   assert.equal(claude[0].tool.command, "npm test");
   assert.equal(claude[0].tool.output, "passed");
+});
+
+test("Codex tool cards use the concrete command instead of the generic commandExecution type", () => {
+  const command = toolFrom({ type: "commandExecution", arguments: JSON.stringify({ cmd: "git status --short" }) });
+  const plan = toolFrom({ name: "update_plan", arguments: JSON.stringify({ plan: [] }) });
+  const followup = toolFrom({ name: "write_stdin", arguments: JSON.stringify({ session_id: 12 }) });
+  assert.equal(command.title, "执行：git status --short");
+  assert.equal(plan.title, "更新执行计划");
+  assert.equal(followup.title, "继续读取命令输出");
 });
 
 test("Codex, Claude Code, OpenCode and Grok tools share mobile activity categories", () => {

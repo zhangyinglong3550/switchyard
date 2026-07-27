@@ -136,6 +136,9 @@ export function createSessionRegistry({
   const runtimeErrors = new Map();
   const pendingApprovals = new Map();
   const sessionDirectories = new Map();
+  const activeSessions = new Set();
+  const isQueuePaused = (sessionId) => store.isQueuePaused?.(sessionId) || false;
+  const setQueuePaused = (sessionId, paused) => store.setQueuePaused?.(sessionId, paused);
   const commandCatalog = createMobileCommandCatalog();
   // Listing sessions scans each Agent's local history and (for Codex) talks to
   // its app-server. Doing that serially on every request made the phone UI wait
@@ -144,6 +147,7 @@ export function createSessionRegistry({
   const SESSIONS_CACHE_TTL_MS = 15_000;
   const WORKSPACE_CACHE_TTL_MS = 60_000;
   const sessionsCache = new Map();
+  const sessionRefreshes = new Map();
   let workspacesCache = { at: 0, rows: [] };
   let rootsCache = { at: 0, roots: null };
   const indexFile = path.join(
@@ -177,27 +181,14 @@ export function createSessionRegistry({
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} 响应超时`)), ms))
   ]);
 
-  const isArchivedRow = (runtime, row, expectedArchived) => {
-    // Warm indexes can predate archive metadata and therefore contain
-    // archived Codex rows marked as active. Let the runtime re-check the
-    // native id before exposing those rows to the phone.
-    if (runtime?.isArchivedSession && row?.id) {
-      try {
-        const nativeId = decodeMobileSessionId(row.id).nativeId;
-        return Boolean(runtime.isArchivedSession(nativeId)) === Boolean(expectedArchived);
-      } catch {}
-    }
-    return Boolean(row?.archived) === Boolean(expectedArchived);
-  };
-
-  const filterVisibleRows = (rows, expectedArchived) => rows.filter((row) => {
-    try {
-      const { agentId } = decodeMobileSessionId(row.id);
-      return isArchivedRow(runtimeMap.get(agentId), row, expectedArchived);
-    } catch {
-      return Boolean(row?.archived) === Boolean(expectedArchived);
-    }
-  });
+  // Never consult a runtime while displaying the persisted index. In
+  // particular, checking Codex archive membership can walk its history tree;
+  // doing that once per row turned the supposed cold-start fast path back into
+  // a multi-second synchronous scan. A background refresh corrects stale
+  // archive metadata immediately after the first paint.
+  const filterVisibleRows = (rows, expectedArchived) => rows.filter((row) =>
+    Boolean(row?.archived) === Boolean(expectedArchived)
+  );
 
   for (const runtime of runtimes) {
     runtime.subscribe?.((event) => {
@@ -214,10 +205,22 @@ export function createSessionRegistry({
           createdAt: new Date().toISOString(),
           ...policy
         });
+        detailCache.delete(mobileSessionId);
+        sessionsCache.clear();
         ledger.append({
           sessionId: mobileSessionId,
           type: "approval",
-          summary: policy.mobileAllowed ? "等待手机端一次性审批" : "等待桌面端审批"
+          summary: policy.mobileAllowed ? "等待手机端一次性审批" : "等待审批",
+          approval: {
+            id,
+            requiresDesktop: policy.requiresDesktop,
+            summary: policy.summary
+          }
+        });
+        ledger.append({
+          sessionId: mobileSessionId,
+          type: "status",
+          summary: "waiting_for_approval"
         });
         return;
       }
@@ -233,8 +236,13 @@ export function createSessionRegistry({
           workspaceRoot: sessionDirectories.get(mobileSessionId) || ""
         })
       }));
-      if (["completed", "failed", "cancelled", "canceled"].includes(String(event.summary || "").toLowerCase())) {
-        // 租约自然过期是兜底；运行时明确终态时不强行猜测 owner。
+      const terminalState = String(event.summary || "").toLowerCase();
+      const ended = ["completed", "failed", "cancelled", "canceled"].includes(terminalState) || event.type === "error";
+      if (ended) {
+        activeSessions.delete(mobileSessionId);
+        detailCache.delete(mobileSessionId);
+        sessionsCache.clear();
+        if (terminalState === "completed") void dispatchNext(mobileSessionId);
       }
     });
   }
@@ -247,33 +255,41 @@ export function createSessionRegistry({
   };
 
   const discoveredRuntimes = new Set();
+  const queueSessionRefresh = ({ agent = "", archived = false } = {}) => {
+    const key = `${agent || "all"}|${archived ? "1" : "0"}`;
+    if (sessionRefreshes.has(key)) return sessionRefreshes.get(key);
+    // Start on a later task so HTTP can flush the warm index to the phone before
+    // any synchronous local-history scanner gets a chance to block this process.
+    // Do not begin an expensive synchronous history scan while the WebView is
+    // still loading the initial HTML/CSS/JS bundle. On large histories that
+    // scan can monopolize the desktop process and make the phone appear stuck.
+    const refresh = new Promise((resolve) => setTimeout(resolve, 2_500)).then(async () => {
+      const fresh = await listSessionsFresh({ agent, archived });
+      sessionsCache.set(key, { at: Date.now(), rows: fresh });
+      if (!agent && !archived) saveDiskIndex(fresh);
+      return fresh;
+    }).catch(() => null).finally(() => sessionRefreshes.delete(key));
+    sessionRefreshes.set(key, refresh);
+    return refresh;
+  };
   const listSessions = async ({ agent = "", archived = false } = {}) => {
     const key = `${agent || "all"}|${archived ? "1" : "0"}`;
     const cached = sessionsCache.get(key);
-    const needsDiscovery = runtimes.some((runtime) => !discoveredRuntimes.has(runtime.id));
-    if (cached && Date.now() - cached.at < SESSIONS_CACHE_TTL_MS && !needsDiscovery) {
+    if (cached && Date.now() - cached.at < SESSIONS_CACHE_TTL_MS) {
       const visibleCachedRows = filterVisibleRows(cached.rows, archived);
       if (visibleCachedRows.length !== cached.rows.length) sessionsCache.set(key, { at: Date.now(), rows: visibleCachedRows });
       return visibleCachedRows;
     }
 
-    // Stale-while-revalidate only after every runtime has been scanned at least
-    // once; otherwise Agent availability / errors would stay unknown forever.
-    if (!agent && !archived && !needsDiscovery && !forceFreshSessions) {
+    // A phone must never wait for every local Agent history scan before it can
+    // draw the list. The persisted index is safe, path-free metadata, so show it
+    // immediately even on a cold desktop start and refresh it in the background.
+    if (!agent && !archived && !forceFreshSessions) {
       const warm = loadDiskIndex();
-      if (Array.isArray(warm.rows) && warm.rows.length && Date.now() - Number(warm.updatedAt || 0) < 5 * 60_000) {
-        void Promise.resolve().then(async () => {
-          try {
-            const fresh = await listSessionsFresh({ agent, archived });
-            sessionsCache.set(key, { at: Date.now(), rows: fresh });
-            saveDiskIndex(fresh);
-          } catch {}
-        });
-        // The on-disk index may have been written by an older build before
-        // archive filtering was enforced. Never leak archived rows through the
-        // stale-while-revalidate fast path.
+      if (Array.isArray(warm.rows) && warm.rows.length && Date.now() - Number(warm.updatedAt || 0) < 24 * 60 * 60_000) {
         const visibleWarmRows = filterVisibleRows(warm.rows, archived);
         sessionsCache.set(key, { at: Date.now(), rows: visibleWarmRows });
+        void queueSessionRefresh({ agent, archived });
         return visibleWarmRows;
       }
     }
@@ -309,6 +325,8 @@ export function createSessionRegistry({
         }, overlay);
         const directory = String(row.directory || row.cwd || "");
         if (directory) sessionDirectories.set(id, directory);
+        if (["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(projected.state))) activeSessions.add(id);
+        else activeSessions.delete(id);
         if (overlay?.hidden) continue;
         if (projected.archived === Boolean(archived)) rows.push(projected);
       }
@@ -321,20 +339,46 @@ export function createSessionRegistry({
     if (!agent && !archived) {
       saveDiskIndex(rows);
       forceFreshSessions = false;
+      // Warm only a few recent settled conversations after the list has already
+      // been returned. Most taps then hit memory rather than a local transcript scan.
+      setTimeout(() => void Promise.allSettled(
+        rows.filter((row) => !["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(row.state))
+          .slice(0, 3)
+          .map((row) => readSession(row.id, { messageLimit: 120 }))
+      ), 2_500);
     }
     return rows;
   };
 
   const detailCache = new Map();
-  const DETAIL_CACHE_TTL_MS = 5_000;
-  const readSession = async (mobileSessionId) => {
-    const cached = detailCache.get(mobileSessionId);
-    if (cached && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) return cached.detail;
+  const detailRequests = new Map();
+  // Agent runtimes may need to rescan large local transcripts. Keep completed
+  // conversations warm longer; runtime events and every write invalidate this cache.
+  const DETAIL_CACHE_TTL_MS = 10 * 60_000;
+  const MAX_MOBILE_DETAIL_MESSAGES = 500;
+  const isLiveState = (state) => ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(state));
+  const requestedMessageLimit = (value) => Math.min(
+    MAX_MOBILE_DETAIL_MESSAGES,
+    Math.max(1, Number(value) || MAX_MOBILE_DETAIL_MESSAGES)
+  );
+  const detailWindow = (entry, messageLimit) => {
+    const limit = requestedMessageLimit(messageLimit);
+    const messages = projectMessages((entry.sourceMessages || []).slice(-limit), {
+      store,
+      sessionId: entry.base.id,
+      workspaceRoot: entry.workspaceRoot,
+      mobileMessages: store.listMobileMessages?.(entry.base.id) || []
+    });
+    const total = Number(entry.messagesTotal || messages.length);
+    return { ...entry.base, messages, messagesTotal: total, hasMoreMessages: total > messages.length };
+  };
+  const readSessionFresh = async (mobileSessionId) => {
     const { runtime, nativeId } = runtimeFor(mobileSessionId);
-    const detail = await runtime.readSession(nativeId);
+    const detail = await runtime.readSession(nativeId, { messageLimit: MAX_MOBILE_DETAIL_MESSAGES });
     const workspaceRoot = String(detail.directory || detail.cwd || "");
+    const allMessages = Array.isArray(detail.messages) ? detail.messages : [];
     if (workspaceRoot) sessionDirectories.set(mobileSessionId, workspaceRoot);
-    const projected = {
+    const base = {
       ...projectMobileSession({
         ...detail,
         id: mobileSessionId,
@@ -342,18 +386,35 @@ export function createSessionRegistry({
         model: store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id) || detail.model,
         capabilities: detail.capabilities || runtime.capabilities
       }, store.getOverlay(mobileSessionId)),
-      messages: projectMessages(detail.messages || [], {
-        store,
-        sessionId: mobileSessionId,
-        workspaceRoot,
-        mobileMessages: store.listMobileMessages?.(mobileSessionId) || []
-      }),
-      settings: runtime.getSettings?.(nativeId) || null
+      settings: runtime.getSettings?.(nativeId) || null,
+      queue: store.listQueue?.(mobileSessionId) || [],
+      queuePaused: isQueuePaused(mobileSessionId),
+      ...(activeSessions.has(mobileSessionId) ? { state: "running" } : {})
     };
-    // Running turns must always be fresh; finished conversations are stable on
-    // disk, so repeat opens (back & forth between sessions) skip the rescan.
-    if (projected.state === "completed") detailCache.set(mobileSessionId, { at: Date.now(), detail: projected });
-    return projected;
+    if (isLiveState(base.state)) activeSessions.add(mobileSessionId);
+    else activeSessions.delete(mobileSessionId);
+    // Keep the raw tail, rather than eagerly projecting 500 messages. The
+    // initial phone paint only transforms its 120-row window; loading older
+    // messages still reuses this same runtime read rather than rescanning disk.
+    const entry = {
+      at: Date.now(),
+      base,
+      workspaceRoot,
+      sourceMessages: allMessages.slice(-MAX_MOBILE_DETAIL_MESSAGES),
+      messagesTotal: allMessages.length
+    };
+    if (!isLiveState(base.state)) detailCache.set(mobileSessionId, entry);
+    return entry;
+  };
+  const readSession = async (mobileSessionId, { messageLimit = MAX_MOBILE_DETAIL_MESSAGES } = {}) => {
+    const cached = detailCache.get(mobileSessionId);
+    if (cached && Date.now() - cached.at < DETAIL_CACHE_TTL_MS) return detailWindow(cached, messageLimit);
+    let pending = detailRequests.get(mobileSessionId);
+    if (!pending) {
+      pending = readSessionFresh(mobileSessionId).finally(() => detailRequests.delete(mobileSessionId));
+      detailRequests.set(mobileSessionId, pending);
+    }
+    return detailWindow(await pending, messageLimit);
   };
 
   const modelsCache = new Map();
@@ -589,139 +650,158 @@ export function createSessionRegistry({
     return { ok: true, effectiveFrom: "next_turn", settings: runtime.getSettings?.(nativeId) || null };
   };
 
-  const perform = async (mobileSessionId, action, payload = {}, ownerId) => {
+  const runtimeAttachmentsFor = (assets = []) => assets.map((asset) => {
+    const resolved = store.resolveAsset(asset.id);
+    if (!resolved) throw new Error(`排队附件不可读取：${asset.name || "文件"}`);
+    const attachment = { ...resolved, path: resolved.path };
+    if (attachment.kind === "text") {
+      try { attachment.text = fs.readFileSync(attachment.path, "utf8").slice(0, 200_000); } catch {}
+    }
+    return attachment;
+  });
+
+  const startQueuedMessage = async (mobileSessionId, item) => {
     const { runtime, nativeId } = runtimeFor(mobileSessionId);
-    if (action === "sendMessage") {
-      const text = String(payload.text || "").trim();
-      const attachments = normalizeAttachments(payload.attachments);
-      if (!text && !attachments.length) throw new Error("消息或附件不能为空");
-      const remembered = store.rememberMessage({
-        sessionId: mobileSessionId,
-        messageId: payload.messageId
-      });
-      if (remembered.duplicate) return { accepted: true, duplicate: true };
-      const storedAttachments = attachments.map((attachment, index) => store.putAttachment({
-        sessionId: mobileSessionId,
-        messageId: payload.messageId,
-        index,
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        kind: attachment.kind,
-        data: attachment.data
-      }));
-      const runtimeAttachments = attachments.map((attachment, index) => ({
-        ...attachment,
-        path: store.resolveAsset(storedAttachments[index].id)?.path || ""
-      }));
-      store.rememberMobileMessage({
-        sessionId: mobileSessionId,
-        messageId: payload.messageId,
-        text,
-        attachments: storedAttachments
-      });
-      acquire(mobileSessionId, ownerId);
+    // Mark active before awaiting a model switch so a rapid second mobile tap
+    // cannot start a parallel turn instead of joining this session's queue.
+    activeSessions.add(mobileSessionId);
+    try {
+      const attachments = runtimeAttachmentsFor(item.attachments || []);
       const effectiveModel = store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id);
-      if (effectiveModel && typeof runtime.setModel === "function") {
-        await runtime.setModel(nativeId, effectiveModel);
-      }
-      // HTTP 只确认已受理。Agent 的连接、首个 turn/start 或 ACP 初始化可能较慢，
-      // 它们不能阻塞手机端的输入反馈。
+      if (effectiveModel && typeof runtime.setModel === "function") await runtime.setModel(nativeId, effectiveModel);
+      store.rememberMobileMessage({ sessionId: mobileSessionId, messageId: item.messageId, text: item.text, attachments: item.attachments || [] });
+      detailCache.delete(mobileSessionId);
+      ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
+      ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
+      void Promise.resolve().then(() => runtime.sendMessage(nativeId, {
+        text: item.text,
+        ...(attachments.length ? { attachments } : {}),
+        messageId: item.messageId
+      })).catch((error) => {
+        activeSessions.delete(mobileSessionId);
+        detailCache.delete(mobileSessionId);
+        ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
+      });
+    } catch (error) {
+      activeSessions.delete(mobileSessionId);
+      throw error;
+    }
+  };
+
+  const dispatchNext = async (mobileSessionId) => {
+    if (activeSessions.has(mobileSessionId) || isQueuePaused(mobileSessionId)) return { dispatched: false };
+    const next = store.shiftQueueItem?.(mobileSessionId);
+    if (!next) return { dispatched: false };
+    try {
+      await startQueuedMessage(mobileSessionId, next);
+      ledger.append({ sessionId: mobileSessionId, type: "status", summary: "已开始下一条排队指令" });
+      return { dispatched: true, itemId: next.id };
+    } catch (error) {
+      // Put the item back at the front without changing its original intent.
+      store.prependQueueItem?.({ sessionId: mobileSessionId, ...next });
+      setQueuePaused(mobileSessionId, true);
+      ledger.append({ sessionId: mobileSessionId, type: "error", summary: `排队指令未启动：${error?.message || String(error)}` });
+      return { dispatched: false };
+    }
+  };
+
+  const queueMessage = async (mobileSessionId, payload, ownerId) => {
+    const text = String(payload.text || "").trim();
+    const attachments = normalizeAttachments(payload.attachments);
+    if (!text && !attachments.length) throw new Error("消息或附件不能为空");
+    const deliveryMode = String(payload.deliveryMode || "").trim();
+    if (deliveryMode && !["guide", "queue"].includes(deliveryMode)) throw new Error("消息发送方式无效");
+    const messageId = String(payload.messageId || "").trim() || randomUUID();
+    const remembered = store.rememberMessage({ sessionId: mobileSessionId, messageId });
+    if (remembered.duplicate) return { accepted: true, duplicate: true };
+    const storedAttachments = attachments.map((attachment, index) => store.putAttachment({ sessionId: mobileSessionId, messageId, index, name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind, data: attachment.data }));
+    const item = { id: `queue_${randomUUID()}`, messageId, text, attachments: storedAttachments };
+    acquire(mobileSessionId, ownerId);
+    let busy = activeSessions.has(mobileSessionId);
+    // After a desktop restart, the in-memory active set is empty while a native
+    // turn may still be running. Ask the runtime before deciding to start a
+    // parallel turn; a read failure falls back to the responsive send path.
+    if (!busy) {
+      try {
+        const { runtime, nativeId } = runtimeFor(mobileSessionId);
+        const detail = await runtime.readSession(nativeId, { messageLimit: MAX_MOBILE_DETAIL_MESSAGES });
+        busy = ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(detail?.state || ""));
+        if (busy) activeSessions.add(mobileSessionId);
+      } catch {}
+    }
+    if (busy || isQueuePaused(mobileSessionId)) {
+      const guided = deliveryMode === "guide";
+      const queued = guided
+        ? store.prependQueueItem({ sessionId: mobileSessionId, ...item })
+        : store.enqueueQueueItem({ sessionId: mobileSessionId, ...item });
+      const queue = store.listQueue?.(mobileSessionId) || [];
       detailCache.delete(mobileSessionId);
       ledger.append({
         sessionId: mobileSessionId,
-        type: "message",
-        role: "user",
-        summary: text,
-        ...(storedAttachments.length ? { attachments: storedAttachments } : {})
+        type: "status",
+        summary: guided
+          ? (isQueuePaused(mobileSessionId) ? "已加入保留队列的优先引导，需手动继续执行" : "已添加引导，将在当前步骤完成后优先执行")
+          : `已排队第 ${queue.length} 条后续指令`
       });
-      ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
-      void Promise.resolve()
-        .then(() => runtime.sendMessage(nativeId, {
-          text,
-          ...(runtimeAttachments.length ? { attachments: runtimeAttachments } : {}),
-          messageId: payload.messageId
-        }))
-        .catch((error) => {
-          ledger.append({
-            sessionId: mobileSessionId,
-            type: "error",
-            summary: error?.message || String(error)
-          });
-        });
-      return { accepted: true, duplicate: false, state: "running" };
+      return { accepted: true, duplicate: false, queued: true, deliveryMode: guided ? "guide" : "queue", position: guided ? 1 : queue.length, item: queued, state: "queued" };
     }
+    void startQueuedMessage(mobileSessionId, item).catch((error) => {
+      activeSessions.delete(mobileSessionId);
+      ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
+    });
+    return { accepted: true, duplicate: false, state: "running" };
+  };
+
+  const perform = async (mobileSessionId, action, payload = {}, ownerId) => {
+    const { runtime, nativeId } = runtimeFor(mobileSessionId);
+    if (action === "sendMessage") return queueMessage(mobileSessionId, payload, ownerId);
 
     acquire(mobileSessionId, ownerId);
     if (action === "rename") {
       if (typeof runtime.rename === "function") await runtime.rename(nativeId, payload.title);
-      store.patchOverlay(mobileSessionId, { title: payload.title });
-      sessionsCache.clear();
-      detailCache.delete(mobileSessionId);
-      return { ok: true };
+      store.patchOverlay(mobileSessionId, { title: payload.title }); sessionsCache.clear(); detailCache.delete(mobileSessionId); return { ok: true };
     }
-    if (action === "archive") {
-      if (typeof runtime.archive === "function") await runtime.archive(nativeId);
-      store.patchOverlay(mobileSessionId, { archived: true });
-      sessionsCache.clear();
-      detailCache.delete(mobileSessionId);
-      return { ok: true };
-    }
-    if (action === "unarchive") {
-      if (typeof runtime.unarchive === "function") await runtime.unarchive(nativeId);
-      store.patchOverlay(mobileSessionId, { archived: false });
-      sessionsCache.clear();
-      detailCache.delete(mobileSessionId);
-      return { ok: true };
-    }
-    if (action === "pin") {
-      store.patchOverlay(mobileSessionId, { pinned: Boolean(payload.pinned) });
-      return { ok: true };
-    }
+    if (action === "archive") { if (typeof runtime.archive === "function") await runtime.archive(nativeId); store.patchOverlay(mobileSessionId, { archived: true }); sessionsCache.clear(); detailCache.delete(mobileSessionId); return { ok: true }; }
+    if (action === "unarchive") { if (typeof runtime.unarchive === "function") await runtime.unarchive(nativeId); store.patchOverlay(mobileSessionId, { archived: false }); sessionsCache.clear(); detailCache.delete(mobileSessionId); return { ok: true }; }
+    if (action === "pin") { store.patchOverlay(mobileSessionId, { pinned: Boolean(payload.pinned) }); return { ok: true }; }
     if (action === "cancel" && typeof runtime.cancel === "function") {
+      const clearQueue = payload.clearQueue !== false;
       await runtime.cancel(nativeId);
-      return { ok: true };
+      activeSessions.delete(mobileSessionId);
+      if (clearQueue) { const result = store.clearQueue?.(mobileSessionId) || { cleared: 0 }; setQueuePaused(mobileSessionId, false); ledger.append({ sessionId: mobileSessionId, type: "status", summary: `会话已停止，已清空 ${result.cleared} 条排队指令` }); return { ok: true, cleared: result.cleared, queuePaused: false }; }
+      setQueuePaused(mobileSessionId, true); ledger.append({ sessionId: mobileSessionId, type: "status", summary: "会话已停止，排队指令已保留" }); return { ok: true, cleared: 0, queuePaused: true };
     }
     if (action === "delete") {
       let hiddenOnly = false;
-      if (typeof runtime.delete === "function") {
-        try {
-          await runtime.delete(nativeId);
-        } catch (error) {
-          // Some Agent histories (notably Codex desktop rollouts) cannot be
-          // physically removed from mobile. Fall back to local hide/archive so
-          // the phone UI still lets users clean up their list.
-          hiddenOnly = true;
-          store.patchOverlay(mobileSessionId, { archived: true, hidden: true });
-          ledger.append({
-            sessionId: mobileSessionId,
-            type: "status",
-            summary: `会话已从手机列表移除（${error?.message || "原生删除不可用"}）`
-          });
-        }
-      } else {
-        hiddenOnly = true;
-        store.patchOverlay(mobileSessionId, { archived: true, hidden: true });
-      }
-      sessionsCache.clear();
-      // The warm disk index is also read by the next phone refresh. Remove the
-      // deleted row immediately so a stale-while-revalidate response cannot
-      // resurrect it for up to the index TTL.
-      if (hiddenOnly) {
-        const index = loadDiskIndex();
-        saveDiskIndex((index.rows || []).filter((row) => row.id !== mobileSessionId));
-      }
-      detailCache.delete(mobileSessionId);
-      return { ok: true, hiddenOnly };
+      if (typeof runtime.delete === "function") { try { await runtime.delete(nativeId); } catch (error) { hiddenOnly = true; store.patchOverlay(mobileSessionId, { archived: true, hidden: true }); ledger.append({ sessionId: mobileSessionId, type: "status", summary: `会话已从手机列表移除（${error?.message || "原生删除不可用"}）` }); } }
+      else { hiddenOnly = true; store.patchOverlay(mobileSessionId, { archived: true, hidden: true }); }
+      store.clearQueue?.(mobileSessionId); setQueuePaused(mobileSessionId, false); activeSessions.delete(mobileSessionId); sessionsCache.clear(); if (hiddenOnly) { const index = loadDiskIndex(); saveDiskIndex((index.rows || []).filter((row) => row.id !== mobileSessionId)); } detailCache.delete(mobileSessionId); return { ok: true, hiddenOnly };
     }
-    if (action === "fork" && typeof runtime.fork === "function") {
-      const result = await runtime.fork(nativeId);
-      return { sessionId: encodeMobileSessionId(runtime.id, result.sessionId) };
-    }
-    if (action === "compact" && typeof runtime.compact === "function") {
-      await runtime.compact(nativeId);
-      return { ok: true };
-    }
+    if (action === "fork" && typeof runtime.fork === "function") { const result = await runtime.fork(nativeId); return { sessionId: encodeMobileSessionId(runtime.id, result.sessionId) }; }
+    if (action === "compact" && typeof runtime.compact === "function") { await runtime.compact(nativeId); return { ok: true }; }
     throw new Error(`当前 Agent 不支持操作：${action}`);
+  };
+
+  const updateQueueItem = async (mobileSessionId, itemId, payload = {}, ownerId) => {
+    acquire(mobileSessionId, ownerId);
+    const text = payload.text === undefined ? undefined : String(payload.text || "").trim();
+    const attachments = payload.attachments === undefined ? undefined : normalizeAttachments(payload.attachments);
+    let storedAttachments;
+    if (attachments !== undefined) {
+      const item = (store.listQueue?.(mobileSessionId) || []).find((row) => row.id === String(itemId));
+      if (!item) throw new Error("排队指令不存在");
+      storedAttachments = attachments.map((attachment, index) => store.putAttachment({ sessionId: mobileSessionId, messageId: item.messageId, index, name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind, data: attachment.data }));
+    }
+    const item = store.updateQueueItem?.({ sessionId: mobileSessionId, itemId, text, ...(storedAttachments !== undefined ? { attachments: storedAttachments } : {}) });
+    detailCache.delete(mobileSessionId); ledger.append({ sessionId: mobileSessionId, type: "status", summary: "已编辑排队指令" }); return item;
+  };
+
+  const removeQueueItem = async (mobileSessionId, itemId, ownerId) => {
+    acquire(mobileSessionId, ownerId); const item = store.removeQueueItem?.({ sessionId: mobileSessionId, itemId }); detailCache.delete(mobileSessionId); ledger.append({ sessionId: mobileSessionId, type: "status", summary: "已取消排队指令" }); return { ok: true, item };
+  };
+
+  const resumeQueue = async (mobileSessionId, ownerId) => {
+    acquire(mobileSessionId, ownerId); setQueuePaused(mobileSessionId, false); const result = await dispatchNext(mobileSessionId); detailCache.delete(mobileSessionId); return { ok: true, ...result };
   };
 
   const createSession = async (agentId, payload = {}, ownerId) => {
@@ -749,7 +829,7 @@ export function createSessionRegistry({
     .map((approval) => ({
       id: approval.id,
       sessionId: approval.sessionId,
-      title: approval.mobileAllowed ? "操作审批" : "需要桌面审批",
+      title: "操作审批",
       summary: approval.summary,
       risk: approval.risk,
       requiresDesktop: approval.requiresDesktop,
@@ -759,7 +839,7 @@ export function createSessionRegistry({
 
   const resolveApproval = async (approvalId, decision) => {
     const approval = pendingApprovals.get(String(approvalId || ""));
-    if (!approval || !approval.mobileAllowed) throw new Error("审批不存在或必须在桌面处理");
+    if (!approval || !approval.mobileAllowed) throw new Error("审批不存在或当前 Agent 未提供可执行的审批选项");
     if (approval.protocol === "codex") {
       const codexDecision = decision === "allow_once"
         ? "accept"
@@ -802,6 +882,9 @@ export function createSessionRegistry({
     setSessionModel,
     setSessionSettings,
     perform,
+    updateQueueItem,
+    removeQueueItem,
+    resumeQueue,
     listApprovals,
     resolveApproval,
     resolveAsset: (assetId) => store.resolveAsset?.(assetId) || null,

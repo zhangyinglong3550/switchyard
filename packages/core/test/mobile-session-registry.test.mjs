@@ -19,6 +19,7 @@ function fixture(t) {
   const store = createMobileControlStore({ root, now: () => now });
   const ledger = createEventLedger({ file: path.join(root, "events.jsonl"), now: () => now });
   const calls = [];
+  let readCalls = 0;
   const listeners = new Set();
   const runtime = {
     id: "codex",
@@ -36,6 +37,7 @@ function fixture(t) {
       }];
     },
     async readSession(id) {
+      readCalls += 1;
       return {
         id,
         agentId: "codex",
@@ -81,7 +83,7 @@ function fixture(t) {
     ledger,
     readConfig
   });
-  return { registry, runtime, calls, store, ledger, advance(ms) { now += ms; } };
+  return { registry, runtime, calls, store, ledger, readCalls() { return readCalls; }, advance(ms) { now += ms; } };
 }
 
 test("mobile session ids preserve agent and native id without exposing paths", () => {
@@ -102,6 +104,61 @@ test("deleting an unsupported native session persists a hidden tombstone", async
   assert.deepEqual(result, { ok: true, hiddenOnly: true });
   assert.equal(store.getOverlay(sessions[0].id).hidden, true);
   assert.deepEqual(await registry.listSessions(), []);
+});
+
+test("registry windows long conversation payloads and reuses settled detail cache", async (t) => {
+  const { registry, runtime, readCalls } = fixture(t);
+  let reads = 0;
+  runtime.readSession = async (id) => {
+    reads += 1;
+    const base = await Promise.resolve({
+      id, agentId: "codex", name: "长会话", state: "completed", model: "p1/m1", directory: "/Users/a/code/demo", capabilities: runtime.capabilities,
+      messages: Array.from({ length: 180 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", text: `消息 ${index}` }))
+    });
+    return base;
+  };
+  const id = (await registry.listSessions())[0].id;
+  const first = await registry.readSession(id, { messageLimit: 120 });
+  assert.equal(first.messages.length, 120);
+  assert.equal(first.messages[0].text, "消息 60");
+  assert.equal(first.messagesTotal, 180);
+  assert.equal(first.hasMoreMessages, true);
+  const expanded = await registry.readSession(id, { messageLimit: 500 });
+  assert.equal(expanded.messages.length, 180);
+  assert.equal(expanded.messages[0].text, "消息 0");
+  assert.equal(expanded.hasMoreMessages, false);
+  // The expanded view reuses the raw settled history from the first read.
+  assert.equal(reads, 1);
+});
+
+test("registry returns persisted session index immediately and refreshes it in the background", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-mobile-index-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = createMobileControlStore({ root });
+  const ledger = createEventLedger({ file: path.join(root, "events.jsonl") });
+  const id = encodeMobileSessionId("codex", "native-warm");
+  fs.writeFileSync(path.join(root, "session-index.json"), JSON.stringify({
+    updatedAt: Date.now(),
+    rows: [{ id, title: "已缓存会话", agent: "codex", state: "completed", archived: false, updatedAt: "2026-07-26T00:00:00.000Z" }]
+  }));
+  let resolveScan;
+  let scans = 0;
+  const runtime = {
+    id: "codex", label: "Codex", capabilities: {},
+    listSessions: () => { scans += 1; return new Promise((resolve) => { resolveScan = resolve; }); },
+    async readSession(nativeId) { return { id: nativeId, state: "completed", messages: [] }; }
+  };
+  const registry = createSessionRegistry({ runtimes: [runtime], store, ledger, readConfig: () => ({ providers: [], models: [] }) });
+  const rows = await Promise.race([
+    registry.listSessions(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("warm index did not return")), 50))
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].title, "已缓存会话");
+  assert.equal(scans, 0);
+  await new Promise((resolve) => setTimeout(resolve, 2_600));
+  assert.equal(scans, 1);
+  resolveScan([]);
 });
 
 test("registry lists projected sessions and only returns enabled client-visible models", async (t) => {
@@ -323,7 +380,7 @@ test("registry maps runtime events into replayable mobile events", async (t) => 
   assert.equal(ledger.latestId(), events[0].id);
 });
 
-test("registry exposes only low-risk one-shot approvals to mobile", async (t) => {
+test("registry exposes one-shot ACP approvals to mobile", async (t) => {
   const { registry, runtime, calls } = fixture(t);
   runtime.emit({
     sessionId: "native-1",
@@ -352,7 +409,7 @@ test("registry exposes only low-risk one-shot approvals to mobile", async (t) =>
   assert.equal(registry.listApprovals().length, 0);
 });
 
-test("registry exposes Codex one-shot approvals and keeps desktop-only approvals visible", async (t) => {
+test("registry exposes every Codex approval for one-shot mobile resolution", async (t) => {
   const { registry, runtime, calls } = fixture(t);
   runtime.emit({
     sessionId: "native-1",
@@ -378,14 +435,97 @@ test("registry exposes Codex one-shot approvals and keeps desktop-only approvals
   assert.equal(approvals.length, 2);
   assert.deepEqual(approvals[0].actions, ["allow_once", "deny_once"]);
   assert.equal(approvals[0].requiresDesktop, false);
-  assert.deepEqual(approvals[1].actions, []);
-  assert.equal(approvals[1].requiresDesktop, true);
+  assert.deepEqual(approvals[1].actions, ["allow_once", "deny_once"]);
+  assert.equal(approvals[1].requiresDesktop, false);
 
-  await registry.resolveApproval(approvals[0].id, "allow_once");
+  await registry.resolveApproval(approvals[1].id, "allow_once");
   assert.deepEqual(calls.at(-1), [
     "respond",
-    51,
+    52,
     { decision: "accept" }
   ]);
   assert.equal(registry.listApprovals().length, 1);
+});
+
+test("registry queues follow-up instructions, runs one after completion, and supports edit/cancel", async (t) => {
+  const { registry, runtime, calls } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  await registry.perform(sessionId, "sendMessage", { text: "第一条", messageId: "m1" }, "phone-1");
+  await registry.perform(sessionId, "sendMessage", { text: "第二条", messageId: "m2" }, "phone-1");
+  let detail = await registry.readSession(sessionId);
+  assert.equal(detail.queue.length, 1);
+  assert.equal(detail.queue[0].text, "第二条");
+  const queueId = detail.queue[0].id;
+  await registry.updateQueueItem(sessionId, queueId, { text: "修改后的第二条" }, "phone-1");
+  assert.equal((await registry.readSession(sessionId)).queue[0].text, "修改后的第二条");
+  runtime.emit({ sessionId: "native-1", type: "status", summary: "completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((call) => call[0] === "sendMessage").at(-1)[2].text, "修改后的第二条");
+  assert.equal((await registry.readSession(sessionId)).queue.length, 0);
+  await registry.perform(sessionId, "sendMessage", { text: "第三条", messageId: "m3" }, "phone-1");
+  detail = await registry.readSession(sessionId);
+  await registry.removeQueueItem(sessionId, detail.queue[0].id, "phone-1");
+  assert.equal((await registry.readSession(sessionId)).queue.length, 0);
+});
+
+test("registry stop defaults to clearing queue while preserving queue requires explicit resume", async (t) => {
+  const { registry, runtime, calls } = fixture(t);
+  runtime.cancel = async (id) => calls.push(["cancel", id]);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  await registry.perform(sessionId, "sendMessage", { text: "执行中", messageId: "m1" }, "phone-1");
+  await registry.perform(sessionId, "sendMessage", { text: "清空我", messageId: "m2" }, "phone-1");
+  assert.deepEqual(await registry.perform(sessionId, "cancel", {}, "phone-1"), { ok: true, cleared: 1, queuePaused: false });
+  assert.equal((await registry.readSession(sessionId)).queue.length, 0);
+
+  await registry.perform(sessionId, "sendMessage", { text: "再次执行", messageId: "m3" }, "phone-1");
+  await registry.perform(sessionId, "sendMessage", { text: "保留我", messageId: "m4" }, "phone-1");
+  assert.deepEqual(await registry.perform(sessionId, "cancel", { clearQueue: false }, "phone-1"), { ok: true, cleared: 0, queuePaused: true });
+  assert.equal((await registry.readSession(sessionId)).queuePaused, true);
+  await registry.resumeQueue(sessionId, "phone-1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((call) => call[0] === "sendMessage").at(-1)[2].text, "保留我");
+});
+
+test("registry puts guidance ahead of existing queued instructions without starting a parallel turn", async (t) => {
+  const { registry, runtime, calls, store } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  await registry.perform(sessionId, "sendMessage", { text: "当前任务", messageId: "m1" }, "phone-1");
+  await registry.perform(sessionId, "sendMessage", { text: "普通排队", messageId: "m2", deliveryMode: "queue" }, "phone-1");
+  const result = await registry.perform(sessionId, "sendMessage", { text: "优先引导", messageId: "m3", deliveryMode: "guide" }, "phone-1");
+  assert.deepEqual(result, {
+    accepted: true, duplicate: false, queued: true, deliveryMode: "guide", position: 1,
+    item: result.item, state: "queued"
+  });
+  assert.deepEqual(store.listQueue(sessionId).map((item) => item.text), ["优先引导", "普通排队"]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((call) => call[0] === "sendMessage").length, 1);
+  runtime.emit({ sessionId: "native-1", type: "status", summary: "completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((call) => call[0] === "sendMessage")[1][2].text, "优先引导");
+});
+
+test("registry emits an approval event and waiting state so the current mobile session can render the decision card", async (t) => {
+  const { registry, runtime, ledger } = fixture(t);
+  runtime.emit({
+    sessionId: "native-1",
+    type: "approval",
+    requestId: 91,
+    request: {
+      method: "item/commandExecution/requestApproval",
+      command: "git status --short",
+      reason: "检查工作区状态"
+    }
+  });
+
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  const events = ledger.list({ after: 0, sessionId });
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0].approval, {
+    id: events[0].approval.id,
+    requiresDesktop: false,
+    summary: "低风险只读或验证命令"
+  });
+  assert.equal(events[0].summary, "等待手机端一次性审批");
+  assert.equal(events[1].type, "status");
+  assert.equal(events[1].summary, "waiting_for_approval");
 });

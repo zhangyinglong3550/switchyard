@@ -240,8 +240,27 @@ export function createMobileControlServer({
           device.id
         ));
       }
+      if (pathname === "/mobile/v1/preferences") {
+        if (req.method === "GET") return json(res, 200, store.getDevicePreferences(device.id));
+        if (req.method === "POST") return json(res, 200, store.updateDevicePreferences(device.id, await readJson(req)));
+        return json(res, 405, { error: "method_not_allowed" });
+      }
       if (req.method === "POST" && pathname === "/mobile/v1/devices/self/revoke") {
         return json(res, 200, store.revokeDevice(device.id));
+      }
+
+      const queueResumeMatch = pathname.match(/^\/mobile\/v1\/sessions\/([^/]+)\/queue\/resume$/);
+      if (queueResumeMatch) {
+        if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
+        return json(res, 200, await registry.resumeQueue(decodeURIComponent(queueResumeMatch[1]), device.id));
+      }
+      const queueMatch = pathname.match(/^\/mobile\/v1\/sessions\/([^/]+)\/queue\/([^/]+)$/);
+      if (queueMatch) {
+        const sessionId = decodeURIComponent(queueMatch[1]);
+        const itemId = decodeURIComponent(queueMatch[2]);
+        if (req.method === "DELETE") return json(res, 200, await registry.removeQueueItem(sessionId, itemId, device.id));
+        if (req.method === "POST") return json(res, 200, await registry.updateQueueItem(sessionId, itemId, await readJson(req), device.id));
+        return json(res, 405, { error: "method_not_allowed" });
       }
 
       const match = pathname.match(/^\/mobile\/v1\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -249,7 +268,9 @@ export function createMobileControlServer({
       const sessionId = decodeURIComponent(match[1]);
       const action = match[2] || "";
       if (req.method === "GET" && !action) {
-        return json(res, 200, await registry.readSession(sessionId));
+        return json(res, 200, await registry.readSession(sessionId, {
+          messageLimit: url.searchParams.get("messages") || undefined
+        }));
       }
       if (req.method === "DELETE" && !action) {
         return json(res, 200, await registry.perform(sessionId, "delete", {}, device.id));
@@ -260,7 +281,8 @@ export function createMobileControlServer({
         return json(res, 202, await registry.perform(sessionId, "sendMessage", {
           text: body.text,
           attachments: body.attachments,
-          messageId: body.messageId
+          messageId: body.messageId,
+          deliveryMode: body.deliveryMode
         }, device.id));
       }
       if (action === "model") {

@@ -31,6 +31,18 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
       calls.push(["perform", id, action, body, owner]);
       return { ok: true };
     },
+    updateQueueItem: async (id, itemId, body, owner) => {
+      calls.push(["queue-update", id, itemId, body, owner]);
+      return { id: itemId, text: body.text || "" };
+    },
+    removeQueueItem: async (id, itemId, owner) => {
+      calls.push(["queue-remove", id, itemId, owner]);
+      return { ok: true };
+    },
+    resumeQueue: async (id, owner) => {
+      calls.push(["queue-resume", id, owner]);
+      return { ok: true, dispatched: true };
+    },
     setSessionModel: async (id, model, effort, owner) => {
       calls.push(["model", id, model, effort, owner]);
       return { ok: true, effectiveFrom: "next_turn" };
@@ -82,6 +94,11 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
     "content-type": "application/json",
     origin: base
   };
+  const preferences = await fetch(`${base}/mobile/v1/preferences`, { headers });
+  assert.deepEqual(await preferences.json(), { conversationSendMode: "ask" });
+  const updatedPreferences = await fetch(`${base}/mobile/v1/preferences`, { method: "POST", headers, body: JSON.stringify({ conversationSendMode: "queue" }) });
+  assert.deepEqual(await updatedPreferences.json(), { conversationSendMode: "queue" });
+
   const sessions = await fetch(`${base}/mobile/v1/sessions`, { headers });
   assert.equal(sessions.status, 200);
   assert.deepEqual(await sessions.json(), [{ id: "ms_one", agent: "codex", title: "任务", state: "completed" }]);
@@ -128,6 +145,31 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   assert.deepEqual(await created.json(), { sessionId: "ms_new" });
   await new Promise((resolve) => setImmediate(resolve));
 
+  registry.updateQueueItem = async (id, itemId, body, owner) => { calls.push(["queue-update", id, itemId, body, owner]); return { id: itemId, text: body.text }; };
+  registry.removeQueueItem = async (id, itemId, owner) => { calls.push(["queue-remove", id, itemId, owner]); return { ok: true }; };
+  registry.resumeQueue = async (id, owner) => { calls.push(["queue-resume", id, owner]); return { ok: true }; };
+  const queueUpdate = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/q1`, { method: "POST", headers, body: JSON.stringify({ text: "改后" }) });
+  assert.equal(queueUpdate.status, 200);
+  const queueRemove = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/q1`, { method: "DELETE", headers });
+  assert.equal(queueRemove.status, 200);
+  const queueResume = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/resume`, { method: "POST", headers, body: JSON.stringify({}) });
+  assert.equal(queueResume.status, 200);
+
+  const queueUpdated = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/item_1`, {
+    method: "POST", headers, body: JSON.stringify({ text: "编辑后的指令" })
+  });
+  assert.equal(queueUpdated.status, 200);
+  assert.equal((await queueUpdated.json()).text, "编辑后的指令");
+  const queueRemoved = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/item_1`, { method: "DELETE", headers });
+  assert.equal(queueRemoved.status, 200);
+  const queueResumed = await fetch(`${base}/mobile/v1/sessions/ms_one/queue/resume`, { method: "POST", headers, body: "{}" });
+  assert.equal(queueResumed.status, 200);
+
+  const sentMessage = await fetch(`${base}/mobile/v1/sessions/ms_one/messages`, {
+    method: "POST", headers, body: JSON.stringify({ text: "优先处理", messageId: "m-guide", deliveryMode: "guide" })
+  });
+  assert.equal(sentMessage.status, 202);
+
   const model = await fetch(`${base}/mobile/v1/sessions/ms_one/model`, {
     method: "POST",
     headers,
@@ -166,9 +208,13 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   assert.equal(calls[0][0], "create");
   assert.equal(calls[1][0], "perform");
   assert.equal(calls[1][3].attachments[0].name, "note.txt");
-  assert.equal(calls[2][0], "model");
-  assert.equal(calls[3][0], "settings");
-  assert.equal(calls[4][0], "approval");
+  assert.ok(calls.some((call) => call[0] === "queue-update"));
+  assert.ok(calls.some((call) => call[0] === "queue-remove"));
+  assert.ok(calls.some((call) => call[0] === "queue-resume"));
+  assert.equal(calls.find((call) => call[0] === "perform" && call[2] === "sendMessage" && call[3].messageId === "m-guide")[3].deliveryMode, "guide");
+  assert.ok(calls.some((call) => call[0] === "model"));
+  assert.ok(calls.some((call) => call[0] === "settings"));
+  assert.ok(calls.some((call) => call[0] === "approval"));
 });
 
 test("mobile server serves the PWA but never exposes arbitrary files", async (t) => {

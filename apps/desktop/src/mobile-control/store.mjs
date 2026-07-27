@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomBytes as cryptoRandomBytes, timingSafeEqual } from "node:crypto";
 
-const STORE_VERSION = 2;
+const STORE_VERSION = 5;
 const MAX_REMEMBERED_MESSAGES = 2000;
 const MAX_MOBILE_MESSAGES_PER_SESSION = 200;
 
@@ -23,7 +23,9 @@ function emptyState() {
     leases: {},
     messages: {},
     assets: {},
-    mobileMessages: {}
+    mobileMessages: {},
+    queues: {},
+    queuePauses: {}
   };
 }
 
@@ -41,7 +43,9 @@ function loadState(file) {
       leases: parsed.leases && typeof parsed.leases === "object" ? parsed.leases : {},
       messages: parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {},
       assets: parsed.assets && typeof parsed.assets === "object" ? parsed.assets : {},
-      mobileMessages: parsed.mobileMessages && typeof parsed.mobileMessages === "object" ? parsed.mobileMessages : {}
+      mobileMessages: parsed.mobileMessages && typeof parsed.mobileMessages === "object" ? parsed.mobileMessages : {},
+      queues: parsed.queues && typeof parsed.queues === "object" ? parsed.queues : {},
+      queuePauses: parsed.queuePauses && typeof parsed.queuePauses === "object" ? parsed.queuePauses : {}
     };
   } catch {
     return emptyState();
@@ -183,7 +187,8 @@ export function createMobileControlStore({
       tokenHash,
       createdAt,
       lastSeenAt: null,
-      revokedAt: null
+      revokedAt: null,
+      conversationSendMode: "ask"
     };
     save();
     return { ...publicDevice(state.devices[id]), token };
@@ -199,7 +204,11 @@ export function createMobileControlStore({
     return publicDevice(device);
   };
 
-  const listDevices = () => Object.values(state.devices)
+  // Revocation is retained in the private store so a leaked device token can
+  // never become valid again, but revoked devices are no longer active pairings
+  // and should not clutter the desktop's "已配对设备" list.
+  const listDevices = ({ includeRevoked = false } = {}) => Object.values(state.devices)
+    .filter((device) => includeRevoked || !device.revokedAt)
     .map(publicDevice)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 
@@ -209,6 +218,27 @@ export function createMobileControlStore({
     if (!device.revokedAt) device.revokedAt = iso(now());
     save();
     return publicDevice(device);
+  };
+
+  const getDevicePreferences = (deviceId) => {
+    const device = state.devices[String(deviceId || "")];
+    if (!device) throw new Error("设备不存在");
+    const conversationSendMode = ["ask", "guide", "queue"].includes(device.conversationSendMode)
+      ? device.conversationSendMode
+      : "ask";
+    return { conversationSendMode };
+  };
+
+  const updateDevicePreferences = (deviceId, patch = {}) => {
+    const device = state.devices[String(deviceId || "")];
+    if (!device) throw new Error("设备不存在");
+    if (Object.hasOwn(patch, "conversationSendMode")) {
+      const mode = String(patch.conversationSendMode || "").trim();
+      if (!["ask", "guide", "queue"].includes(mode)) throw new Error("对话发送方式无效");
+      device.conversationSendMode = mode;
+    }
+    save();
+    return getDevicePreferences(deviceId);
   };
 
   const getOverlay = (sessionId) => {
@@ -356,6 +386,73 @@ export function createMobileControlStore({
     }));
   };
 
+  const listQueue = (sessionId) => (state.queues[String(sessionId || "")] || []).map((item) => ({
+    id: String(item.id || ""),
+    messageId: String(item.messageId || ""),
+    text: String(item.text || ""),
+    createdAt: String(item.createdAt || ""),
+    attachments: (item.attachments || []).map((asset) => ({ ...asset }))
+  }));
+
+  const queueRows = (sessionId) => {
+    const id = String(sessionId || "").trim();
+    if (!id) throw new Error("sessionId 不能为空");
+    if (!Array.isArray(state.queues[id])) state.queues[id] = [];
+    return state.queues[id];
+  };
+
+  const queueItem = ({ id, messageId, text = "", attachments = [], createdAt } = {}) => {
+    const itemId = String(id || "").trim();
+    const message = String(messageId || "").trim();
+    if (!itemId || !message) throw new Error("队列项参数不完整");
+    return { id: itemId, messageId: message, text: String(text || "").slice(0, 20_000), createdAt: String(createdAt || iso(now())), attachments: attachments.map(publicAsset).filter(Boolean) };
+  };
+
+  const addQueueItem = ({ sessionId, position = "end", ...value } = {}) => {
+    const rows = queueRows(sessionId); const item = queueItem(value);
+    if (rows.some((row) => row.id === item.id || row.messageId === item.messageId)) throw new Error("队列指令已存在");
+    if (position === "start") rows.unshift(item); else rows.push(item);
+    save(); return { ...item, attachments: item.attachments.map((asset) => ({ ...asset })) };
+  };
+
+  const enqueueQueueItem = (value = {}) => addQueueItem({ ...value, position: "end" });
+  const prependQueueItem = (value = {}) => addQueueItem({ ...value, position: "start" });
+
+  const updateQueueItem = ({ sessionId, itemId, text, attachments } = {}) => {
+    const item = queueRows(sessionId).find((row) => row.id === String(itemId || ""));
+    if (!item) throw new Error("排队指令不存在");
+    if (text !== undefined) item.text = String(text || "").slice(0, 20_000);
+    if (attachments !== undefined) item.attachments = attachments.map(publicAsset).filter(Boolean);
+    if (!item.text && !item.attachments.length) throw new Error("消息或附件不能为空");
+    save(); return { ...item, attachments: item.attachments.map((asset) => ({ ...asset })) };
+  };
+
+  const removeQueueItem = ({ sessionId, itemId } = {}) => {
+    const rows = queueRows(sessionId); const index = rows.findIndex((row) => row.id === String(itemId || ""));
+    if (index < 0) throw new Error("排队指令不存在");
+    const [item] = rows.splice(index, 1); if (!rows.length) delete state.queues[String(sessionId)]; save(); return { ...item, attachments: item.attachments.map((asset) => ({ ...asset })) };
+  };
+
+  const shiftQueueItem = (sessionId) => {
+    const rows = queueRows(sessionId); const item = rows.shift() || null; if (!rows.length) delete state.queues[String(sessionId)]; save();
+    return item ? { ...item, attachments: item.attachments.map((asset) => ({ ...asset })) } : null;
+  };
+
+  const clearQueue = (sessionId) => {
+    const id = String(sessionId || ""); const count = (state.queues[id] || []).length; delete state.queues[id]; save(); return { cleared: count };
+  };
+
+  const isQueuePaused = (sessionId) => Boolean(state.queuePauses[String(sessionId || "")]);
+
+  const setQueuePaused = (sessionId, paused) => {
+    const id = String(sessionId || "").trim();
+    if (!id) throw new Error("sessionId 不能为空");
+    if (paused) state.queuePauses[id] = true;
+    else delete state.queuePauses[id];
+    save();
+    return Boolean(paused);
+  };
+
   const registerWorkspaceFile = ({
     sessionId,
     workspaceRoot,
@@ -397,6 +494,8 @@ export function createMobileControlStore({
     authenticate,
     listDevices,
     revokeDevice,
+    getDevicePreferences,
+    updateDevicePreferences,
     getOverlay,
     patchOverlay,
     acquireLease,
@@ -405,6 +504,15 @@ export function createMobileControlStore({
     putAttachment,
     rememberMobileMessage,
     listMobileMessages,
+    listQueue,
+    enqueueQueueItem,
+    prependQueueItem,
+    updateQueueItem,
+    removeQueueItem,
+    shiftQueueItem,
+    clearQueue,
+    isQueuePaused,
+    setQueuePaused,
     registerWorkspaceFile,
     resolveAsset
   };

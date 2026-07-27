@@ -20,7 +20,15 @@ test("mobile approval permits only one-shot low-risk commands", () => {
   assert.equal(safe.permanentOptionId, null);
 });
 
-test("mobile approval routes privileged, destructive and secret access to desktop", () => {
+test("mobile approval permits a non-dangerous one-shot command outside the legacy allowlist", () => {
+  const result = classifyMobileApproval({ command: "sbc doctor", options });
+  assert.equal(result.mobileAllowed, true);
+  assert.equal(result.requiresDesktop, false);
+  assert.equal(result.summary, "一次性执行请求");
+  assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
+});
+
+test("mobile approval permits one-shot privileged and destructive commands", () => {
   for (const command of [
     "sudo launchctl unload /Library/LaunchDaemons/x",
     "rm -rf /Users/me/project",
@@ -28,9 +36,20 @@ test("mobile approval routes privileged, destructive and secret access to deskto
     "security find-generic-password -w service"
   ]) {
     const result = classifyMobileApproval({ command, options });
-    assert.equal(result.mobileAllowed, false, command);
-    assert.equal(result.requiresDesktop, true, command);
+    assert.equal(result.mobileAllowed, true, command);
+    assert.equal(result.requiresDesktop, false, command);
+    assert.deepEqual(result.actions, ["allow_once", "deny_once"], command);
   }
+});
+
+test("mobile approval permits every Codex app-server approval type", () => {
+  const result = classifyMobileApproval({
+    method: "item/permissions/requestApproval",
+    reason: "请求更高权限"
+  });
+  assert.equal(result.mobileAllowed, true);
+  assert.equal(result.requiresDesktop, false);
+  assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
 });
 
 test("mobile approval never offers permanent allow", () => {

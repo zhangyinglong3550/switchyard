@@ -1,6 +1,6 @@
 {
   "name": "@switchyard/desktop",
-  "version": "2.2.20",
+  "version": "2.2.31",
   "private": true,
   "main": "src/main.mjs",
   "scripts": {

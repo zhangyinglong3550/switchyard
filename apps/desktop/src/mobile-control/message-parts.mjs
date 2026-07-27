@@ -29,6 +29,33 @@ function parseArguments(value) {
   try { return JSON.parse(value); } catch { return value; }
 }
 
+function toolTitle(value, { name, command, activity }) {
+  const state = value.state && typeof value.state === "object" ? value.state : {};
+  const explicit = value.title || state.title || state.input?.title || state.metadata?.description;
+  if (explicit) return String(explicit);
+
+  // Codex app-server reports shell work as the generic commandExecution item.
+  // Its useful identity is the actual command, not that transport-level type.
+  const commandLike = /^(exec_command|commandexecution|command_execution|command|shell|bash|terminal|run_command|execute)$/i.test(String(name || ""));
+  const firstCommandLine = String(command || "").split(/\r?\n/).find(Boolean)?.trim() || "";
+  if (commandLike && firstCommandLine) return `执行：${firstCommandLine.slice(0, 180)}`;
+  if (/^write_stdin$/i.test(String(name || ""))) return "继续读取命令输出";
+  if (/^update_plan$/i.test(String(name || ""))) return "更新执行计划";
+  if (activity === "read" && !name) return "读取文件";
+  if (activity === "search" && !name) return "搜索内容";
+  if (activity === "edit" && !name) return "修改文件";
+  if (activity === "command" && firstCommandLine) return `执行：${firstCommandLine.slice(0, 180)}`;
+  return "";
+}
+
+export function reasoningText(value, maxLength = 20_000) {
+  if (!value || typeof value !== "object") return textValue(value, maxLength);
+  // Different Codex transports put the same summary in text, summary, content
+  // or delta. Keep this deliberately summary-only: raw chain-of-thought is not
+  // exposed or reconstructed by Switchyard.
+  return textValue(value.text ?? value.summary ?? value.content ?? value.delta ?? value.reasoning ?? "", maxLength);
+}
+
 function toolFiles(value, activity) {
   const rows = [];
   const seen = new Set();
@@ -76,8 +103,8 @@ export function toolFrom(value = {}, fallbackStatus = "completed") {
   const output = value.output ?? value.result ?? value.aggregated_output ?? value.rawOutput ?? state.output ?? state.metadata?.output ?? "";
   const error = value.error ?? state.error ?? "";
   const name = value.name || value.tool || value.toolName || value.kind?.tool_type || value.type || "工具调用";
-  const title = value.title || state.title || state.input?.title || state.metadata?.description || "";
   const activity = toolActivity(value);
+  const title = toolTitle(value, { name, command, activity });
   return {
     id: String(value.callId || value.call_id || value.callID || value.toolCallId || value.tool_call_id || value.id || ""),
     name: String(name || "工具调用"),

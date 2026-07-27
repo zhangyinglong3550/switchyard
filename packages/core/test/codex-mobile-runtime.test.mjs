@@ -680,6 +680,45 @@ test("Codex native resume materializes image attachments, passes --image and rem
   assert.equal(calls[0].at(-1), "看图");
 });
 
+test("Codex native resume emits reasoning summaries and descriptive tool titles", async () => {
+  const child = fakeChild();
+  const runtime = createCodexRuntime({
+    client: fakeRuntimeClient(() => ({})),
+    scanSessions: () => [{
+      sessionId: "cli-reasoning-thread",
+      cwd: "/tmp/codex-native-smoke",
+      filePath: "/missing-rollout.jsonl",
+      title: "CLI 推理任务",
+      originator: "codex_cli_rs",
+      mtimeMs: 1
+    }],
+    command: "codex-test",
+    spawnProcess: () => {
+      queueMicrotask(() => {
+        child.stdout.emit("data", `${JSON.stringify({
+          type: "item.updated",
+          item: { type: "reasoning", summary: [{ type: "summary_text", text: "先检查当前状态" }] }
+        })}\n${JSON.stringify({
+          type: "item.completed",
+          item: { type: "command_execution", id: "call-status", arguments: { cmd: "git status --short" } }
+        })}\n${JSON.stringify({ type: "turn.completed" })}\n`);
+        child.emit("close", 0);
+      });
+      return child;
+    }
+  });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+
+  await runtime.sendMessage("cli-reasoning-thread", { text: "继续" });
+
+  assert.deepEqual(events.map((event) => [event.type, event.summary, event.tool?.title || ""]), [
+    ["thinking", "先检查当前状态", ""],
+    ["tool", "执行：git status --short", "执行：git status --short"],
+    ["status", "completed", ""]
+  ]);
+});
+
 test("Codex runtime normalizes notifications and tracks the active turn", async () => {
   const client = fakeRuntimeClient((method) => {
     if (method === "turn/start") return { turn: { id: "turn-1" } };

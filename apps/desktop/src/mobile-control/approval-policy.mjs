@@ -42,21 +42,29 @@ export function classifyMobileApproval(input = {}) {
   const lowRisk = Boolean(command) && LOW_RISK.some((pattern) => pattern.test(command));
   const codexCommand = method === "item/commandExecution/requestApproval";
   const codexFileChange = method === "item/fileChange/requestApproval";
-  const acpAllowed = Boolean(allow?.optionId && reject?.optionId && lowRisk && !dangerous);
-  const codexAllowed = codexFileChange || (codexCommand && lowRisk && !dangerous);
+  // Paired mobile devices are trusted approval clients. Keep the action scoped
+  // to this single request: neither ACP nor Codex receives a permanent grant.
+  // Codex uses the same accept/decline reply for command, file, and permission
+  // prompts, so every app-server approval can be resolved on the phone.
+  const acpAllowed = Boolean(allow?.optionId && reject?.optionId);
+  const codexAllowed = method.includes("requestApproval");
   const mobileAllowed = acpAllowed || codexAllowed;
   return {
     mobileAllowed,
-    requiresDesktop: !mobileAllowed,
+    // Retained in the payload for backward compatibility with already-paired
+    // clients. New approvals are always handled on the mobile device.
+    requiresDesktop: false,
     risk: dangerous ? "high" : lowRisk ? "low" : "unknown",
-    summary: dangerous
-      ? "高风险操作，仅允许在桌面确认"
-      : codexFileChange
-        ? "Codex 请求修改工作区文件"
-      : lowRisk
-        ? "低风险只读或验证命令"
-        : "无法确认风险，仅允许在桌面确认",
-    protocol: codexCommand || codexFileChange ? "codex" : "acp",
+    summary: codexFileChange
+      ? "Codex 请求修改工作区文件"
+      : dangerous
+        ? "一次性执行请求"
+        : lowRisk
+          ? "低风险只读或验证命令"
+          : mobileAllowed
+            ? "一次性执行请求"
+            : "当前 Agent 未提供可执行的审批选项",
+    protocol: method.includes("requestApproval") ? "codex" : "acp",
     allowOptionId: acpAllowed ? String(allow.optionId) : null,
     rejectOptionId: reject?.optionId ? String(reject.optionId) : null,
     permanentOptionId: null,
