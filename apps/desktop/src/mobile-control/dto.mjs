@@ -35,7 +35,8 @@ const EVENT_TYPES = new Set([
   "model",
   "diff",
   "usage",
-  "error"
+  "error",
+  "file_delivery"
 ]);
 
 export function cleanMobileText(value, maxLength = 4000) {
@@ -71,6 +72,11 @@ function projectAsset(value) {
     mimeType: cleanMobileText(value.mimeType || "application/octet-stream", 160),
     kind: ["image", "text", "file", "workspace_file"].includes(value.kind) ? value.kind : "file",
     byteLength: Math.max(0, Number(value.byteLength || 0) || 0),
+    source: ["upload", "tool", "delivery"].includes(value.source) ? value.source : "tool",
+    createdAt: value.createdAt ? String(value.createdAt) : null,
+    updatedAt: value.updatedAt ? String(value.updatedAt) : (value.createdAt ? String(value.createdAt) : null),
+    ...(value.deliveryAt ? { deliveryAt: String(value.deliveryAt) } : {}),
+    ...(value.expiresAt ? { expiresAt: String(value.expiresAt) } : {}),
     ...(value.activity ? {
       activity: ["read", "search", "edit", "command", "other"].includes(value.activity) ? value.activity : "other"
     } : {})
@@ -129,6 +135,7 @@ export function projectMobileEvent(event = {}) {
       }
     } : {}),
     ...(Array.isArray(event.attachments) ? { attachments: event.attachments.map(projectAsset).filter(Boolean) } : {}),
+    ...(event.delivery ? { delivery: projectAsset(event.delivery) } : {}),
     ...(event.tool ? { tool: projectTool(event.tool) } : {})
   };
 }

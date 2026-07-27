@@ -224,12 +224,24 @@ export function createSessionRegistry({
         });
         return;
       }
+      let delivery = null;
+      if (event.type === "file_delivery" && event.delivery?.path) {
+        try {
+          delivery = store.registerWorkspaceFile({
+            sessionId: mobileSessionId,
+            workspaceRoot: sessionDirectories.get(mobileSessionId) || "",
+            filePath: path.resolve(sessionDirectories.get(mobileSessionId) || "", String(event.delivery.path)),
+            activity: "edit", source: "delivery", deliveryAt: new Date().toISOString()
+          });
+        } catch {}
+      }
       ledger.append(projectMobileEvent({
         sessionId: mobileSessionId,
         type: event.type,
         summary: event.summary,
         role: event.role,
         attachments: event.attachments,
+        ...(delivery ? { delivery } : {}),
         tool: enrichToolFiles(event.tool, {
           store,
           sessionId: mobileSessionId,

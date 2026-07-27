@@ -332,6 +332,40 @@ test("registry converts tool file paths into safe clickable file references", as
   assert.equal(registry.resolveAsset(detail.messages[0].tool.files[0].id).path, file);
 });
 
+test("registry turns structured file_delivery events into safe delivered assets", async (t) => {
+  const { registry, runtime, ledger } = fixture(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-file-delivery-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, "exports", "report.xlsx");
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.writeFileSync(output, "sheet bytes");
+  runtime.listSessions = async () => [{
+    id: "native-1", agentId: "codex", name: "任务", state: "completed", model: "p1/m1", directory: root,
+    capabilities: runtime.capabilities
+  }];
+  await registry.listSessions();
+
+  runtime.emit({
+    sessionId: "native-1",
+    type: "file_delivery",
+    summary: "已生成报表",
+    delivery: { path: output, name: "report.xlsx" }
+  });
+  const delivered = ledger.list({ after: 0 }).at(-1);
+  assert.equal(delivered.delivery.name, "report.xlsx");
+  assert.equal(delivered.delivery.source, "delivery");
+  assert.doesNotMatch(JSON.stringify(delivered), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(registry.resolveAsset(delivered.delivery.id).path, output);
+
+  runtime.emit({
+    sessionId: "native-1",
+    type: "file_delivery",
+    summary: "越界文件",
+    delivery: { path: path.join(root, "..", "outside.txt") }
+  });
+  assert.equal(ledger.list({ after: 0 }).at(-1).delivery, undefined);
+});
+
 test("registry validates and stores agent-native next-turn settings", async (t) => {
   const { registry, calls } = fixture(t);
   const sessionId = encodeMobileSessionId("codex", "native-1");
