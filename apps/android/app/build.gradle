@@ -8,7 +8,7 @@ def environmentOrProperty = { String name, String fallback = "" ->
   return value == null || value.toString().trim().isEmpty() ? fallback : value.toString().trim()
 }
 
-def androidVersionCode = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_CODE", "4").toInteger()
+def androidVersionCode = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_CODE", "5").toInteger()
 def androidVersionName = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_NAME", "0.1.3")
 def storeFilePath = environmentOrProperty("SWITCHYARD_ANDROID_STORE_FILE")
 def storePassword = environmentOrProperty("SWITCHYARD_ANDROID_STORE_PASSWORD")

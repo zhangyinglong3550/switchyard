@@ -44,3 +44,9 @@ test("Android launcher uses the checked-in desktop Switchyard icon", () => {
     assert.ok(fs.existsSync(path.join(repositoryRoot, `apps/android/app/src/main/res/mipmap-${density}/ic_launcher.png`)));
   }
 });
+
+test("Android WebView bypasses stale mobile UI caches after app updates", () => {
+  const activity = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
+  assert.match(activity, /setCacheMode\(android\.webkit\.WebSettings\.LOAD_NO_CACHE\)/);
+  assert.match(activity, /clearCache\(true\)/);
+});

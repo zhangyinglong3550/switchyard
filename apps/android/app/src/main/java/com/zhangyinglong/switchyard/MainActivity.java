@@ -67,6 +67,11 @@ public final class MainActivity extends Activity {
     webView.setBackgroundColor(Color.rgb(247, 244, 239));
     webView.getSettings().setJavaScriptEnabled(true);
     webView.getSettings().setDomStorageEnabled(true);
+    // The mobile UI is served by the paired desktop. Never reuse an older
+    // WebView HTTP cache after upgrading the Android shell, otherwise a new
+    // launcher icon can misleadingly coexist with an old session interface.
+    webView.getSettings().setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
+    webView.clearCache(true);
     webView.getSettings().setAllowFileAccess(false);
     // Attachments selected through Android's Storage Access Framework are
     // content:// URIs. WebView needs content access to turn the selected URI
