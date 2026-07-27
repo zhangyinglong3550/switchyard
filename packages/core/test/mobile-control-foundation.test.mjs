@@ -162,6 +162,16 @@ test("mobile store exposes only workspace files through opaque references", (t) 
     filePath: path.join(root, "outside.txt"),
     activity: "read"
   }), /工作目录/);
+  const linked = path.join(workspace, "linked-outside.txt");
+  const outside = path.join(root, "outside.txt");
+  fs.writeFileSync(outside, "outside");
+  fs.symlinkSync(outside, linked);
+  assert.throws(() => store.registerWorkspaceFile({
+    sessionId: "s1",
+    workspaceRoot: workspace,
+    filePath: linked,
+    activity: "read"
+  }), /工作目录/);
 });
 
 test("mobile store overlays and write leases are scoped per session", (t) => {

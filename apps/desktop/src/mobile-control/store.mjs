@@ -128,8 +128,12 @@ function mimeTypeForFile(file) {
   })[extension] || "application/octet-stream";
 }
 
+function realPath(value) {
+  try { return fs.realpathSync.native(path.resolve(value)); } catch { return ""; }
+}
+
 function within(candidate, root) {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
@@ -515,10 +519,11 @@ export function createMobileControlStore({
     source = "tool",
     deliveryAt = null
   } = {}) => {
-    const rootPath = path.resolve(String(workspaceRoot || ""));
-    const target = path.resolve(String(filePath || ""));
+    const requestedPath = path.resolve(String(filePath || ""));
+    const rootPath = realPath(String(workspaceRoot || ""));
+    const target = realPath(requestedPath);
     if (!rootPath || !target || !within(target, rootPath)) throw new Error("文件不在当前工作目录内");
-    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error("文件不存在或不可读取");
+    if (!fs.statSync(target).isFile()) throw new Error("文件不存在或不可读取");
     const stat = fs.statSync(target);
     const id = `asset_${sha256(`${sessionId}\0${target}`).slice(0, 32)}`;
     state.assets[id] = {
@@ -530,8 +535,9 @@ export function createMobileControlStore({
       byteLength: stat.size,
       activity: ["read", "search", "edit", "command", "other"].includes(activity) ? activity : "other",
       storage: "workspace",
+      workspaceRoot: rootPath,
       source: source === "delivery" ? "delivery" : "tool",
-      path: target,
+      path: requestedPath,
       createdAt: iso(now()),
       updatedAt: iso(now()),
       ...(deliveryAt ? { deliveryAt: String(deliveryAt) } : {})
@@ -542,7 +548,12 @@ export function createMobileControlStore({
 
   const resolveAsset = (assetId) => {
     const asset = state.assets[String(assetId || "")];
-    if (!asset?.path || !fs.existsSync(asset.path) || !fs.statSync(asset.path).isFile()) return null;
+    const target = realPath(asset?.path || "");
+    if (!target || !fs.statSync(target).isFile()) return null;
+    if (asset.storage === "workspace") {
+      const workspaceRoot = realPath(asset.workspaceRoot || "");
+      if (!workspaceRoot || !within(target, workspaceRoot)) return null;
+    }
     return { ...publicAsset(asset), path: asset.path };
   };
 
