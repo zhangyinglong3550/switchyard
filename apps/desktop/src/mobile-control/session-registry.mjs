@@ -843,6 +843,10 @@ export function createSessionRegistry({
       sessionId: approval.sessionId,
       title: "操作审批",
       summary: approval.summary,
+      detail: approval.detail ? {
+        label: String(approval.detail.label || "请求内容").slice(0, 120),
+        content: String(approval.detail.content || "").slice(0, 1600)
+      } : null,
       risk: approval.risk,
       requiresDesktop: approval.requiresDesktop,
       actions: [...approval.actions],

@@ -28,6 +28,24 @@ function commandText(input = {}) {
   ).trim();
 }
 
+function approvalDetail(input = {}, command = "") {
+  const method = String(input.method || input.runtimeEvent || "");
+  const reason = String(input.reason || input.message || "").trim();
+  const files = Array.isArray(input.files) ? input.files : Array.isArray(input.changes) ? input.changes : [];
+  const fileText = files.map((file) => typeof file === "string" ? file : file?.path || file?.filePath || "").filter(Boolean).join("\n");
+  const label = command ? "将执行的命令" : fileText ? "将修改的文件" : method.includes("permissions") ? "权限请求" : "请求详情";
+  const content = command || fileText || reason || "Agent 请求继续执行此操作";
+  // Detail is intentionally a bounded, redacted explanation rather than raw protocol input.
+  return {
+    label,
+    content: content
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+      .replace(/\b(?:sk|sk-proj|api)[-_][A-Za-z0-9_-]{8,}\b/gi, "[REDACTED]")
+      .replace(/([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)\s*[=:]\s*)[^\s'\"]+/g, "$1[REDACTED]")
+      .slice(0, 1600)
+  };
+}
+
 export function classifyMobileApproval(input = {}) {
   const method = String(input.method || input.runtimeEvent || "");
   const options = Array.isArray(input.options)
@@ -40,7 +58,6 @@ export function classifyMobileApproval(input = {}) {
   const command = commandText(input);
   const dangerous = HIGH_RISK.some((pattern) => pattern.test(command));
   const lowRisk = Boolean(command) && LOW_RISK.some((pattern) => pattern.test(command));
-  const codexCommand = method === "item/commandExecution/requestApproval";
   const codexFileChange = method === "item/fileChange/requestApproval";
   // Paired mobile devices are trusted approval clients. Keep the action scoped
   // to this single request: neither ACP nor Codex receives a permanent grant.
@@ -55,6 +72,7 @@ export function classifyMobileApproval(input = {}) {
     // clients. New approvals are always handled on the mobile device.
     requiresDesktop: false,
     risk: dangerous ? "high" : lowRisk ? "low" : "unknown",
+    detail: approvalDetail(input, command),
     summary: codexFileChange
       ? "Codex 请求修改工作区文件"
       : dangerous

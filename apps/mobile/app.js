@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 const TOKEN_KEY = "switchyard_mobile_token";
 const CURSOR_KEY = "switchyard_mobile_event_cursor";
 const PREFERENCES_KEY = "switchyard_mobile_preferences";
+const GROUP_STATE_KEY = "switchyard_mobile_group_states";
+const PINNED_PROJECTS_KEY = "switchyard_mobile_pinned_projects";
 function hasNativeTokenStore() {
   try { return typeof window.SwitchyardNative?.getToken === "function"; } catch { return false; }
 }
@@ -42,7 +44,22 @@ let pendingDeleteSessionIds = [];
 let mobileRefreshInProgress = false;
 let pullRefreshStartY = null;
 let pullRefreshDistance = 0;
-const collapsedGroups = new Set();
+function localStringSet(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || "[]").filter((value) => typeof value === "string")); } catch { return new Set(); }
+}
+function localGroupStates() {
+  try { const value = JSON.parse(localStorage.getItem(GROUP_STATE_KEY) || "{}"); return value && typeof value === "object" ? value : {}; } catch { return {}; }
+}
+let groupStates = localGroupStates();
+const pinnedProjects = localStringSet(PINNED_PROJECTS_KEY);
+function isGroupCollapsed(name) { return groupStates[name] !== false; }
+function setGroupCollapsed(name, collapsed) { groupStates[name] = Boolean(collapsed); localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupStates)); }
+function setProjectPinned(name, pinned) { if (pinned) pinnedProjects.add(name); else pinnedProjects.delete(name); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
+function renameProjectPreferences(oldName, newName) {
+  if (oldName === newName) return;
+  if (Object.hasOwn(groupStates, oldName)) { groupStates[newName] = groupStates[oldName]; delete groupStates[oldName]; localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupStates)); }
+  if (pinnedProjects.delete(oldName)) { pinnedProjects.add(newName); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
+}
 let eventLoopStopped = false;
 let refreshTimer = null;
 let activeAttachments = [];
@@ -328,9 +345,10 @@ function sessionRowHtml(session) {
   const waiting = session.state === "waiting_for_approval";
   const selected = selectedSessionIds.has(session.id);
   const tag = running ? '<span class="tag tag-run">RUNNING</span>' : waiting ? '<span class="tag tag-wait">待审批</span>' : `<span class="tag tag-agent">${escapeHtml(agentLabel(session.agent).replace(" Build", "").replace(" Code", "").toUpperCase())}</span>`;
-  const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""} swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta"><time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
+  const pinned = session.pinned ? '<span class="session-pinned" aria-label="已置顶">⌖</span>' : "";
+  const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""} swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta">${pinned}<time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
   if (sessionSelectionMode) return `<div class="session-select-item">${row}</div>`;
-  return `<div class="swipe-item" data-swipe-id="${escapeHtml(session.id)}"><div class="swipe-actions"><button type="button" class="swipe-btn rename" data-session-action="rename" data-id="${escapeHtml(session.id)}">重命名</button><button type="button" class="swipe-btn archive" data-session-action="archive" data-id="${escapeHtml(session.id)}">${archivedView ? "取消归档" : "归档"}</button><button type="button" class="swipe-btn danger" data-session-action="delete" data-id="${escapeHtml(session.id)}">删除</button></div>${row}</div>`;
+  return `<div class="swipe-item" data-swipe-id="${escapeHtml(session.id)}"><div class="swipe-actions"><button type="button" class="swipe-btn pin" data-session-action="pin" data-pinned="${session.pinned ? "true" : "false"}" data-id="${escapeHtml(session.id)}">${session.pinned ? "取消置顶" : "置顶"}</button><button type="button" class="swipe-btn rename" data-session-action="rename" data-id="${escapeHtml(session.id)}">重命名</button><button type="button" class="swipe-btn archive" data-session-action="archive" data-id="${escapeHtml(session.id)}">${archivedView ? "取消归档" : "归档"}</button><button type="button" class="swipe-btn danger" data-session-action="delete" data-id="${escapeHtml(session.id)}">删除</button></div>${row}</div>`;
 }
 
 function activeSessionRows() { return allSessions.filter((session) => ["running", "queued", "waiting_for_approval"].includes(session.state)); }
@@ -412,16 +430,18 @@ function renderSessionList() {
       groups.get(key).push(session);
     }
     const sorted = [...groups.entries()].sort((a, b) => {
+      if (pinnedProjects.has(a[0]) !== pinnedProjects.has(b[0])) return pinnedProjects.has(a[0]) ? -1 : 1;
       const latest = (items) => Math.max(...items.map((item) => Date.parse(item.updatedAt || 0) || 0));
       return latest(b[1]) - latest(a[1]);
     });
     $("#session-list").innerHTML = sorted.map(([name, items]) => {
-      const collapsed = collapsedGroups.has(name);
+      const collapsed = isGroupCollapsed(name);
       const hasRunning = items.some((item) => ["running", "queued"].includes(item.state));
       const workspace = workspaces.find((item) => item.name === name);
       const path = workspace?.path || workspace?.id || "";
-      const actions = path ? `<div class="group-menu-wrap"><button type="button" class="group-more" data-workspace-menu aria-label="管理工作目录">··</button><div class="group-menu" hidden><button type="button" data-workspace-rename="${escapeHtml(path)}" data-workspace-name="${escapeHtml(name)}">重命名</button><button type="button" class="danger-text" data-workspace-delete="${escapeHtml(path)}">删除</button></div></div>` : "";
-      return `<div class="workspace-group${collapsed ? " collapsed" : ""}"><div class="group-title-row"><button class="group-head" type="button" data-group="${escapeHtml(name)}">${icon("folder")}<span class="group-name">${escapeHtml(name)}</span>${hasRunning ? '<i class="group-live"></i>' : ""}<span class="group-count">${items.length}</span><svg class="group-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>${actions}</div><div class="group-items">${items.map(sessionRowHtml).join("")}</div></div>`;
+      const projectPinned = pinnedProjects.has(name);
+      const actions = `<div class="group-menu-wrap"><button type="button" class="group-more" data-workspace-menu aria-label="管理项目">··</button><div class="group-menu" hidden><button type="button" data-project-pin="${escapeHtml(name)}" data-pinned="${projectPinned ? "true" : "false"}">${projectPinned ? "取消置顶项目" : "置顶项目"}</button>${path ? `<button type="button" data-workspace-rename="${escapeHtml(path)}" data-workspace-name="${escapeHtml(name)}">重命名</button><button type="button" class="danger-text" data-workspace-delete="${escapeHtml(path)}">删除</button>` : ""}</div></div>`;
+      return `<div class="workspace-group${collapsed ? " collapsed" : ""}${projectPinned ? " pinned-project" : ""}"><div class="group-title-row"><button class="group-head" type="button" data-group="${escapeHtml(name)}">${icon("folder")}<span class="group-name">${projectPinned ? '<span class="project-pinned" aria-label="项目已置顶">⌖</span>' : ""}${escapeHtml(name)}</span>${hasRunning ? '<i class="group-live"></i>' : ""}<span class="group-count">${items.length}</span><svg class="group-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>${actions}</div><div class="group-items">${items.map(sessionRowHtml).join("")}</div></div>`;
     }).join("");
   }
   const hasMore = matchingRows.length > rows.length;
@@ -437,7 +457,7 @@ function renderStatusSummary() {
   const waiting = pendingApprovals.length;
   if (!running && !waiting) { strip.hidden = true; strip.innerHTML = ""; return; }
   strip.hidden = false;
-  strip.innerHTML = `${running ? '<span class="spin"></span>' : ""}${running ? `${running} 个任务正在运行` : ""}${running && waiting ? " · " : ""}${waiting ? `<b>${waiting} 个等待你审批</b>` : ""}`;
+  strip.innerHTML = `${running ? `<button type="button" class="status-strip-action" data-open-active-sessions><span class="spin"></span><span>${running} 个任务正在运行</span><span class="status-strip-arrow">›</span></button>` : ""}${running && waiting ? '<span class="status-strip-divider">·</span>' : ""}${waiting ? `<button type="button" class="status-strip-action status-strip-approvals" data-open-approvals><b>${waiting} 个等待你审批</b><span class="status-strip-arrow">›</span></button>` : ""}`;
 }
 
 function requestSessionDeletion(ids) {
@@ -535,7 +555,8 @@ function approvalCardHtml(approval, { sessionScoped = false } = {}) {
   const session = allSessions.find((item) => item.id === approval.sessionId);
   const title = sessionScoped ? "等待你的授权" : session?.title || approval.title || "待审批任务";
   const actions = `<div class="approval-actions"><button data-approval="${escapeHtml(approval.id)}" data-decision="deny_once" type="button">拒绝</button><button class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once" type="button">允许一次</button></div>`;
-  return `<article class="approval-card" data-approval-card="${escapeHtml(approval.id)}"><div class="r1"><i></i>${escapeHtml(title)}</div><div class="r2">${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</div>${actions}</article>`;
+  const detail = approval.detail?.content ? `<section class="approval-detail"><span>${escapeHtml(approval.detail.label || "请求内容")}</span><pre>${escapeHtml(approval.detail.content)}</pre></section>` : "";
+  return `<article class="approval-card" data-approval-card="${escapeHtml(approval.id)}"><div class="r1"><i></i>${escapeHtml(title)}</div><div class="r2">${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</div>${detail}${actions}</article>`;
 }
 function renderApprovalInbox() {
   $("#approval-inbox").innerHTML = pendingApprovals.map((approval) => approvalCardHtml(approval)).join("");
@@ -1206,7 +1227,10 @@ document.addEventListener("click", async (event) => {
     const switchSession = event.target.closest("[data-switch-session]");
     if (switchSession) { closeSessionSwitcher(); await openSession(switchSession.dataset.switchSession); return; }
     const filter = event.target.closest("[data-filter]"); if (filter) { selectedFilter = filter.dataset.filter; sessionDisplayLimit = SESSION_PAGE_SIZE; renderFilters(); renderSessionList(); return; }
-    const group = event.target.closest("[data-group]"); if (group) { const name = group.dataset.group; collapsedGroups.has(name) ? collapsedGroups.delete(name) : collapsedGroups.add(name); renderSessionList(); return; }
+    if (event.target.closest("[data-open-active-sessions]")) { const active = activeSessionRows(); if (active.length === 1) await openSession(active[0].id); else openSessionSwitcher(); return; }
+    if (event.target.closest("[data-open-approvals]")) { document.querySelector("#approval-inbox")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+    const group = event.target.closest("[data-group]"); if (group) { const name = group.dataset.group; setGroupCollapsed(name, !isGroupCollapsed(name)); renderSessionList(); return; }
+    const projectPin = event.target.closest("[data-project-pin]"); if (projectPin) { const name = projectPin.dataset.projectPin; setProjectPinned(name, projectPin.dataset.pinned !== "true"); closeWorkspaceMenus(); renderSessionList(); toast(projectPin.dataset.pinned === "true" ? "已取消置顶项目" : "已置顶项目"); return; }
     const agent = event.target.closest("[data-agent]"); if (agent) { selectedAgent = agent.dataset.agent; renderAgentPicker(); await loadModels(); if (document.activeElement === $("#prompt")) await updateCommandPicker($("#prompt")); return; }
     const workspaceManage = event.target.closest("[data-workspace-manage]"); if (workspaceManage) {
       const item = workspaceManage.closest(".swipe-item");
@@ -1246,6 +1270,12 @@ document.addEventListener("click", async (event) => {
       const id = sessionAction.dataset.id;
       const action = sessionAction.dataset.sessionAction;
       closeAllSwipe();
+      if (action === "pin") {
+        const pinned = sessionAction.dataset.pinned !== "true";
+        await api(`/mobile/v1/sessions/${encodeURIComponent(id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) });
+        toast(pinned ? "已置顶会话" : "已取消置顶会话");
+        return loadSessions();
+      }
       if (action === "rename") {
         const session = allSessions.find((item) => item.id === id);
         const title = prompt("会话名称", session?.title || "");
@@ -1269,6 +1299,7 @@ document.addEventListener("click", async (event) => {
       const name = prompt("文件夹新名称", oldName);
       if (!name?.trim() || name.trim() === oldName) return;
       const result = await api("/mobile/v1/workspaces/directories/rename", { method: "POST", body: JSON.stringify({ path: oldPath, name: name.trim() }) });
+      renameProjectPreferences(oldName, name.trim());
       if (selectedWorkspace === oldPath) selectedWorkspace = result.path;
       if (workspaceRename.closest("#workspace-browser-list") && browsedWorkspace?.path) await browseWorkspace(browsedWorkspace.path);
       else await Promise.all([loadWorkspaces(), loadSessions()]);
@@ -1309,7 +1340,7 @@ document.addEventListener("click", async (event) => {
     if (event.target.closest("#session-selection-delete")) { requestSessionDeletion([...selectedSessionIds]); return; }
     if (event.target.closest("#close-session-delete-sheet") || event.target.closest("#cancel-session-delete") || event.target === $("#session-delete-sheet")) { hideSessionDeleteSheet(); return; }
     if (event.target.closest("#confirm-session-delete")) { await confirmSessionDeletion(); return; }
-    if (event.target.closest("#more")) { $("#session-menu").hidden = !$("#session-menu").hidden; return; }
+    if (event.target.closest("#more")) { const menu = $("#session-menu"); menu.hidden = !menu.hidden; const pinAction = $("#session-pin-action"); if (pinAction) pinAction.textContent = current?.pinned ? "取消置顶会话" : "置顶会话"; return; }
     if (event.target.closest("#open-model-sheet") || event.target.closest("#retry-model-sheet")) return openModelSheet();
     if (event.target.closest("#close-model-sheet") || event.target === $("#model-sheet")) { hideModelSheet(); return; }
     if (event.target.closest("#save-session-settings") && current) {
@@ -1356,6 +1387,7 @@ document.addEventListener("click", async (event) => {
     }
     const action = event.target.dataset.action; if (!action || !current) return;
     if (action === "cancel") { showStopSessionSheet(); return; }
+    if (action === "pin") { const pinned = !current.pinned; $("#session-menu").hidden = true; await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }); current.pinned = pinned; await loadSessions(); toast(pinned ? "已置顶会话" : "已取消置顶会话"); return; }
     if (action === "refresh") { $("#session-menu").hidden = true; return refreshMobileData(); }
     if (action === "delete") { $("#session-menu").hidden = true; requestSessionDeletion([current.id]); return; }
     let body = {}; if (action === "rename") body.title = prompt("会话名称", current.title) || current.title;

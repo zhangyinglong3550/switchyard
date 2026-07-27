@@ -18,6 +18,7 @@ test("mobile approval permits only one-shot low-risk commands", () => {
   assert.equal(safe.allowOptionId, "allow");
   assert.equal(safe.rejectOptionId, "reject");
   assert.equal(safe.permanentOptionId, null);
+  assert.deepEqual(safe.detail, { label: "将执行的命令", content: "git status --short" });
 });
 
 test("mobile approval permits a non-dangerous one-shot command outside the legacy allowlist", () => {
@@ -56,4 +57,10 @@ test("mobile approval never offers permanent allow", () => {
   const result = classifyMobileApproval({ command: "npm test", options });
   assert.equal(result.permanentOptionId, null);
   assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
+});
+
+test("mobile approval redacts credentials in the displayed detail", () => {
+  const result = classifyMobileApproval({ command: "curl -H 'Authorization: Bearer secret-token-value'", options });
+  assert.match(result.detail.content, /Bearer \[REDACTED\]/);
+  assert.doesNotMatch(result.detail.content, /secret-token-value/);
 });

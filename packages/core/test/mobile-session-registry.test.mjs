@@ -433,7 +433,9 @@ test("registry exposes one-shot ACP approvals to mobile", async (t) => {
   const approvals = registry.listApprovals();
   assert.equal(approvals.length, 1);
   assert.deepEqual(approvals[0].actions, ["allow_once", "deny_once"]);
-  assert.doesNotMatch(JSON.stringify(approvals[0]), /git status|allow_always/);
+  assert.equal(approvals[0].detail.label, "将执行的命令");
+  assert.equal(approvals[0].detail.content, "git status --short");
+  assert.doesNotMatch(JSON.stringify(approvals[0]), /allow_always/);
   await registry.resolveApproval(approvals[0].id, "allow_once");
   assert.deepEqual(calls.at(-1), [
     "respond",
