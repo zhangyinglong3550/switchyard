@@ -48,6 +48,8 @@ let lastDetailFingerprint = "";
 const sessionDetailCache = new Map();
 const SESSION_DETAIL_CACHE_TTL_MS = 5 * 60_000;
 const INITIAL_MESSAGE_LIMIT = 120;
+const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const commandCache = new Map();
 let commandPickerState = null;
 let commandRequestSeq = 0;
@@ -587,16 +589,35 @@ function attachmentIcon(asset) {
   const extension = String(asset?.name || "").split(".").pop().slice(0, 5).toUpperCase();
   return extension && extension !== String(asset?.name || "").toUpperCase() ? extension : "FILE";
 }
+function assetSourceLabel(asset = {}) {
+  if (asset.source === "delivery") return "本轮交付";
+  if (asset.source === "upload") return "手机上传";
+  if (asset.activity === "edit") return "Agent 修改";
+  return "相关文件";
+}
+function assetMetadataLabel(asset = {}) {
+  const size = asset.byteLength ? `${Math.ceil(asset.byteLength / 1024)} KB` : "";
+  const source = assetSourceLabel(asset);
+  return [source, size].filter(Boolean).join(" · ") || "点击打开";
+}
+function renderAttachment(asset = {}, { delivered = false } = {}) {
+  const image = asset.kind === "image" || String(asset.mimeType || "").startsWith("image/");
+  const open = asset.id ? `data-attachment-open="${escapeHtml(asset.id)}"` : asset.preview ? `data-attachment-preview="${escapeHtml(asset.preview)}"` : "";
+  const metadata = `data-asset-name="${escapeHtml(asset.name || "文件")}" data-asset-mime="${escapeHtml(asset.mimeType || "application/octet-stream")}" data-asset-kind="${escapeHtml(asset.kind || "file")}" data-asset-source="${escapeHtml(asset.source || "")}"`;
+  const deliveryClass = delivered ? " delivered-file" : "";
+  return image
+    ? `<button type="button" class="message-attachment image${deliveryClass}" ${open} ${metadata}><img ${asset.preview ? `src="${escapeHtml(asset.preview)}"` : ""} data-asset-image="${escapeHtml(asset.id || "")}" alt="${escapeHtml(asset.name || "图片")}"><span>${escapeHtml(asset.name || "图片")}</span></button>`
+    : `<button type="button" class="message-attachment file${deliveryClass}" ${open} ${metadata}><i>${escapeHtml(attachmentIcon(asset))}</i><span><strong>${escapeHtml(asset.name || "文件")}</strong><small>${escapeHtml(assetMetadataLabel(asset))}</small></span></button>`;
+}
 function renderMessageAttachments(attachments = []) {
   if (!attachments.length) return "";
-  return `<div class="message-attachments">${attachments.map((asset) => {
-    const image = asset.kind === "image" || String(asset.mimeType || "").startsWith("image/");
-    const open = asset.id ? `data-attachment-open="${escapeHtml(asset.id)}"` : asset.preview ? `data-attachment-preview="${escapeHtml(asset.preview)}"` : "";
-    const metadata = `data-asset-name="${escapeHtml(asset.name || "文件")}" data-asset-mime="${escapeHtml(asset.mimeType || "application/octet-stream")}" data-asset-kind="${escapeHtml(asset.kind || "file")}"`;
-    return image
-      ? `<button type="button" class="message-attachment image" ${open} ${metadata}><img ${asset.preview ? `src="${escapeHtml(asset.preview)}"` : ""} data-asset-image="${escapeHtml(asset.id || "")}" alt="${escapeHtml(asset.name || "图片")}"><span>${escapeHtml(asset.name || "图片")}</span></button>`
-      : `<button type="button" class="message-attachment file" ${open} ${metadata}><i>${escapeHtml(attachmentIcon(asset))}</i><span><strong>${escapeHtml(asset.name || "文件")}</strong><small>${asset.byteLength ? `${Math.ceil(asset.byteLength / 1024)} KB` : "点击打开"}</small></span></button>`;
-  }).join("")}</div>`;
+  return `<div class="message-attachments">${attachments.map((asset) => renderAttachment(asset)).join("")}</div>`;
+}
+function renderDeliveredFile(delivery) {
+  if (!delivery?.id) return "";
+  const timestamp = delivery.deliveryAt || delivery.createdAt;
+  const at = timestamp ? new Date(timestamp).toLocaleString() : "刚刚";
+  return `<section class="delivered-file" aria-label="本轮交付"><div class="produced-files-head"><span>本轮交付</span><small>${escapeHtml(at)}</small></div><div class="message-attachments">${renderAttachment(delivery, { delivered: true })}</div></section>`;
 }
 async function fetchAssetObjectUrl(assetId) {
   if (!assetId) return "";
@@ -739,7 +760,7 @@ function renderMessage(message, extraClass = "", index = 0) {
   const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
-function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}`).join("\u001f"); }
+function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}|${JSON.stringify(message.delivery || null)}`).join("\u001f"); }
 function renderSessionQueue() {
   const host = $("#session-queue");
   const queue = Array.isArray(current?.queue) ? current.queue : [];
@@ -919,6 +940,10 @@ function appendEvent(event) {
       $("#connection").textContent = stateLabel(status) || "已安全连接";
       $("#chat-state-dot").className = status;
     }
+  }
+  if (event.type === "file_delivery" && event.delivery) {
+    $("#messages").insertAdjacentHTML("beforeend", `<div class="ai delivery-message"><div class="who">${escapeHtml(agentLabel(current.agent))}</div><div class="msg-body">${renderRichText(event.summary || "已交付文件")}</div>${renderDeliveredFile(event.delivery)}</div>`);
+    void hydrateAttachmentPreviews($("#messages")); scrollMessages();
   }
   if (event.type === "error") { $("#messages").insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", text: `发送失败：${event.summary}` }, "failed")); toast("消息没有发送成功，请重试"); }
   if (event.type === "tool") {
@@ -1218,13 +1243,17 @@ function renderComposerAttachments(items, preview, target = "active") {
 }
 function renderAttachments() { renderComposerAttachments(activeAttachments, $("#attachment-preview")); }
 async function selectAttachments(files, target = activeAttachments, preview = $("#attachment-preview"), targetName = "active") {
-  const next = Array.from(files || []).slice(0, 8 - target.length);
+  const next = Array.from(files || []);
+  if (target.length + next.length > MAX_ATTACHMENTS) throw new Error(`最多添加 ${MAX_ATTACHMENTS} 个附件`);
+  const totalBytes = target.reduce((sum, item) => sum + Number(item.byteLength || 0), 0) + next.reduce((sum, item) => sum + Number(item.size || 0), 0);
+  if (totalBytes > MAX_ATTACHMENT_BYTES) throw new Error("附件总大小不能超过 8MB");
   for (const file of next) {
-    if (file.size > 10 * 1024 * 1024) throw new Error(`${file.name} 超过 10MB 限制`);
+    if (file.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file.name} 超过 8MB 限制`);
     const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",").at(-1)); reader.onerror = reject; reader.readAsDataURL(file); });
     const image = file.type.startsWith("image/"); const text = file.type.startsWith("text/") || /\.(txt|md|json|ya?ml|js|ts|py|go|rs|java|c|cpp|h|css|html|sql|sh)$/i.test(file.name);
-    target.push({ name: file.name, mimeType: file.type || "application/octet-stream", data, kind: image ? "image" : text ? "text" : "file", preview: image ? URL.createObjectURL(file) : "" });
+    target.push({ name: file.name, mimeType: file.type || "application/octet-stream", data, byteLength: file.size, kind: image ? "image" : text ? "text" : "file", preview: image ? URL.createObjectURL(file) : "" });
   }
+  if (next.some((file) => /\.(pdf|docx|xlsx|zip)$/i.test(file.name))) toast("文件会作为附件交给 Agent；二进制文件是否可解析取决于当前 Agent。");
   renderComposerAttachments(target, preview, targetName);
   if (targetName === "active") updateComposerQueueState();
 }

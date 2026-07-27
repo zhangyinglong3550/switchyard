@@ -139,6 +139,13 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /data-switch-session/);
   assert.match(js, /function renderMarkdownTable/);
   assert.match(js, /function renderProducedFiles/);
+  assert.match(js, /function renderDeliveredFile/);
+  assert.match(js, /本轮交付/);
+  assert.match(js, /asset\.source/);
+  assert.match(js, /deliveryAt/);
+  assert.match(js, /const MAX_ATTACHMENTS = 4/);
+  assert.match(js, /const MAX_ATTACHMENT_BYTES = 8 \* 1024 \* 1024/);
+  assert.match(js, /附件总大小不能超过 8MB/);
   assert.match(js, /本轮产物/);
   assert.match(js, /tool\.activity !== "edit"/);
   assert.match(css, /\.produced-files\{/);

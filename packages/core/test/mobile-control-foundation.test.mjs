@@ -286,7 +286,10 @@ test("mobile DTO keeps safe attachment and clickable-file metadata", () => {
     name: "screen.png",
     mimeType: "image/png",
     kind: "image",
-    byteLength: 20
+    byteLength: 20,
+    source: "tool",
+    createdAt: null,
+    updatedAt: null
   }]);
   assert.equal(event.tool.files[0].id, "asset_file");
   assert.doesNotMatch(JSON.stringify(event), /\/Users\/alice/);

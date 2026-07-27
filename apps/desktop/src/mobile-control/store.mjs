@@ -89,7 +89,7 @@ function publicAsset(asset) {
     mimeType: asset.mimeType,
     kind: asset.kind,
     byteLength: Number(asset.byteLength || 0),
-    source: ["upload", "tool", "delivery"].includes(asset.source) ? asset.source : "tool",
+    source: ["upload", "tool", "delivery"].includes(asset.source) ? asset.source : (asset.storage === "upload" ? "upload" : "tool"),
     createdAt: asset.createdAt || null,
     updatedAt: asset.updatedAt || asset.createdAt || null,
     ...(asset.deliveryAt ? { deliveryAt: asset.deliveryAt } : {}),
@@ -165,9 +165,10 @@ export function createMobileControlStore({
     const nowMs = now();
     let removed = 0;
     let bytes = 0;
-    const removable = Object.values(state.assets).filter((asset) => asset?.storage === "upload" && !referenced.has(asset.id));
+    const privateUploads = Object.values(state.assets).filter((asset) => asset?.storage === "upload");
+    const removable = privateUploads.filter((asset) => !referenced.has(asset.id));
     const expired = removable.filter((asset) => asset.expiresAt && Date.parse(asset.expiresAt) <= nowMs);
-    const privateBytes = removable.reduce((total, asset) => total + Number(asset.byteLength || 0), 0);
+    const privateBytes = privateUploads.reduce((total, asset) => total + Number(asset.byteLength || 0), 0);
     const overflow = privateBytes > MAX_PRIVATE_ASSET_BYTES
       ? removable.filter((asset) => !expired.includes(asset)).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
       : [];
@@ -376,6 +377,14 @@ export function createMobileControlStore({
     if (!session || !message || !encoded) throw new Error("附件参数不完整");
     const bytes = Buffer.from(encoded, "base64");
     const id = `asset_${sha256(`${session}\0${message}\0${index}\0${name}`).slice(0, 32)}`;
+    pruneAssets();
+    const previousBytes = state.assets[id]?.storage === "upload" ? Number(state.assets[id].byteLength || 0) : 0;
+    const privateBytes = Object.values(state.assets)
+      .filter((asset) => asset?.storage === "upload")
+      .reduce((total, asset) => total + Number(asset.byteLength || 0), 0);
+    if (privateBytes - previousBytes + bytes.length > MAX_PRIVATE_ASSET_BYTES) {
+      throw new Error("附件存储空间不足，请删除或等待过期附件清理");
+    }
     const directory = path.join(path.dirname(file), "attachments");
     const target = path.join(directory, `${id}.bin`);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
