@@ -32,7 +32,8 @@
     "desktop:dmg": "electron-builder --mac dmg",
     "desktop:win": "electron-builder --win nsis zip --x64",
     "release:check": "node scripts/release-check.mjs",
-    "import:ccswitch": "node scripts/import-ccswitch.mjs"
+    "import:ccswitch": "node scripts/import-ccswitch.mjs",
+    "android:release:check": "bash apps/android/scripts/verify-release.sh"
   },
   "devDependencies": {
     "electron": "^33.2.0",

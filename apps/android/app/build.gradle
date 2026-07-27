@@ -2,6 +2,20 @@ plugins {
   id 'com.android.application'
 }
 
+def environmentOrProperty = { String name, String fallback = "" ->
+  def value = System.getenv(name)
+  if (value == null || value.trim().isEmpty()) value = project.findProperty(name)
+  return value == null || value.toString().trim().isEmpty() ? fallback : value.toString().trim()
+}
+
+def androidVersionCode = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_CODE", "4").toInteger()
+def androidVersionName = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_NAME", "0.1.3")
+def storeFilePath = environmentOrProperty("SWITCHYARD_ANDROID_STORE_FILE")
+def storePassword = environmentOrProperty("SWITCHYARD_ANDROID_STORE_PASSWORD")
+def keyAlias = environmentOrProperty("SWITCHYARD_ANDROID_KEY_ALIAS")
+def keyPassword = environmentOrProperty("SWITCHYARD_ANDROID_KEY_PASSWORD")
+def releaseSigningReady = [storeFilePath, storePassword, keyAlias, keyPassword].every { it }
+
 android {
   namespace 'com.zhangyinglong.switchyard'
   compileSdk 34
@@ -10,8 +24,19 @@ android {
     applicationId 'com.zhangyinglong.switchyard'
     minSdk 26
     targetSdk 34
-    versionCode 4
-    versionName '0.1.3'
+    versionCode androidVersionCode
+    versionName androidVersionName
+  }
+
+  signingConfigs {
+    if (releaseSigningReady) {
+      release {
+        storeFile file(storeFilePath)
+        storePassword storePassword
+        keyAlias keyAlias
+        keyPassword keyPassword
+      }
+    }
   }
 
   buildTypes {
@@ -22,6 +47,7 @@ android {
     release {
       minifyEnabled false
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+      if (releaseSigningReady) signingConfig signingConfigs.release
     }
   }
 }

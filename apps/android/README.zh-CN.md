@@ -25,3 +25,32 @@ cd apps/android
 ```
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
+
+## Release APK
+
+默认可构建**未签名** release APK，适合本机安装验证：
+
+```bash
+cd apps/android
+./gradlew assembleRelease
+npm --prefix ../.. run android:release:check
+```
+
+产物位于 `app/build/outputs/apk/release/`。检查脚本会读取 Gradle 输出元数据，报告 APK 路径、`versionCode`、`versionName` 和签名状态。
+
+可通过环境变量（或同名 Gradle property）覆盖版本，不会修改已提交的构建文件：
+
+```bash
+SWITCHYARD_ANDROID_VERSION_CODE=5 \
+SWITCHYARD_ANDROID_VERSION_NAME=0.1.4 \
+./gradlew assembleRelease
+```
+
+如需发布签名，请只在本机环境变量或未提交的 Gradle 用户属性中配置以下全部值；不要将密钥或密码提交到仓库：
+
+- `SWITCHYARD_ANDROID_STORE_FILE`
+- `SWITCHYARD_ANDROID_STORE_PASSWORD`
+- `SWITCHYARD_ANDROID_KEY_ALIAS`
+- `SWITCHYARD_ANDROID_KEY_PASSWORD`
+
+四项齐全时，`release` 会自动使用该签名配置；缺少任何一项时，构建保持未签名。

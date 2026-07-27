@@ -16,3 +16,18 @@ test("desktop workspace declares the checked-in core workspace version", () => {
 
   assert.equal(desktop.dependencies[core.name], core.version);
 });
+
+
+test("Android release build uses environment-driven versioning and a local verification script", () => {
+  const gradle = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/build.gradle"), "utf8");
+  const packageJson = readPackageJson("package.json");
+  const readme = fs.readFileSync(path.join(repositoryRoot, "apps/android/README.zh-CN.md"), "utf8");
+  assert.match(gradle, /SWITCHYARD_ANDROID_VERSION_CODE/);
+  assert.match(gradle, /SWITCHYARD_ANDROID_VERSION_NAME/);
+  assert.match(gradle, /SWITCHYARD_ANDROID_STORE_FILE/);
+  assert.match(gradle, /signingConfigs/);
+  assert.equal(packageJson.scripts["android:release:check"], "bash apps/android/scripts/verify-release.sh");
+  assert.equal(fs.existsSync(path.join(repositoryRoot, "apps/android/scripts/verify-release.sh")), true);
+  assert.match(readme, /assembleRelease/);
+  assert.match(readme, /android:release:check/);
+});
