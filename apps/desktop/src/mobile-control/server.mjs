@@ -188,6 +188,9 @@ export function createMobileControlServer({
           archived: url.searchParams.get("archived") === "true"
         }));
       }
+      if (req.method === "GET" && pathname === "/mobile/v1/sessions/search") {
+        return json(res, 200, await registry.searchSessionContents(url.searchParams.get("q") || ""));
+      }
       if (req.method === "POST" && pathname === "/mobile/v1/sessions") {
         const body = await readJson(req);
         const created = await registry.createSession(body.agent, body, device.id);

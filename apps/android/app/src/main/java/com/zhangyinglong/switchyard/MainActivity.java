@@ -26,6 +26,16 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.provider.MediaStore;
 import android.content.ContentValues;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.pm.PackageManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
+import android.Manifest;
 import android.os.Build;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -47,11 +57,30 @@ public final class MainActivity extends Activity {
   private LinearLayout webContainer;
   private LinearLayout pairingRecoveryBar;
   private ValueCallback<Uri[]> fileChooserCallback;
+  private static final String APPROVAL_CHANNEL_ID = "approvals";
+  private static final int REQ_NOTIFICATIONS = 7201;
+  private static final int REQ_VOICE = 7202;
+  private final Handler approvalHandler = new Handler(Looper.getMainLooper());
+  private boolean isForeground = true;
+  private boolean approvalLoopRunning = false;
+  private int lastApprovalCount = -1;
+  private SpeechRecognizer speechRecognizer;
+  private boolean pendingVoiceRequest = false;
+  private final Runnable approvalPoller = new Runnable() {
+    @Override public void run() {
+      pollApprovalsOnce();
+      approvalHandler.postDelayed(this, 45_000);
+    }
+  };
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
     tokenStore = new SecureTokenStore(this);
     configureWebView();
+    createApprovalChannel();
+    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+      requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATIONS);
+    }
     handleIntent(getIntent());
   }
 
@@ -257,6 +286,7 @@ public final class MainActivity extends Activity {
       updatePairingRecoveryBar();
       setContentView(webContainer);
       webView.loadUrl(uri.toString());
+      startApprovalLoop();
     } catch (Exception error) {
       Toast.makeText(this, "请输入桌面端生成的 HTTPS 配对链接", Toast.LENGTH_LONG).show();
       showPairingEntry();
@@ -271,6 +301,7 @@ public final class MainActivity extends Activity {
       updatePairingRecoveryBar();
       setContentView(webContainer);
       webView.loadUrl(baseUrl + "/");
+      startApprovalLoop();
     } catch (Exception ignored) {
       tokenStore.clear();
       updatePairingRecoveryBar();
@@ -343,13 +374,179 @@ public final class MainActivity extends Activity {
     webView.evaluateJavascript(script, null);
   }
 
+  @Override protected void onResume() {
+    super.onResume();
+    isForeground = true;
+    // Returning to the app means the user has seen the inbox; reset so a new
+    // approval arriving later notifies again.
+    lastApprovalCount = -1;
+  }
+
+  @Override protected void onPause() {
+    isForeground = false;
+    super.onPause();
+  }
+
   @Override protected void onDestroy() {
+    stopApprovalLoop();
+    destroySpeechRecognizer();
     if (fileChooserCallback != null) {
       fileChooserCallback.onReceiveValue(null);
       fileChooserCallback = null;
     }
     if (webView != null) webView.destroy();
     super.onDestroy();
+  }
+
+  private void createApprovalChannel() {
+    if (Build.VERSION.SDK_INT < 26) return;
+    NotificationChannel channel = new NotificationChannel(APPROVAL_CHANNEL_ID, "待审批操作", NotificationManager.IMPORTANCE_DEFAULT);
+    channel.setDescription("Agent 等待你授权时提醒");
+    NotificationManager manager = getSystemService(NotificationManager.class);
+    if (manager != null) manager.createNotificationChannel(channel);
+  }
+
+  private void startApprovalLoop() {
+    if (approvalLoopRunning) return;
+    approvalLoopRunning = true;
+    approvalHandler.postDelayed(approvalPoller, 20_000);
+  }
+
+  private void stopApprovalLoop() {
+    approvalLoopRunning = false;
+    approvalHandler.removeCallbacks(approvalPoller);
+  }
+
+  private void pollApprovalsOnce() {
+    if (trustedOrigin.isEmpty() || tokenStore.getToken().isEmpty()) return;
+    new Thread(() -> {
+      int count = -1;
+      try {
+        HttpURLConnection connection = (HttpURLConnection) new URL(trustedOrigin + "/mobile/v1/approvals").openConnection();
+        connection.setRequestProperty("Authorization", "Bearer " + tokenStore.getToken());
+        connection.setConnectTimeout(10_000); connection.setReadTimeout(10_000);
+        if (connection.getResponseCode() < 200 || connection.getResponseCode() >= 300) return;
+        String body = new String(readAll(connection.getInputStream()), java.nio.charset.StandardCharsets.UTF_8);
+        count = countOccurrences(body, "\"id\":");
+      } catch (Exception ignored) {
+        return;
+      }
+      final int approvals = count;
+      runOnUiThread(() -> maybeNotifyApprovals(approvals));
+    }).start();
+  }
+
+  private void maybeNotifyApprovals(int count) {
+    int previous = lastApprovalCount;
+    lastApprovalCount = count;
+    if (isForeground || count <= 0) return;
+    // Notify on 0→N and on growth; a repeated count is already visible in the shade.
+    if (previous >= 0 && count <= previous) return;
+    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return;
+    Intent launch = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+    PendingIntent content = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    NotificationManager manager = getSystemService(NotificationManager.class);
+    if (manager == null) return;
+    android.app.Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+      ? new android.app.Notification.Builder(this, APPROVAL_CHANNEL_ID)
+      : new android.app.Notification.Builder(this);
+    builder.setSmallIcon(android.R.drawable.stat_notify_more)
+      .setContentTitle("Switchyard 待审批")
+      .setContentText(count + " 个操作正在等待你的授权")
+      .setContentIntent(content)
+      .setAutoCancel(true);
+    manager.notify(4101, builder.build());
+  }
+
+  private static byte[] readAll(InputStream input) throws Exception {
+    java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+    byte[] buffer = new byte[16 * 1024]; int count;
+    while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
+    return output.toByteArray();
+  }
+
+  private static int countOccurrences(String text, String needle) {
+    int count = 0; int index = 0;
+    while ((index = text.indexOf(needle, index)) >= 0) { count += 1; index += needle.length(); }
+    return count;
+  }
+
+  private void destroySpeechRecognizer() {
+    if (speechRecognizer != null) {
+      try { speechRecognizer.destroy(); } catch (Exception ignored) {}
+      speechRecognizer = null;
+    }
+  }
+
+  private void beginVoiceInput() {
+    if (speechRecognizer != null) return;
+    if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+      Toast.makeText(this, "此设备不支持语音识别", Toast.LENGTH_LONG).show();
+      return;
+    }
+    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+    speechRecognizer.setRecognitionListener(new RecognitionListener() {
+      @Override public void onReadyForSpeech(android.os.Bundle params) { dispatchVoiceState("listening"); }
+      @Override public void onBeginningOfSpeech() {}
+      @Override public void onRmsChanged(float rmsdB) {}
+      @Override public void onBufferReceived(byte[] buffer) {}
+      @Override public void onEndOfSpeech() { dispatchVoiceState("processing"); }
+      @Override public void onError(int error) {
+        destroySpeechRecognizer();
+        dispatchVoiceState("error");
+        runOnUiThread(() -> Toast.makeText(MainActivity.this, "语音识别失败，请重试", Toast.LENGTH_SHORT).show());
+      }
+      @Override public void onResults(android.os.Bundle results) {
+        java.util.ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+        String text = matches != null && !matches.isEmpty() ? matches.get(0) : "";
+        destroySpeechRecognizer();
+        if (!text.isEmpty() && webView != null) {
+          String script = "window.SwitchyardVoice && window.SwitchyardVoice.onResult(" + jsString(text) + ")";
+          webView.evaluateJavascript(script, null);
+        }
+        dispatchVoiceState("done");
+      }
+      @Override public void onPartialResults(android.os.Bundle partialResults) {}
+      @Override public void onEvent(int eventType, android.os.Bundle params) {}
+    });
+    Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+      .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.CHINA.toString())
+      .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+    try {
+      speechRecognizer.startListening(intent);
+    } catch (Exception error) {
+      destroySpeechRecognizer();
+      Toast.makeText(this, "无法启动语音识别", Toast.LENGTH_SHORT).show();
+    }
+  }
+
+  private void dispatchVoiceState(String state) {
+    if (webView == null) return;
+    webView.evaluateJavascript("window.SwitchyardVoice && window.SwitchyardVoice.onState(" + jsString(state) + ")", null);
+  }
+
+  private static String jsString(String value) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < value.length(); i += 1) {
+      char c = value.charAt(i);
+      if (c == '\\' || c == '\"') out.append('\\').append(c);
+      else if (c == '\n') out.append("\\n");
+      else if (c == '\r') out.append("\\r");
+      else out.append(c);
+    }
+    return out.append('\"').toString();
+  }
+
+  @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    boolean granted = grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+    if (requestCode == REQ_VOICE) {
+      boolean retry = pendingVoiceRequest;
+      pendingVoiceRequest = false;
+      if (granted && retry) beginVoiceInput();
+      else if (!granted) Toast.makeText(this, "没有麦克风权限，无法语音输入", Toast.LENGTH_LONG).show();
+    }
   }
 
   @Override public void onBackPressed() {
@@ -376,5 +573,15 @@ public final class MainActivity extends Activity {
     @JavascriptInterface public void editPairingLink() { runOnUiThread(() -> beginPairingEdit()); }
     @JavascriptInterface public void downloadAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, false); }
     @JavascriptInterface public void openAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, true); }
+    @JavascriptInterface public void startVoiceInput() {
+      runOnUiThread(() -> {
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+          pendingVoiceRequest = true;
+          requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, REQ_VOICE);
+          return;
+        }
+        beginVoiceInput();
+      });
+    }
   }
 }
