@@ -99,6 +99,36 @@ test("mobile store persists uploaded attachments and user-message metadata", (t)
   assert.equal(reloaded.listMobileMessages("s1")[0].attachments[0].id, attachment.id);
 });
 
+test("mobile store expires only unreferenced private uploads and keeps workspace references", (t) => {
+  const root = tempRoot(t);
+  let now = NOW;
+  const store = createMobileControlStore({ root, now: () => now });
+  const expired = store.putAttachment({
+    sessionId: "s1", messageId: "expired", name: "expired.txt", mimeType: "text/plain", kind: "text",
+    data: Buffer.from("expired").toString("base64"), ttlMs: 1000
+  });
+  const retained = store.putAttachment({
+    sessionId: "s1", messageId: "retained", name: "retained.txt", mimeType: "text/plain", kind: "text",
+    data: Buffer.from("retained").toString("base64"), ttlMs: 1000
+  });
+  store.rememberMobileMessage({ sessionId: "s1", messageId: "retained", attachments: [retained] });
+
+  const workspace = path.join(root, "workspace");
+  const output = path.join(workspace, "report.txt");
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.writeFileSync(output, "report");
+  const workspaceAsset = store.registerWorkspaceFile({
+    sessionId: "s1", workspaceRoot: workspace, filePath: output, activity: "edit", source: "delivery"
+  });
+
+  now += 1001;
+  assert.deepEqual(store.pruneAssets(), { removed: 1, bytes: Buffer.byteLength("expired") });
+  assert.equal(store.resolveAsset(expired.id), null);
+  assert.equal(store.resolveAsset(retained.id).name, "retained.txt");
+  assert.equal(store.resolveAsset(workspaceAsset.id).path, output);
+  assert.equal(fs.existsSync(output), true);
+});
+
 test("mobile store exposes only workspace files through opaque references", (t) => {
   const root = tempRoot(t);
   const workspace = path.join(root, "workspace");
@@ -120,6 +150,9 @@ test("mobile store exposes only workspace files through opaque references", (t) 
     mimeType: "text/javascript",
     kind: "workspace_file",
     byteLength: fs.statSync(file).size,
+    source: "tool",
+    createdAt: reference.createdAt,
+    updatedAt: reference.updatedAt,
     activity: "edit"
   });
   assert.equal(store.resolveAsset(reference.id).path, file);

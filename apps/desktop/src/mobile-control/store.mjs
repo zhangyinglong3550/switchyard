@@ -5,6 +5,8 @@ import { createHash, randomBytes as cryptoRandomBytes, timingSafeEqual } from "n
 const STORE_VERSION = 5;
 const MAX_REMEMBERED_MESSAGES = 2000;
 const MAX_MOBILE_MESSAGES_PER_SESSION = 200;
+const DEFAULT_UPLOAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PRIVATE_ASSET_BYTES = 64 * 1024 * 1024;
 
 function iso(now) {
   return new Date(now).toISOString();
@@ -87,6 +89,11 @@ function publicAsset(asset) {
     mimeType: asset.mimeType,
     kind: asset.kind,
     byteLength: Number(asset.byteLength || 0),
+    source: ["upload", "tool", "delivery"].includes(asset.source) ? asset.source : "tool",
+    createdAt: asset.createdAt || null,
+    updatedAt: asset.updatedAt || asset.createdAt || null,
+    ...(asset.deliveryAt ? { deliveryAt: asset.deliveryAt } : {}),
+    ...(asset.expiresAt ? { expiresAt: asset.expiresAt } : {}),
     ...(asset.activity ? { activity: asset.activity } : {})
   };
 }
@@ -126,6 +133,17 @@ function within(candidate, root) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function referencedAssetIds(state) {
+  const ids = new Set();
+  for (const rows of Object.values(state.mobileMessages || {})) {
+    for (const row of Array.isArray(rows) ? rows : []) for (const asset of row?.attachments || []) if (asset?.id) ids.add(asset.id);
+  }
+  for (const rows of Object.values(state.queues || {})) {
+    for (const row of Array.isArray(rows) ? rows : []) for (const asset of row?.attachments || []) if (asset?.id) ids.add(asset.id);
+  }
+  return ids;
+}
+
 function pruneMessages(state) {
   const entries = Object.entries(state.messages || {});
   if (entries.length <= MAX_REMEMBERED_MESSAGES) return;
@@ -141,6 +159,29 @@ export function createMobileControlStore({
   if (!root) throw new Error("mobile control store root 不能为空");
   const file = path.join(path.resolve(root), "state.json");
   let state = loadState(file);
+
+  const pruneAssets = () => {
+    const referenced = referencedAssetIds(state);
+    const nowMs = now();
+    let removed = 0;
+    let bytes = 0;
+    const removable = Object.values(state.assets).filter((asset) => asset?.storage === "upload" && !referenced.has(asset.id));
+    const expired = removable.filter((asset) => asset.expiresAt && Date.parse(asset.expiresAt) <= nowMs);
+    const privateBytes = removable.reduce((total, asset) => total + Number(asset.byteLength || 0), 0);
+    const overflow = privateBytes > MAX_PRIVATE_ASSET_BYTES
+      ? removable.filter((asset) => !expired.includes(asset)).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+      : [];
+    for (const asset of [...expired, ...overflow]) {
+      if (!state.assets[asset.id]) continue;
+      if (!expired.includes(asset) && privateBytes - bytes <= MAX_PRIVATE_ASSET_BYTES) break;
+      try { fs.unlinkSync(asset.path); } catch {}
+      delete state.assets[asset.id];
+      removed += 1;
+      bytes += Number(asset.byteLength || 0);
+    }
+    if (removed) atomicWriteJson(file, state);
+    return { removed, bytes };
+  };
 
   const save = () => {
     pruneMessages(state);
@@ -326,7 +367,8 @@ export function createMobileControlStore({
     name,
     mimeType = "application/octet-stream",
     kind = "file",
-    data
+    data,
+    ttlMs = DEFAULT_UPLOAD_TTL_MS
   } = {}) => {
     const session = String(sessionId || "").trim();
     const message = String(messageId || "").trim();
@@ -347,8 +389,11 @@ export function createMobileControlStore({
       kind: ["image", "text", "file"].includes(kind) ? kind : "file",
       byteLength: bytes.length,
       storage: "upload",
+      source: "upload",
       path: target,
-      createdAt: iso(now())
+      createdAt: iso(now()),
+      updatedAt: iso(now()),
+      expiresAt: iso(now() + Math.max(1000, Number(ttlMs) || DEFAULT_UPLOAD_TTL_MS))
     };
     save();
     return publicAsset(state.assets[id]);
@@ -457,7 +502,9 @@ export function createMobileControlStore({
     sessionId,
     workspaceRoot,
     filePath,
-    activity = "other"
+    activity = "other",
+    source = "tool",
+    deliveryAt = null
   } = {}) => {
     const rootPath = path.resolve(String(workspaceRoot || ""));
     const target = path.resolve(String(filePath || ""));
@@ -474,8 +521,11 @@ export function createMobileControlStore({
       byteLength: stat.size,
       activity: ["read", "search", "edit", "command", "other"].includes(activity) ? activity : "other",
       storage: "workspace",
+      source: source === "delivery" ? "delivery" : "tool",
       path: target,
-      createdAt: iso(now())
+      createdAt: iso(now()),
+      updatedAt: iso(now()),
+      ...(deliveryAt ? { deliveryAt: String(deliveryAt) } : {})
     };
     save();
     return publicAsset(state.assets[id]);
@@ -514,6 +564,7 @@ export function createMobileControlStore({
     isQueuePaused,
     setQueuePaused,
     registerWorkspaceFile,
-    resolveAsset
+    resolveAsset,
+    pruneAssets
   };
 }
