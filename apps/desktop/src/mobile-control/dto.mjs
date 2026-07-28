@@ -98,6 +98,8 @@ function projectTool(value) {
     status,
     output: cleanMobileText(value.output || "", 20_000),
     error: cleanMobileText(value.error || "", 8_000),
+    ...(Number.isFinite(Number(value.durationMs)) ? { durationMs: Math.max(0, Number(value.durationMs)) } : {}),
+    ...(Number.isFinite(Number(value.exitCode)) ? { exitCode: Number(value.exitCode) } : {}),
     ...(Array.isArray(value.files) ? { files: value.files.map(projectAsset).filter(Boolean) } : {})
   };
 }
