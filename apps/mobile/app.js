@@ -226,7 +226,26 @@ async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (token) headers.authorization = `Bearer ${token}`;
   if (options.body) headers["content-type"] = "application/json";
-  const response = await fetch(url, { ...options, headers });
+  // Without a timeout a slow desktop (large session reads) leaves the detail
+  // page on skeletons forever; fail loudly so the user can retry instead.
+  const timeoutMs = Number(options.timeoutMs) || 25_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(url, { ...options, headers, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error("请求超时：桌面端可能正忙，请稍后重试");
+      timeoutError.status = 0; timeoutError.code = "timeout";
+      throw timeoutError;
+    }
+    const networkError = new Error("网络异常：与桌面端的连接被中断");
+    networkError.status = 0; networkError.code = "network";
+    throw networkError;
+  } finally {
+    clearTimeout(timer);
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(body.message || body.error || `HTTP ${response.status}`);
@@ -1149,6 +1168,14 @@ function renderToolGroup(messages, startIndex = 0) {
 }
 
 function renderMessage(message, extraClass = "", index = 0) {
+  try {
+    return renderMessageInner(message, extraClass, index);
+  } catch (error) {
+    console.warn("renderMessage fallback", error);
+    return `<div class="ai ${extraClass}"><div class="msg-body">${escapeHtml(String(message?.text || "（此条消息无法渲染）")).slice(0, 2000)}</div></div>`;
+  }
+}
+function renderMessageInner(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
   if (isToolMessage(message)) return renderToolGroup([message], index);
@@ -1230,7 +1257,13 @@ function renderMessages(rows = [], { hasMore = false, total = rows.length } = {}
     flush();
     index = end;
   }
-  $("#messages").innerHTML = html.join("");
+  let rendered = html.join("");
+  try {
+    // Layout sanity check kept in one place: if any card throws during later
+    // DOM work we still have valid markup for the whole conversation.
+    if (!rendered.trim()) rendered = '<div class="empty">这个会话还没有消息。</div>';
+  } catch {}
+  $("#messages").innerHTML = rendered;
   for (const key of openKeys) {
     const node = $("#messages").querySelector(`[data-message-key="${CSS.escape(key)}"]`);
     if (!node) continue;
@@ -1326,7 +1359,7 @@ function applySessionDetail(detail, { activate = true, instant = false, anchor =
   else syncMessages(current.messages || [], options);
 }
 async function fetchSessionDetail(id, { messageLimit = INITIAL_MESSAGE_LIMIT } = {}) {
-  const detail = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}?messages=${encodeURIComponent(messageLimit)}`);
+  const detail = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}?messages=${encodeURIComponent(messageLimit)}`, { timeoutMs: 45_000 });
   cacheSessionDetail(detail);
   return detail;
 }
@@ -1344,7 +1377,18 @@ async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE
       $("#messages").innerHTML = '<div class="skel-msg"><div class="skel m1"></div><div class="skel m2"></div><div class="skel m3"></div></div><div class="skel-msg" style="width:64%"><div class="skel m1"></div><div class="skel m2"></div></div><div class="skel-msg" style="width:78%"><div class="skel m1"></div><div class="skel m3"></div></div>';
     }
   }
-  const detail = await fetchSessionDetail(id, { messageLimit });
+  let detail;
+  try {
+    detail = await fetchSessionDetail(id, { messageLimit });
+  } catch (error) {
+    if (seq !== openSessionSeq) return;
+    sessionDetailCache.delete(id);
+    if (activate) {
+      $("#detail-title").textContent = "加载失败";
+      $("#messages").innerHTML = `<div class="empty detail-load-error"><strong>会话加载失败</strong><span>${escapeHtml(error.message || "请稍后重试")}</span><button type="button" class="detail-retry" data-retry-open="${escapeHtml(id)}">重新加载</button></div>`;
+    }
+    throw error;
+  }
   if (seq !== openSessionSeq) return;
   applySessionDetail(detail, { activate, instant: true, anchor });
   // Approval data is independent: never delay the first message paint on it.
@@ -1523,6 +1567,8 @@ document.addEventListener("click", async (event) => {
     if (event.target.closest("#close-session-switcher") || event.target === $("#session-switcher")) { closeSessionSwitcher(); return; }
     if (event.target.closest("#continue-current-session")) { closeSessionSwitcher(); page("detail"); scrollMessages({ force: true }); return; }
     if (event.target.closest("#load-earlier-messages")) { await loadEarlierMessages(); return; }
+    const retryOpen = event.target.closest("[data-retry-open]");
+    if (retryOpen) { await openSession(retryOpen.dataset.retryOpen); return; }
     if (event.target.closest("#load-more-sessions")) { sessionDisplayLimit += SESSION_PAGE_SIZE; renderSessionList(); return; }
     const switchSession = event.target.closest("[data-switch-session]");
     if (switchSession) { closeSessionSwitcher(); await openSession(switchSession.dataset.switchSession); return; }
