@@ -115,6 +115,8 @@ export function toolFrom(value = {}, fallbackStatus = "completed") {
     status: toolStatus(state.status || value.status, error ? "failed" : fallbackStatus),
     output: textValue(output, 20_000),
     error: textValue(error, 8_000),
+    ...(Number.isFinite(Number(value.durationMs ?? value.duration_ms ?? value.duration)) ? { durationMs: Math.max(0, Number(value.durationMs ?? value.duration_ms ?? value.duration)) } : {}),
+    ...(Number.isFinite(Number(value.exitCode ?? value.exit_code ?? state.exitCode ?? state.exit_code)) ? { exitCode: Number(value.exitCode ?? value.exit_code ?? state.exitCode ?? state.exit_code) } : {}),
     files: toolFiles(value, activity)
   };
 }

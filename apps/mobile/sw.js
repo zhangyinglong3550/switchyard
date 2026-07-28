@@ -1,5 +1,5 @@
 const CACHE = "switchyard-mobile-v62";
-const ASSETS = ["/", "/app.js?v=62", "/styles.css?v=62", "/manifest.webmanifest"];
+const ASSETS = ["/", "/app.js?v=63", "/styles.css?v=63", "/manifest.webmanifest"];
 self.addEventListener("install", (event) => {
   self.skipWaiting();
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));

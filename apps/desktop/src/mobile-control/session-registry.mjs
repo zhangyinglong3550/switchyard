@@ -71,6 +71,7 @@ function projectMessages(messages = [], {
     text: String(message.text || "").slice(0, 20_000),
     kind: String(message.kind || "message"),
     timestamp: message.timestamp || null,
+    ...(message.turnId ? { turnId: String(message.turnId).slice(0, 240) } : {}),
     ...(Array.isArray(message.attachments) ? {
       attachments: projectMobileEvent({ type: "message", attachments: message.attachments }).attachments
     } : {}),
