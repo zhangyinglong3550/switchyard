@@ -23,6 +23,7 @@ export function isGoalTool(tool = {}) {
 }
 
 export function projectGoal(goal = {}) {
+  if (!goal || typeof goal !== "object") return null;
   const plan = planItems(goal.plan);
   const status = ["in_progress", "complete", "blocked"].includes(String(goal.status))
     ? String(goal.status)

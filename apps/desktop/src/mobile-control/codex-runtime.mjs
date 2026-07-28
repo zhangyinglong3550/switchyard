@@ -171,7 +171,7 @@ export function cleanCodexUserPart(value) {
   return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
 }
 
-export function parseCodexRollout(lines) {
+export function parseCodexRollout(lines, { limit = 500 } = {}) {
   const messages = [];
   const toolById = new Map();
   for (const line of lines) {
@@ -216,14 +216,30 @@ export function parseCodexRollout(lines) {
       }
     } catch {}
   }
-  return messages.slice(-500);
+  return messages.slice(-Math.max(1, Number(limit) || 500));
 }
 
-function localMessages(row) {
+const LOCAL_ROLLOUT_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
+const LOCAL_ROLLOUT_TAIL_BYTES = 6 * 1024 * 1024;
+
+function readRolloutLines(filePath, maxBytes = LOCAL_ROLLOUT_FULL_READ_MAX_BYTES) {
+  const stat = fs.statSync(filePath);
+  if (stat.size <= maxBytes) return fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter(Boolean);
+  // Large historical rollouts can make app-server thread/read expand for tens
+  // of seconds. The phone only needs the recent window, so read a bounded tail
+  // and discard the first partial JSONL record.
+  const length = Math.min(LOCAL_ROLLOUT_TAIL_BYTES, stat.size);
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, "r");
+  try { fs.readSync(fd, buffer, 0, length, stat.size - length); } finally { fs.closeSync(fd); }
+  const text = buffer.toString("utf8");
+  const firstBreak = text.indexOf("\n");
+  return text.slice(firstBreak < 0 ? text.length : firstBreak + 1).split(/\r?\n/).filter(Boolean);
+}
+
+function localMessages(row, { limit = 500 } = {}) {
   if (!row?.filePath) return [];
-  let lines = [];
-  try { lines = fs.readFileSync(row.filePath, "utf8").split(/\r?\n/).filter(Boolean); } catch { return []; }
-  return parseCodexRollout(lines);
+  try { return parseCodexRollout(readRolloutLines(row.filePath), { limit }); } catch { return []; }
 }
 
 function rolloutMessageText(payload = {}) {
@@ -528,6 +544,20 @@ export function createCodexRuntime({
     // Start tailing only after the phone opened the Desktop thread. This keeps
     // idle cost bounded while giving the active conversation live updates.
     if (isDesktopOwned(local)) trackDesktopRollout(sid, local);
+    // Some Codex rollouts are tens or hundreds of megabytes. Asking app-server
+    // to materialize those whole threads can block the mobile request until its
+    // HTTP timeout. Serve the bounded local tail immediately; it is the same
+    // durable transcript and is sufficient for the phone's recent-message view.
+    if (local && Number(local.sizeBytes) > LOCAL_ROLLOUT_FULL_READ_MAX_BYTES) {
+      const row = localThread(local);
+      const messages = localMessages(local, { limit });
+      return {
+        ...row,
+        model: selectedModels.get(sid) || row.model,
+        messages,
+        goal: (() => { const value = deriveGoalFromMessages(messages); if (value) liveGoals.set(sid, value); return value; })()
+      };
+    }
     let nativeError;
     // Always try the shared app-server first. This works for both threads
     // created on the phone and threads created in the desktop Codex UI.
@@ -551,8 +581,8 @@ export function createCodexRuntime({
       return {
         ...row,
         model: selectedModels.get(sid) || row.model,
-        messages: localMessages(local),
-        goal: (() => { const value = deriveGoalFromMessages(localMessages(local)); if (value) liveGoals.set(sid, value); return value; })()
+        messages: localMessages(local, { limit }),
+        goal: (() => { const value = deriveGoalFromMessages(localMessages(local, { limit: 500 })); if (value) liveGoals.set(sid, value); return value; })()
       };
     }
     throw nativeError || new Error(`Codex 线程不存在：${sid}`);

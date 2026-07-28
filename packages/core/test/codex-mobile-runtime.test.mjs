@@ -833,3 +833,35 @@ test("Codex goal tools project a durable goal with live plan progress", async ()
   assert.equal(complete.status, "complete");
   assert.equal(complete.tokenUsage, 8100);
 });
+
+test("Codex runtime reads the bounded tail of oversized local rollouts without blocking on app-server", async () => {
+  const filePath = `/tmp/switchyard-oversized-rollout-${process.pid}.jsonl`;
+  const filler = JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "旧记录" }] } });
+  const recent = JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "最近一条" }] } });
+  fs.writeFileSync(filePath, `${filler}\n${"x".repeat(9 * 1024 * 1024)}\n${recent}\n`);
+  const calls = [];
+  const runtime = createCodexRuntime({
+    client: {
+      async request(method) { calls.push(method); throw new Error("should not call app-server for oversized local rollout"); },
+      subscribe() { return () => {}; }
+    },
+    scanSessions: () => [{ sessionId: "oversized", cwd: "/tmp", filePath, sizeBytes: fs.statSync(filePath).size, title: "大历史" }]
+  });
+  try {
+    const detail = await runtime.readSession("oversized", { messageLimit: 20 });
+    assert.equal(detail.messages.at(-1)?.text, "最近一条");
+    assert.deepEqual(calls, []);
+  } finally {
+    fs.unlinkSync(filePath);
+  }
+});
+
+test("Codex goal projection ignores ordinary tools before the first goal", async () => {
+  const filePath = `/tmp/switchyard-tool-rollout-${process.pid}.jsonl`;
+  fs.writeFileSync(filePath, JSON.stringify({ type: "response_item", payload: { type: "function_call", name: "shell", arguments: "{}", call_id: "c1" } }) + "\n");
+  const runtime = createCodexRuntime({
+    client: { async request() { throw new Error("not needed"); }, subscribe() { return () => {}; } },
+    scanSessions: () => [{ sessionId: "tool-only", cwd: "/tmp", filePath, sizeBytes: fs.statSync(filePath).size }]
+  });
+  try { assert.equal((await runtime.readSession("tool-only")).goal, null); } finally { fs.unlinkSync(filePath); }
+});
