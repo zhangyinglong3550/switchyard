@@ -150,8 +150,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function stripInternalUiDirectives/);
   assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
   assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
-  assert.match(html, /app\.js\?v=66/);
-  assert.match(html, /styles\.css\?v=66/);
+  assert.match(html, /app\.js\?v=67/);
+  assert.match(html, /styles\.css\?v=67/);
   assert.match(js, /function renderExecutionCard/);
   assert.match(js, /function patchStats/);
   assert.match(js, /function refreshLiveExecutionCard/);
@@ -166,7 +166,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function renderApprovalSheet/);
   assert.match(js, /function renderNewMessageIndicator/);
   assert.match(js, /DENSITY_KEY/);
-  assert.match(js, /data-turn-action/);
+  assert.doesNotMatch(js, /data-turn-action/);
+  assert.doesNotMatch(html, /data-action="fork"/);
   assert.match(js, /data-diff-filter/);
   assert.match(css, /\.conversation-turn\{/);
   assert.match(css, /\.turn-completion\{/);
@@ -251,12 +252,11 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function applyTheme/);
   assert.match(html, /id="theme-toggle"/);
   assert.match(css, /:root\[data-theme="dark"\]\{/);
-  assert.match(js, /nativeVoiceInputAvailable/);
   assert.match(js, /nativeOpenExternalUrlAvailable/);
   assert.match(js, /openConversationLink/);
   assert.match(js, /\.msg-body a\[href\]/);
-  assert.match(js, /SwitchyardVoice/);
-  assert.match(html, /id="voice-control"/);
+  assert.doesNotMatch(js, /SwitchyardVoice|startVoiceInput/);
+  assert.doesNotMatch(html, /id="voice-control"/);
   assert.match(js, /\/mobile\/v1\/sessions\/search\?q=/);
   assert.match(js, /function renderContentHits/);
   assert.match(js, /escapeRegExp/);

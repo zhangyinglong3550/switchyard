@@ -7,19 +7,16 @@ const PINNED_PROJECTS_KEY = "switchyard_mobile_pinned_projects";
 function hasNativeTokenStore() {
   try { return typeof window.SwitchyardNative?.getToken === "function"; } catch { return false; }
 }
-function nativeVoiceInputAvailable() {
-  try { return typeof window.SwitchyardNative?.startVoiceInput === "function"; } catch { return false; }
-}
 function nativeOpenExternalUrlAvailable() {
   try { return typeof window.SwitchyardNative?.openExternalUrl === "function"; } catch { return false; }
 }
 function openConversationLink(anchor) {
   const href = safeUrl(anchor?.href || "");
-  if (!href) return false;
+  if (!href) { toast("链接无效"); return; }
   if (nativeOpenExternalUrlAvailable()) {
-    try { window.SwitchyardNative.openExternalUrl(href); return true; } catch {}
+    try { window.SwitchyardNative.openExternalUrl(href); return; } catch {}
   }
-  return false;
+  window.open(href, "_blank", "noopener,noreferrer");
 }
 function nativePairingEditAvailable() {
   try { return typeof window.SwitchyardNative?.editPairingLink === "function"; } catch { return false; }
@@ -1374,13 +1371,6 @@ function groupWorkByPhase(entries = []) {
   });
   return groups;
 }
-function renderTurnResultActions(turn, summary) {
-  const final = turn.entries.filter(({ message }) => message.role === "assistant" && !isToolMessage(message) && message.kind !== "thinking").map(({ message }) => message.text).join("\n\n");
-  if (!final && summary.state === "running") return "";
-  const failed = summary.state === "failed";
-  const incomplete = summary.state === "incomplete";
-  return `<div class="turn-actions" aria-label="结果快捷操作">${final ? `<button type="button" data-copy-value="${encodeURIComponent(final)}">复制</button>` : ""}<button type="button" data-turn-action="${failed ? "fix" : incomplete ? "resume" : "continue"}">${failed ? "修复失败" : incomplete ? "从中断处继续" : "继续"}</button>${failed ? '<button type="button" data-turn-action="verify">重新验证</button><button type="button" data-turn-action="failure">查看错误</button><button type="button" data-turn-action="model">换模型继续</button>' : incomplete ? '<button type="button" data-turn-action="model">换模型继续</button><button type="button" data-turn-action="failure">查看路由</button>' : '<button type="button" data-turn-action="summary">总结</button><button type="button" data-turn-action="files">查看修改</button><button type="button" data-turn-action="fork">Fork</button>'}</div>`;
-}
 function renderTurnWork(turn) {
   const entries = turn.entries || [];
   const workEntries = entries.filter(({ message }) => isToolMessage(message) || message.kind === "thinking");
@@ -1400,8 +1390,7 @@ function renderConversationTurn(turn) {
   const finals = turn.entries.filter(({ message }) => message.role === "assistant" && !isToolMessage(message) && message.kind !== "thinking").map(({ message, index }) => renderMessage(message, "turn-final", index)).join("");
   const attachments = turn.entries.filter(({ message }) => message.delivery).map(({ message }) => renderDeliveredFile(message.delivery)).join("");
   const completion = work.summary ? `<div class="turn-completion ${escapeHtml(work.summary.state)}"><i>${work.summary.state === "failed" ? "!" : work.summary.state === "running" ? "…" : "✓"}</i><span><b>${escapeHtml(work.summary.text)}</b><small>${escapeHtml(work.summary.detail || "")}</small></span></div>` : "";
-  const actions = work.summary ? renderTurnResultActions(turn, work.summary) : "";
-  return `<section class="conversation-turn${turn.request ? " has-request" : ""}" data-turn-id="${escapeHtml(turn.id)}">${request}${work.html}${completion}${finals ? `<div class="turn-result">${finals}${actions}</div>` : actions}${attachments}</section>`;
+  return `<section class="conversation-turn${turn.request ? " has-request" : ""}" data-turn-id="${escapeHtml(turn.id)}">${request}${work.html}${completion}${finals ? `<div class="turn-result">${finals}</div>` : ""}${attachments}</section>`;
 }
 function renderNewMessageIndicator() {
   const pill = $("#new-message-indicator"); if (!pill) return;
@@ -1779,20 +1768,14 @@ document.addEventListener("click", async (event) => {
     const diffContext = event.target.closest("[data-diff-context-toggle]");
     if (diffContext) { const diff = diffContext.closest("[data-diff]"); const collapsed = diff?.classList.toggle("context-collapsed"); diffContext.textContent = collapsed ? "显示未变内容" : "折叠未变内容"; return; }
     const conversationLink = event.target.closest(".msg-body a[href]");
-    if (conversationLink && openConversationLink(conversationLink)) { event.preventDefault(); return; }
-    const copyValue = event.target.closest("[data-copy-value]");
-    if (copyValue) { await navigator.clipboard?.writeText(decodeURIComponent(copyValue.dataset.copyValue || "")); toast("已复制"); return; }
-    const turnAction = event.target.closest("[data-turn-action]");
-    if (turnAction) {
-      const action = turnAction.dataset.turnAction;
-      if (action === "files") { document.querySelector(".produced-files")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
-      if (action === "failure") { document.querySelector(".tl.failed")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
-      if (action === "model") { await openModelSheet(); return; }
-      if (action === "fork") { if (!current?.id) return; const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/fork`, { method: "POST", body: JSON.stringify({}) }); if (result.sessionId) await openSession(result.sessionId); return; }
-      const prompts = { continue: "继续完成这项工作", resume: "请从刚才中断处继续，不要重复已完成的步骤。", summary: "请总结本轮完成的工作、改动和验证结果", fix: "请定位并修复刚才失败的步骤", verify: "请重新运行验证，并报告结果" };
-      if (prompts[action]) { $("#message").value = prompts[action]; $("#message").focus(); updateComposerQueueState(); }
+    if (conversationLink) {
+      event.preventDefault();
+      event.stopPropagation();
+      openConversationLink(conversationLink);
       return;
     }
+    const copyValue = event.target.closest("[data-copy-value]");
+    if (copyValue) { await navigator.clipboard?.writeText(decodeURIComponent(copyValue.dataset.copyValue || "")); toast("已复制"); return; }
     const approvalOpen = event.target.closest("[data-approval-open]");
     if (approvalOpen) { showApprovalSheet(approvalOpen.dataset.approvalOpen); return; }
     if (event.target.closest("#close-approval-sheet") || event.target === $("#approval-sheet")) { hideApprovalSheet(); return; }
@@ -1994,7 +1977,7 @@ document.addEventListener("click", async (event) => {
     if (action === "delete") { $("#session-menu").hidden = true; requestSessionDeletion([current.id]); return; }
     let body = {}; if (action === "rename") { const title = await showInputSheet({ title: "重命名会话", value: current.title }); body.title = title?.trim() || current.title; }
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/${action}`, { method: "POST", body: JSON.stringify(body) });
-    if (action === "archive") { current = null; page("sessions"); toast("已归档"); return loadSessions(); } if (action === "fork" && result.sessionId) return openSession(result.sessionId); await openSession(current.id);
+    if (action === "archive") { current = null; page("sessions"); toast("已归档"); return loadSessions(); } await openSession(current.id);
   } catch (error) { toast(error.message); }
 });
 
@@ -2016,26 +1999,6 @@ for (const input of [$("#message"), $("#prompt")]) {
 // inserted the command or Skill into the textarea.
 $("#command-picker").addEventListener("pointerdown", (event) => event.preventDefault());
 window.addEventListener("resize", () => { if (commandPickerState) positionCommandPicker(commandPickerState.input); });
-// Android 壳语音识别回调：结果插入当前光标处，状态驱动麦克风按钮颜色。
-window.SwitchyardVoice = {
-  onResult(text) {
-    const input = $("#message"); if (!input) return;
-    const value = String(text || "").trim(); if (!value) return;
-    const start = input.selectionStart ?? input.value.length;
-    input.value = `${input.value.slice(0, start)}${input.value.slice(0, start) && !input.value.slice(0, start).endsWith("\n") && start > 0 ? " " : ""}${value}${input.value.slice(start)}`;
-    input.focus(); input.dispatchEvent(new Event("input", { bubbles: true }));
-    updateComposerQueueState();
-  },
-  onState(state) {
-    const button = $("#voice-control"); if (!button) return;
-    button.classList.toggle("listening", state === "listening");
-    if (state === "listening") toast("正在聆听，请说话…");
-  }
-};
-$("#voice-control").addEventListener("click", () => {
-  if (!nativeVoiceInputAvailable()) { toast("语音输入仅在 Android App 内可用"); return; }
-  try { window.SwitchyardNative.startVoiceInput(); } catch { toast("无法启动语音识别"); }
-});
 window.addEventListener("popstate", () => {
   if (!$("#attachment-viewer").hidden) closeAttachmentViewer({ fromHistory: true });
 });
@@ -2163,7 +2126,6 @@ async function boot() {
   try {
     hideModelSheet(); bindSwipe(); await pair();
     if (!token) { setConnectionStatus("等待配对", false); return; }
-    if (nativeVoiceInputAvailable()) $("#voice-control").hidden = false;
     // Sessions are the landing screen. Do not make their first paint wait for
     // workspaces, models, preferences, or the approval inbox.
     await loadSessions();
