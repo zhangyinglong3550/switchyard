@@ -804,13 +804,24 @@ function renderMarkdownTable(headers, alignments, rows) {
   const align = (index) => alignments[index] === "left" ? "" : ` style="text-align:${alignments[index]}"`;
   return `<div class="markdown-table-wrap"><table class="markdown-table"><thead><tr>${headers.map((cell, index) => `<th${align(index)}>${inlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell, index) => `<td${align(index)}>${inlineMarkdown(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
+// Codex desktop emits `::name{...}` lines as client-side UI directives. They are not
+// user-facing content, so clients that do not support them must omit them rather than
+// rendering the raw protocol (or the redacted `[LOCAL_PATH]` placeholder).
+const INTERNAL_UI_DIRECTIVE = /^::[a-z][a-z0-9-]*\{[^\r\n]*\}\s*$/i;
+function stripInternalUiDirectives(value) {
+  return String(value || "").split(/\r?\n/)
+    .filter((line) => !INTERNAL_UI_DIRECTIVE.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 function renderRichText(value) {
   const cacheKey = String(value || "");
   const cachedHtml = richTextCache.get(cacheKey);
   if (cachedHtml !== undefined) return cachedHtml;
   const source = cacheKey.replace(/\r/g, ""); const chunks = source.split(/```([^\n]*)\n?([\s\S]*?)```/g); const output = [];
   for (let i = 0; i < chunks.length; i += 3) {
-    const prose = chunks[i] || "";
+    const prose = stripInternalUiDirectives(chunks[i] || "");
     const lines = prose.split("\n"); let list = []; let ordered = false;
     const flush = () => {
       if (!list.length) return;

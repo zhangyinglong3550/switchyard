@@ -146,11 +146,16 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /submitComposerMessage/);
   assert.match(css, /\.send-button\.is-stop/);
   assert.match(js, /function markdownTableCells/);
+  assert.match(js, /const INTERNAL_UI_DIRECTIVE/);
+  assert.match(js, /function stripInternalUiDirectives/);
+  assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
+  assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
+  assert.match(html, /app\.js\?v=64/);
+  assert.match(html, /styles\.css\?v=64/);
   assert.match(js, /function openSessionSwitcher/);
   assert.match(js, /sessionDetailCache/);
   assert.match(js, /INITIAL_MESSAGE_LIMIT = 120/);
   assert.match(js, /loadEarlierMessages/);
-  assert.match(html, /app\.js\?v=63/);
   assert.match(html, /id="approval-sheet"/);
   assert.match(html, /id="new-message-indicator"/);
   assert.match(html, /id="density-toggle"/);
