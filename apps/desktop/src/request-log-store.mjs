@@ -187,6 +187,9 @@ function jsonSummary(value, max = 12000) {
   return fallback.length <= max ? fallback : JSON.stringify({ truncated: true, streamDiagnostics: compact?.streamDiagnostics || null });
 }
 
+function retainDaysValue(value = process.env.SWITCHYARD_REQUEST_LOG_RETAIN_DAYS) { const parsed = Number(value ?? DEFAULT_RETAIN_DAYS); return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : DEFAULT_RETAIN_DAYS; }
+function maxRowsValue(value = process.env.SWITCHYARD_REQUEST_LOG_MAX_ROWS) { const parsed = Number(value ?? DEFAULT_MAX_ROWS); return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : DEFAULT_MAX_ROWS; }
+
 function maxBytesValue(value = process.env.SWITCHYARD_REQUEST_LOG_MAX_BYTES) {
   const parsed = Number(value ?? DEFAULT_MAX_BYTES);
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : DEFAULT_MAX_BYTES;
@@ -277,8 +280,8 @@ function sanitizeEvent(entry) {
     total_tokens: intValue(entry.totalTokens),
     cache_read_tokens: intValue(entry.cacheReadTokens ?? entry.cache_read_tokens),
     cache_creation_tokens: intValue(entry.cacheCreationTokens ?? entry.cache_creation_tokens),
-    prompt_preview: entry.promptPreview ? String(entry.promptPreview).slice(0, 1200) : null,
-    response_preview: entry.responsePreview ? String(entry.responsePreview).slice(0, 1200) : null,
+    prompt_preview: entry.promptPreview ? String(entry.promptPreview).slice(0, (Number(entry.status) >= 400 ? 800 : 300)) : null,
+    response_preview: entry.responsePreview ? String(entry.responsePreview).slice(0, (Number(entry.status) >= 400 ? 1200 : 500)) : null,
     request_summary: jsonSummary(entry.requestSummary),
     response_summary: jsonSummary(entry.responseSummary),
     error: entry.error ? String(entry.error).slice(0, 500) : null
@@ -471,7 +474,7 @@ export function usageDaily(filters = {}) {
   return (rows || []).map(enrichUsageStatsRow).slice(0, limit * 200);
 }
 
-export function cleanupRequestLogs({ retainDays = DEFAULT_RETAIN_DAYS, maxRows = DEFAULT_MAX_ROWS, maxBytes = maxBytesValue(), now = new Date() } = {}) {
+export function cleanupRequestLogs({ retainDays = retainDaysValue(), maxRows = maxRowsValue(), maxBytes = maxBytesValue(), now = new Date() } = {}) {
   initRequestLogStore();
   const cutoff = new Date(now.getTime() - Math.max(1, retainDays) * 24 * 60 * 60 * 1000).toISOString();
   runSql(`DELETE FROM request_logs WHERE ts < ${valueSql(cutoff)};`);
@@ -497,4 +500,12 @@ export function scheduleRequestLogCleanup({ intervalMs = 6 * 60 * 60 * 1000 } = 
 export function stopRequestLogCleanupForTest() {
   if (cleanupTimer) clearInterval(cleanupTimer);
   cleanupTimer = null;
+}
+
+
+export function requestLogStats({ since } = {}) {
+  initRequestLogStore();
+  const clause = since ? `WHERE ts >= ${valueSql(since)}` : "";
+  const row = runSql(`SELECT COUNT(*) AS total, SUM(CASE WHEN ${REQUEST_ERROR_SQL} THEN 1 ELSE 0 END) AS errors FROM request_logs ${clause};`, { json: true })?.[0] || {};
+  return { total: intValue(row.total), errors: intValue(row.errors), bytes: requestLogDiskBytes(), maxBytes: maxBytesValue() };
 }

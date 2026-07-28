@@ -3,12 +3,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
+import { normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
 
 export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
   "openai_responses",
   "anthropic_messages",
-  "antigravity"
+  "antigravity",
+  "cursor_subscription"
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
@@ -210,6 +212,10 @@ function normalizeKnownProvider(provider) {
       baseUrl: withRouting.baseUrl || "https://api.anthropic.com"
     };
   }
+  const looksLikeCursorSubscription = withRouting.providerType === "cursor_subscription" || withRouting.apiFormat === "cursor_subscription" || withRouting.presetId === "cursor-subscription";
+  if (looksLikeCursorSubscription) {
+    return normalizeCursorSubscriptionProvider(withRouting);
+  }
   const looksLikeXiaomiMiMo = baseUrl.includes("xiaomimimo.com") || id.includes("xiaomi") || id.includes("mimo") || name.includes("xiaomi") || name.includes("mimo");
   if (looksLikeXiaomiMiMo && baseUrl.endsWith("/anthropic")) {
     return { ...withRouting, apiFormat: "anthropic_messages" };
@@ -340,6 +346,10 @@ export function validateConfig(config) {
       throw new Error(`Provider ${provider.id} has unsupported routingMode: ${provider.routingMode}`);
     }
     if (!provider.baseUrl) throw new Error(`Provider ${provider.id} requires baseUrl`);
+    if (provider.providerType === "cursor_subscription") {
+      if (provider.enabled !== false && config.host !== "127.0.0.1") throw new Error("Cursor subscription bridge requires config.host to be 127.0.0.1");
+      if (Number(provider.maxConcurrentRequests || 1) !== 1) throw new Error("Cursor subscription bridge supports exactly one concurrent request");
+    }
   }
   const modelIds = new Set();
   for (const model of config.models) {

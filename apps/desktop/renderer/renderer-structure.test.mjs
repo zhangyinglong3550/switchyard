@@ -59,3 +59,25 @@ test('setup progress reflects provider credentials, gateway state, and health', 
   assert.deepEqual(buildSetupProgress({ providers: [], models: [] }, { running: false }).checks.map((item) => item.done), [false, false, false, false]);
   assert.equal(buildSetupProgress(config, { running: true }, {}).next, null);
 });
+
+test('renderer entry module parses before packaging', async () => {
+  const entry = new URL('./renderer.js', import.meta.url);
+  await assert.rejects(
+    import(`${entry.href}?parse-check=${Date.now()}`),
+    (error) => error instanceof ReferenceError && /window is not defined/.test(error.message),
+    'renderer module should parse; in Node it may only fail after parsing because browser globals are unavailable'
+  );
+});
+
+test('Cursor subscription settings preserve explicit experimental and local-only wording', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  assert.match(html, /id="provider-cursor-subscription-panel"/);
+  assert.match(html, /Cursor 订阅桥接（实验性）/);
+  assert.match(html, /仅个人本机使用/);
+  assert.match(html, /非官方兼容能力，可能随 Cursor 更新失效/);
+  assert.match(html, /id="btn-cursor-subscription-connect"/);
+  assert.match(html, /id="btn-cursor-subscription-clear"/);
+  assert.match(js, /cursor-subscription:connect/);
+  assert.match(js, /cursor-subscription:clear/);
+});

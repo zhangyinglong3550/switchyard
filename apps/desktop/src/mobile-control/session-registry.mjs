@@ -242,6 +242,7 @@ export function createSessionRegistry({
         summary: event.summary,
         role: event.role,
         attachments: event.attachments,
+        route: event.route,
         ...(delivery ? { delivery } : {}),
         tool: enrichToolFiles(event.tool, {
           store,
@@ -250,7 +251,7 @@ export function createSessionRegistry({
         })
       }));
       const terminalState = String(event.summary || "").toLowerCase();
-      const ended = ["completed", "failed", "cancelled", "canceled"].includes(terminalState) || event.type === "error";
+      const ended = ["completed", "failed", "cancelled", "canceled", "incomplete"].includes(terminalState) || event.type === "error";
       if (ended) {
         activeSessions.delete(mobileSessionId);
         detailCache.delete(mobileSessionId);
@@ -259,6 +260,83 @@ export function createSessionRegistry({
       }
     });
   }
+
+  // Keep a small, redacted diagnostic queue for Codex calls that did not carry
+  // a trusted task id. This deliberately never guesses a destination session.
+  const unmatchedGatewayRequests = [];
+  const recordUnmatchedGatewayRequest = (entry = {}) => {
+    if (String(entry.clientId || "") !== "codex" || String(entry.correlationThreadId || "").trim()) return;
+    if (!entry.providerId && !entry.modelId && !entry.requestedModel) return;
+    if (!entry.requestLog && !entry.traceLog) return;
+    const response = entry.responseSummary && typeof entry.responseSummary === "object" ? entry.responseSummary : {};
+    const terminal = response.streamTerminal && typeof response.streamTerminal === "object" ? response.streamTerminal : {};
+    const item = {
+      createdAt: entry.ts || new Date().toISOString(),
+      requestedModel: String(entry.requestedModel || ""), modelId: String(entry.modelId || ""),
+      providerId: String(entry.providerId || ""), upstreamModel: String(entry.upstreamModel || ""),
+      apiFormat: String(entry.apiFormat || ""), status: Number(entry.status) || 0,
+      state: terminal.state || (entry.requestLog ? ((Number(entry.status) || 0) >= 400 ? "failed" : "completed") : "running"),
+      reason: "missing_thread_correlation"
+    };
+    const key = `${item.createdAt}|${item.requestedModel}|${item.providerId}|${item.status}|${item.state}`;
+    if (unmatchedGatewayRequests.some((row) => row._key === key)) return;
+    unmatchedGatewayRequests.push({ ...item, _key: key });
+    if (unmatchedGatewayRequests.length > 100) unmatchedGatewayRequests.splice(0, unmatchedGatewayRequests.length - 100);
+  };
+  const listUnmatchedGatewayRequests = () => unmatchedGatewayRequests.slice().reverse().map(({ _key, ...item }) => item);
+
+  // Gateway request logs use the trusted Codex parent-thread header as their
+  // correlation key. Do not attempt prompt/timestamp matching: a wrong route is
+  // worse than no route, especially when several Codex tasks run concurrently.
+  const recordGatewayRequest = (entry = {}) => {
+    recordUnmatchedGatewayRequest(entry);
+    const nativeId = String(entry.correlationThreadId || "").trim();
+    if (String(entry.clientId || "") !== "codex" || !nativeId) return null;
+    const sessionId = encodeMobileSessionId("codex", nativeId);
+    const response = entry.responseSummary && typeof entry.responseSummary === "object"
+      ? entry.responseSummary
+      : {};
+    const streamTerminal = response.streamTerminal && typeof response.streamTerminal === "object"
+      ? response.streamTerminal
+      : {};
+    const status = Number(entry.status) || 0;
+    const terminalState = streamTerminal.state || (entry.requestLog
+      ? (status >= 400 || !status ? "failed" : "completed")
+      : "");
+    const terminalReason = streamTerminal.reason || (entry.requestLog
+      ? (status >= 400 || !status ? "upstream_error" : "protocol_terminal")
+      : "");
+    const route = {
+      requestedModel: entry.requestedModel || "",
+      modelId: entry.modelId || "",
+      providerId: entry.providerId || "",
+      upstreamModel: entry.upstreamModel || "",
+      apiFormat: entry.apiFormat || "",
+      account: entry.accountEmail || entry.accountId || "",
+      terminalState,
+      terminalReason
+    };
+    const hasRoute = Object.values(route).some(Boolean);
+    if (!hasRoute) return null;
+    const isFinal = Boolean(entry.requestLog);
+    const summary = isFinal
+      ? (terminalState || (status >= 400 ? "failed" : "completed"))
+      : "running";
+    ledger.append({
+      sessionId,
+      type: "status",
+      summary,
+      route
+    });
+    if (isFinal) {
+      activeSessions.delete(sessionId);
+      detailCache.delete(sessionId);
+      sessionsCache.clear();
+    } else {
+      activeSessions.add(sessionId);
+    }
+    return sessionId;
+  };
 
   const runtimeFor = (mobileSessionId) => {
     const decoded = decodeMobileSessionId(mobileSessionId);
@@ -965,6 +1043,8 @@ export function createSessionRegistry({
     resolveAsset: (assetId) => store.resolveAsset?.(assetId) || null,
     listEvents: (filters) => ledger.list(filters),
     subscribeEvents: (handler) => ledger.subscribe(handler),
+    recordGatewayRequest,
+    listUnmatchedGatewayRequests,
     agents: () => runtimes.map((runtime) => ({
       id: runtime.id,
       name: runtime.label || runtime.id,

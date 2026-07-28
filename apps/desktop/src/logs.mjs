@@ -8,6 +8,16 @@ const RING_LIMIT = 500;
 const DEFAULT_LOG_MAX_BYTES = 200 * 1024 * 1024;
 const SUBSCRIBERS = new Set();
 let writeStream = null;
+function redactLogValue(value) {
+  const secretKeys = /^(apiKey|accessToken|refreshToken|sessionToken|idToken|agentPrivateKey)$/i;
+  const scrub = (item) => {
+    if (Array.isArray(item)) return item.map(scrub);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, val]) => [key, secretKeys.test(key) ? "[REDACTED]" : scrub(val)]));
+    if (typeof item !== "string") return item;
+    return item.replace(/Bearer\s+[A-Za-z0-9._~+\/-]{12,}/gi, "Bearer [REDACTED]").replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-[REDACTED]");
+  };
+  return scrub(value);
+}
 
 function configuredLogMaxBytes() {
   const value = Number(process.env.SWITCHYARD_LOG_MAX_BYTES || DEFAULT_LOG_MAX_BYTES);
@@ -40,7 +50,7 @@ function ensureWriteStream() {
 }
 
 export function appendLog(entry) {
-  const enriched = { ts: nowIso(), ...entry };
+  const enriched = redactLogValue({ ts: nowIso(), ...entry });
   RING.push(enriched);
   if (RING.length > RING_LIMIT) RING.shift();
   try {

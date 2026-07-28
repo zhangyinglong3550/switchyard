@@ -195,13 +195,15 @@ const PROTOCOL_LABEL = {
   openai_chat: "OpenAI Chat",
   openai_responses: "OpenAI Responses",
   anthropic_messages: "Anthropic Messages",
-  antigravity: "OpenAI 接入（Antigravity 自动转换）"
+  antigravity: "OpenAI 接入（Antigravity 自动转换）",
+  cursor_subscription: "Cursor 订阅桥接（实验性）"
 };
 
 const PROTOCOL_HELP = {
   openai_chat: "最通用，适合大多数 OpenAI-compatible / 中转服务",
   openai_responses: "OpenAI 新协议，Codex 和新版 OpenAI 更适合这条链路",
   anthropic_messages: "Claude / Claude Code 原生协议",
+  cursor_subscription: "仅个人本机使用的非官方实验性兼容链路",
   antigravity: "对客户端统一暴露 OpenAI 兼容接口；网关自动转换到 Google Antigravity 上游"
 };
 
@@ -222,6 +224,7 @@ const AUTH_MODE_LABEL = {
   codex_oauth: "Codex OAuth",
   anthropic_oauth: "Anthropic 官方（Claude Code）",
   account_pool: "账号池（多账号）",
+  cursor_subscription: "Cursor 订阅桥接（实验性）",
   none: "无需认证"
 };
 
@@ -604,7 +607,7 @@ function renderAuthModeOptions(preset, selected = "api_key") {
   if (!select) return;
   let modes = preset?.authModes?.length ? Array.from(new Set([...preset.authModes, "keychain"])) : ["api_key", "keychain", "none"];
   // account_pool 预设不强制追加 keychain，避免混淆
-  if (preset?.defaultAuthMode === "account_pool" || preset?.authModes?.includes("account_pool")) {
+  if (preset?.defaultAuthMode === "account_pool" || preset?.authModes?.includes("account_pool") || preset?.authModes?.includes("cursor_subscription")) {
     modes = Array.from(new Set(preset.authModes || ["account_pool"]));
   }
   const current = modes.includes(selected) ? selected : (preset?.defaultAuthMode || modes[0] || "api_key");
@@ -629,16 +632,24 @@ function providerHasAnthropicOauthRisk(provider, preset, authMode) {
   return authMode === "anthropic_oauth" || preset?.id === "anthropic-oauth" || provider?.authMode === "anthropic_oauth";
 }
 
+function providerHasCursorSubscriptionRisk(provider, preset, authMode) {
+  return authMode === "cursor_subscription" || preset?.id === "cursor-subscription" || provider?.providerType === "cursor_subscription";
+}
+
 function syncProviderRiskNote(provider = null) {
   const note = document.getElementById("provider-risk-note");
   if (!note) return;
   const selectedPreset = providerPresetById(document.getElementById("provider-preset-select")?.value);
   const preset = selectedPreset || providerPresetById(provider?.presetId);
   const authMode = document.getElementById("provider-auth-mode")?.value || provider?.authMode || "api_key";
-  const risky = providerHasCodexOauthRisk(provider, preset, authMode) || providerHasAnthropicOauthRisk(provider, preset, authMode);
+  const risky = providerHasCodexOauthRisk(provider, preset, authMode) || providerHasAnthropicOauthRisk(provider, preset, authMode) || providerHasCursorSubscriptionRisk(provider, preset, authMode);
   note.classList.toggle("hidden", !risky);
   if (!risky) {
     note.textContent = "";
+    return;
+  }
+  if (providerHasCursorSubscriptionRisk(provider, preset, authMode)) {
+    note.textContent = preset?.riskNote || "Cursor 订阅桥接（实验性）：仅个人本机使用；非官方兼容能力，可能随 Cursor 更新失效。";
     return;
   }
   if (providerHasAnthropicOauthRisk(provider, preset, authMode)) {
@@ -663,6 +674,27 @@ async function refreshAnthropicOauthStatus() {
     }
   } catch (err) {
     statusEl.innerHTML = `<span class="chip bad">状态读取失败</span> <span class="tiny muted">${escapeHtml(err?.message || String(err))}</span>`;
+  }
+}
+
+async function refreshCursorSubscriptionStatus() {
+  const statusEl = document.getElementById("provider-cursor-subscription-status");
+  if (!statusEl) return null;
+  const form = document.getElementById("provider-form");
+  const provider = {
+    id: form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "cursor-subscription",
+    providerType: "cursor_subscription",
+    baseUrl: form?.querySelector?.('[name="baseUrl"]')?.value?.trim() || "https://agent.api5.cursor.sh",
+    streamIdleTimeoutMs: Number(form?.querySelector?.('[name="streamIdleTimeoutMs"]')?.value || 600000)
+  };
+  try {
+    const state = await invoke("cursor-subscription:status", { provider });
+    const labels = { unconfigured: "未配置", connected: "已连接", auth_invalid: "认证失效", circuit_open: "暂时熔断", busy: "通道繁忙" };
+    statusEl.innerHTML = `<span class="chip ${state.configured ? "good" : "warn"}">${escapeHtml(labels[state.status] || state.status || "未知")}</span> <span class="tiny muted">${escapeHtml(state.accountLabel || "")}</span> <span class="tiny muted">· 并发固定 1 · 流静默超时 ${escapeHtml(String(state.streamIdleTimeoutMs || 600000))}ms</span>`;
+    return state;
+  } catch (err) {
+    statusEl.textContent = `状态读取失败：${err?.message || String(err)}`;
+    return null;
   }
 }
 
@@ -725,6 +757,7 @@ function syncProviderAuthControls() {
   const anthropicPanel = document.getElementById("provider-anthropic-oauth-panel");
   const codexPanel = document.getElementById("provider-codex-oauth-panel");
   const sub2apiPanel = document.getElementById("provider-sub2api-panel");
+  const cursorSubscriptionPanel = document.getElementById("provider-cursor-subscription-panel");
   if (!keyFields || !note) return;
   const needsKey = mode === "api_key" || mode === "keychain";
   keyFields.style.display = needsKey ? "" : "none";
@@ -737,6 +770,8 @@ function syncProviderAuthControls() {
     ? "已选择 Anthropic 官方认证（对齐 CC Switch）：复用本机 Claude Code 登录态（macOS Keychain / ~/.claude/.credentials.json），无需填写 API Key。"
     : mode === "account_pool"
     ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
+    : mode === "cursor_subscription"
+    ? "Cursor 订阅桥接（实验性）：仅个人本机使用；凭据仅进入系统安全存储，默认关闭且固定单并发。"
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
   if (codexPanel) {
     codexPanel.style.display = mode === "codex_oauth" ? "" : "none";
@@ -764,6 +799,10 @@ function syncProviderAuthControls() {
   if (sub2apiPanel) {
     const isSub2Api = preset?.id === "sub2api-codex";
     sub2apiPanel.style.display = isSub2Api ? "" : "none";
+  }
+  if (cursorSubscriptionPanel) {
+    cursorSubscriptionPanel.style.display = mode === "cursor_subscription" ? "" : "none";
+    if (mode === "cursor_subscription") refreshCursorSubscriptionStatus().catch(() => {});
   }
   syncProviderRiskNote();
 }
@@ -908,6 +947,46 @@ function requestOverrideItems(summary) {
   if (overrides.headerNames?.length) items.push(`请求头：${overrides.headerNames.join(", ")}`);
   if (overrides.bodyKeys?.length) items.push(`请求体字段：${overrides.bodyKeys.join(", ")}`);
   return items;
+}
+
+function routeSummaryItems(entry, request) {
+  const read = (camel, snake) => entry?.[camel] ?? entry?.[snake] ?? "";
+  const items = [
+    `请求模型：${read("requestedModel", "requested_model") || read("modelId", "model_id") || "-"}`,
+    `命中模型：${read("modelId", "model_id") || request?.modelId || request?.model_id || "-"}`,
+    `Provider：${read("providerId", "provider_id") || request?.providerId || request?.provider_id || "-"}`,
+    `上游模型：${read("upstreamModel", "upstream_model") || request?.upstreamModel || request?.upstream_model || "-"}`,
+    `上游协议：${read("apiFormat", "api_format") || request?.protocol || "-"}`
+  ];
+  const account = read("accountEmail", "account_email") || read("accountId", "account_id") || request?.accountEmail || request?.accountId;
+  if (account) items.push(`账号：${account}`);
+  const recovery = request?.routeRecovery || request?.route_recovery;
+  if (recovery) items.push(`路由恢复：${recovery}`);
+  const retryCount = request?.dispatchRetryCount ?? request?.dispatch_retry_count ?? read("retryCount", "retry_count");
+  if (Number(retryCount) > 0) items.push(`网关重试：${retryCount} 次`);
+  return items;
+}
+
+function streamTerminalItems(response) {
+  const terminal = response?.streamTerminal || response?.stream_terminal || response?.streamDiagnostics || response?.stream_diagnostics;
+  if (!terminal?.terminalState && !terminal?.state) return [];
+  const state = terminal.state || terminal.terminalState;
+  const reason = terminal.reason || terminal.terminalReason || "";
+  const stateLabel = { completed: "已完成", incomplete: "未完成", failed: "失败", cancelled: "已取消" }[state] || state;
+  const reasonLabel = {
+    protocol_terminal: "协议终态",
+    adapter_eof: "上游 EOF",
+    upstream_stall_timeout: "上游静默超时",
+    upstream_error: "上游错误",
+    client_cancelled: "客户端取消"
+  }[reason] || reason;
+  const summary = response?.streamEventSummary || response?.stream_event_summary || {};
+  return [
+    `状态：${stateLabel}`,
+    reasonLabel ? `原因：${reasonLabel}` : "",
+    summary.sawMeaningfulEvent !== undefined ? `已收到有效输出：${summary.sawMeaningfulEvent ? "是" : "否"}` : "",
+    Number(summary.preludeRetryCount || 0) > 0 ? `首段重试：${summary.preludeRetryCount} 次` : ""
+  ].filter(Boolean);
 }
 
 function uniqueCopiedName(baseName, exists) {
@@ -2113,6 +2192,16 @@ function collectProviderForm() {
     if (!data.baseUrl) data.baseUrl = "https://api.anthropic.com";
     delete data.apiKeyEnv;
     delete data.apiKey;
+  } else if (authMode === "cursor_subscription") {
+    data.providerType = "cursor_subscription";
+    data.apiFormat = "cursor_subscription";
+    data.baseUrl = data.baseUrl || "https://agent.api5.cursor.sh";
+    data.keychainAccount = data.id;
+    data.enabled = raw.cursorSubscriptionEnabled === "on";
+    data.maxConcurrentRequests = 1;
+    data.streamIdleTimeoutMs = Math.max(60000, Number(raw.streamIdleTimeoutMs || 600000));
+    delete data.apiKeyEnv;
+    delete data.apiKey;
   } else if (authMode === "keychain") {
     data.keychainAccount = data.id;
     data._keychainSecret = data.apiKey;
@@ -2180,10 +2269,21 @@ async function refreshProviderPoolList() {
       const healthLabel = escapeHtml(account.healthLabel || health);
       const enabled = account.enabled !== false;
       const failHint = account.consecutiveFailures
-        ? `连续失败 ${account.consecutiveFailures}`
+        ? `账号连续失败 ${account.consecutiveFailures}`
         : "";
       const errHint = account.lastError ? String(account.lastError).slice(0, 200) : "";
-      const statusTitle = escapeHtml([failHint, errHint].filter(Boolean).join(" · ") || "运行健康度");
+      const modelHints = Object.entries(account.modelHealth || {})
+        .filter(([, item]) => item?.health && item.health !== "healthy")
+        .slice(0, 4)
+        .map(([model, item]) => {
+          const details = [
+            `${model}：${item.health === "cooldown" ? "冷却中" : "异常"}`,
+            item.consecutiveFailures ? `连续失败 ${item.consecutiveFailures}` : "",
+            item.lastError ? String(item.lastError).slice(0, 120) : ""
+          ].filter(Boolean).join(" · ");
+          return `模型健康 ${details}`;
+        });
+      const statusTitle = escapeHtml([failHint, errHint, ...modelHints].filter(Boolean).join("\n") || "运行健康度");
       const accessLabel = escapeHtml(
         account.accessStatusLabel ||
         (account.tokenExpired
@@ -2583,6 +2683,39 @@ document.getElementById("btn-pool-import-dir")?.addEventListener("click", async 
     toast(err?.message || String(err));
   }
 });
+document.getElementById("btn-cursor-subscription-connect")?.addEventListener("click", async () => {
+  const accessToken = document.getElementById("provider-cursor-access-token")?.value?.trim() || "";
+  const machineId = document.getElementById("provider-cursor-machine-id")?.value?.trim() || "";
+  if (!accessToken || !machineId) return toast("请填写访问凭据和本机标识", "error");
+  const payload = collectProviderForm();
+  try {
+    const result = await invoke("cursor-subscription:connect", { provider: payload, accessToken, machineId });
+    if (!result?.ok) return toast(result?.error || "保存失败", "error");
+    document.getElementById("provider-cursor-access-token").value = "";
+    document.getElementById("provider-cursor-machine-id").value = "";
+    await refreshCursorSubscriptionStatus();
+    toast("已安全保存到本机系统存储");
+  } catch (err) { toast(err?.message || String(err), "error"); }
+});
+document.getElementById("btn-cursor-subscription-test")?.addEventListener("click", async () => {
+  const output = document.getElementById("provider-test-output");
+  output.textContent = "正在测试 Cursor 订阅通道…";
+  try {
+    const result = await invoke("cursor-subscription:test", { provider: collectProviderForm(), model: "auto" });
+    output.textContent = [result.ok ? "✓ Cursor 订阅通道已连接" : "✗ Cursor 订阅通道测试失败", `status: ${result.status || "n/a"}`, result.error || result.bodyPreview || ""].filter(Boolean).join("\n");
+    await refreshCursorSubscriptionStatus();
+  } catch (err) { output.textContent = `测试失败：${err?.message || String(err)}`; }
+});
+document.getElementById("btn-cursor-subscription-clear")?.addEventListener("click", async () => {
+  try {
+    await invoke("cursor-subscription:clear", { provider: collectProviderForm() });
+    document.getElementById("provider-cursor-access-token").value = "";
+    document.getElementById("provider-cursor-machine-id").value = "";
+    await refreshCursorSubscriptionStatus();
+    toast("已清除本机 Cursor 凭据");
+  } catch (err) { toast(err?.message || String(err), "error"); }
+});
+
 document.getElementById("btn-provider-key-toggle").addEventListener("click", () => {
   const input = document.getElementById("provider-api-key-input");
   const show = input.type === "password";
@@ -2747,6 +2880,25 @@ document.getElementById("btn-provider-discover").addEventListener("click", async
     output.textContent = `已查询到 ${state.providerDiscovery.length} 个模型`;
   } catch (err) {
     output.textContent = `查询失败：${err.message}`;
+  }
+});
+
+document.getElementById("btn-provider-sync-models")?.addEventListener("click", async () => {
+  const output = document.getElementById("provider-test-output");
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先保存供应商后再同步模型目录", "error");
+  output.textContent = "正在同步模型目录…";
+  try {
+    const result = await invoke("provider:sync-model-directory", { providerId });
+    if (!result.ok) {
+      output.textContent = `同步失败：${result.error || "未知错误"}`;
+      return;
+    }
+    await refreshAll();
+    output.textContent = [`已同步：新增 ${result.added || 0} 个，已有 ${result.known || 0} 个`, result.warning || ""].filter(Boolean).join("\n");
+    toast(result.added ? `已新增 ${result.added} 个待启用模型` : "模型目录已是最新");
+  } catch (err) {
+    output.textContent = `同步失败：${err.message || String(err)}`;
   }
 });
 
@@ -3825,6 +3977,7 @@ function renderRequestTrace(row) {
     }
   }
   events.push(
+    { role: "system", title: "实际路由", text: routeSummaryItems(row, request).join("\n"), timestamp: row.ts },
     { role: "system", title: "入口", text: `${row.method || "POST"} ${row.path || "-"}\n${agentLabel(row.client_id)} → ${row.provider_id || "-"} / ${row.upstream_model || "-"}`, timestamp: row.ts },
     { role: Number(row.status || 0) >= 400 ? "event" : "assistant", title: `响应 ${row.status || "-"}`, text: `${row.latency_ms || 0} ms\nprompt ${row.prompt_tokens || 0} · completion ${row.completion_tokens || 0} · total ${row.total_tokens || 0}${row.error ? `\n${row.error}` : ""}`, timestamp: row.ts }
   );
@@ -4862,6 +5015,7 @@ function structuredSummaryHtml(entry) {
     if (request.conversionChain?.steps?.length) {
       parts.push(summaryListBlock("协议转换链路", [request.conversionChain.steps.join(" -> ")]));
     }
+    parts.push(summaryListBlock("实际路由", routeSummaryItems(entry, request)));
     const errorClass = requestErrorClass(request);
     if (errorClass) parts.push(summaryListBlock("错误分类", [errorClass]));
     const rectifiers = rectifierItems(request);
@@ -4875,6 +5029,8 @@ function structuredSummaryHtml(entry) {
     if (response.text) parts.push(summaryBlock("响应文本", [response.text]));
     if (response.reasoning) parts.push(summaryBlock("思考 / reasoning", [response.reasoning]));
     if (response.toolCalls?.length) parts.push(summaryToolCallBlock("响应工具调用", response.toolCalls));
+    const terminalItems = streamTerminalItems(response);
+    if (terminalItems.length) parts.push(summaryListBlock("流式终态", terminalItems));
     if (response.usage) {
       parts.push(summaryListBlock("响应用量", [
         `prompt: ${response.usage.promptTokens || 0}`,

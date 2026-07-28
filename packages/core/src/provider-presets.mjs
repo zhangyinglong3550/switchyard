@@ -798,6 +798,28 @@ export const PROVIDER_PRESETS = [
     ]
   },
   {
+    id: "cursor-subscription",
+    label: "Cursor 订阅桥接（实验性）",
+    providerId: "cursor-subscription",
+    name: "Cursor 订阅桥接（实验性）",
+    providerType: "cursor_subscription",
+    apiFormat: "cursor_subscription",
+    baseUrl: "https://agent.api5.cursor.sh",
+    authModes: ["cursor_subscription"],
+    defaultAuthMode: "cursor_subscription",
+    enabled: false,
+    maxConcurrentRequests: 1,
+    streamIdleTimeoutMs: 600000,
+    experimental: true,
+    riskLevel: "high",
+    riskNote: "Cursor 订阅桥接（实验性）：仅个人本机使用；非官方兼容能力，可能随 Cursor 更新失效。凭据仅保存在本机系统安全存储，禁止共享账号、远程暴露或多账号轮换。",
+    note: "第一版只支持纯文本流式对话；不支持工具调用、图片、文件、动态模型发现或自动 fallback。",
+    preferPresetModels: true,
+    models: [
+      { id: "auto", displayName: "Cursor Auto", capabilities: { text: true, tools: false, reasoning: false, images: false, stream: true, multimodal: false } }
+    ]
+  },
+  {
     id: "custom-openai",
     label: "自定义 OpenAI-compatible",
     providerId: "custom",
@@ -826,6 +848,7 @@ export const AUTH_MODE_LABELS = {
   codex_oauth: "Codex OAuth（复用 codex login）",
   anthropic_oauth: "Anthropic 官方（复用 Claude Code 登录）",
   account_pool: "账号池（多账号）",
+  cursor_subscription: "Cursor 订阅桥接（实验性）",
   none: "无需认证"
 };
 
@@ -848,6 +871,7 @@ export function presetModelHints(presetOrId) {
 
 export function providerPresetFor(provider) {
   if (!provider) return null;
+  if (typeof provider === "string") return getProviderPreset(provider);
   if (provider.presetId) return getProviderPreset(provider.presetId);
   return PROVIDER_PRESETS.find((preset) => preset.providerId === provider.id || preset.id === provider.id) || null;
 }

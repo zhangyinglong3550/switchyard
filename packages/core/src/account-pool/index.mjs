@@ -99,6 +99,7 @@ export {
   accountPoolReady,
   resetRoundRobinCursors,
   setPoolStrategy,
+  recoverExpiredAccountCooldowns,
   POOL_KIND_META
 } from "./picker.mjs";
 

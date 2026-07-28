@@ -159,3 +159,16 @@ test("provider presets · Antigravity CLI2API and Sub2API native import integrat
   assert.ok(presetModelHints(sub).has("gpt-5.5"));
   assert.ok(presetModelHints(sub).has("gpt-5.4"));
 });
+
+test("provider presets · expose opt-in Cursor subscription bridge with explicit local-only warning", () => {
+  const cursor = providerPresetFor("cursor-subscription");
+  assert.ok(cursor);
+  assert.equal(cursor.providerType, "cursor_subscription");
+  assert.equal(cursor.apiFormat, "cursor_subscription");
+  assert.equal(cursor.defaultAuthMode, "cursor_subscription");
+  assert.equal(cursor.enabled, false);
+  assert.equal(cursor.maxConcurrentRequests, 1);
+  assert.match(cursor.label, /Cursor 订阅桥接（实验性）/);
+  assert.match(cursor.riskNote, /仅个人本机使用/);
+  assert.match(cursor.riskNote, /非官方兼容能力/);
+});

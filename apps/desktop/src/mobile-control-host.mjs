@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexAppServerClient } from "./codex-app-server.mjs";
 import { readConfig } from "./config-store.mjs";
+import { subscribeLogs } from "./logs.mjs";
 import { createMobileControlStore } from "./mobile-control/store.mjs";
 import { createEventLedger } from "./mobile-control/event-ledger.mjs";
 import { createCodexRuntime } from "./mobile-control/codex-runtime.mjs";
@@ -147,6 +148,12 @@ export async function startMobileControl({
       ledger,
       readConfig
     });
+    // Feed trusted gateway trace/final records into the same mobile event
+    // ledger. A record is accepted only when the gateway provided a Codex
+    // parent-thread correlation id; no heuristic prompt matching is used.
+    const unsubscribeGatewayLogs = subscribeLogs((entry) => {
+      if (entry?.traceLog || entry?.requestLog) registry.recordGatewayRequest?.(entry);
+    });
     const server = createMobileControlServer({
       host,
       port,
@@ -157,11 +164,12 @@ export async function startMobileControl({
     try {
       await server.start();
     } catch (error) {
+      unsubscribeGatewayLogs();
       codexClient.close();
       for (const runtime of runtimes) runtime.close?.();
       throw error;
     }
-    instance = { root, store, ledger, registry, server, codexClient, runtimes };
+    instance = { root, store, ledger, registry, server, codexClient, runtimes, unsubscribeGatewayLogs };
     return mobileControlStatus();
   })();
   try {
@@ -179,6 +187,7 @@ export async function stopMobileControl() {
   instance = null;
   if (!current) return mobileControlStatus();
   await current.server.stop();
+  current.unsubscribeGatewayLogs?.();
   current.codexClient.close();
   for (const runtime of current.runtimes) runtime.close?.();
   return mobileControlStatus();
@@ -219,4 +228,8 @@ export function listMobileDevices() {
 export function revokeMobileDevice(deviceId) {
   if (!instance?.store) throw new Error("移动控制未启用");
   return instance.store.revokeDevice(deviceId);
+}
+
+export function listUnmatchedMobileGatewayRequests() {
+  return instance?.registry?.listUnmatchedGatewayRequests?.() || [];
 }

@@ -99,18 +99,33 @@ export function listEligibleAccounts(pool, { excludeIds = [], now = Date.now() }
   });
 }
 
+function modelHealthFor(account, upstreamModel = "") {
+  return account?.modelHealth?.[String(upstreamModel || "").trim()] || null;
+}
+
+function modelHealthRank(account, upstreamModel, now) {
+  const health = modelHealthFor(account, upstreamModel);
+  if (!health) return 0;
+  if (health.health === "cooldown" && health.cooldownUntil && Date.parse(health.cooldownUntil) > now) return 3;
+  if (health.health === "degraded" || health.consecutiveFailures) return 1;
+  return 0;
+}
+
 export function pickAccount(pool, {
   strategy = "weighted_round_robin",
   excludeIds = [],
   providerId = pool?.providerId || "",
+  upstreamModel = "",
   now = Date.now()
 } = {}) {
   const candidates = listEligibleAccounts(pool, { excludeIds, now });
   if (!candidates.length) return null;
+  const modelReady = candidates.filter((account) => modelHealthRank(account, upstreamModel, now) < 3);
+  const modelCandidates = modelReady.length ? modelReady : candidates;
 
-  // prefer healthy with zero failures
-  const healthy = candidates.filter((a) => a.health === "healthy" && !a.consecutiveFailures);
-  const poolCandidates = healthy.length ? healthy : candidates;
+  // Prefer accounts that are globally and model-specifically healthy.
+  const healthy = modelCandidates.filter((account) => account.health === "healthy" && !account.consecutiveFailures && modelHealthRank(account, upstreamModel, now) === 0);
+  const poolCandidates = healthy.length ? healthy : modelCandidates;
 
   if (strategy === "least_recently_used") {
     return [...poolCandidates].sort((a, b) => {
@@ -122,6 +137,9 @@ export function pickAccount(pool, {
 
   if (strategy === "lowest_error_rate") {
     return [...poolCandidates].sort((a, b) => {
+      const aModel = modelHealthFor(a, upstreamModel)?.consecutiveFailures || 0;
+      const bModel = modelHealthFor(b, upstreamModel)?.consecutiveFailures || 0;
+      if (aModel !== bModel) return aModel - bModel;
       if (a.consecutiveFailures !== b.consecutiveFailures) return a.consecutiveFailures - b.consecutiveFailures;
       return Math.random() - 0.5;
     })[0];
@@ -270,7 +288,8 @@ export async function pickAndRefreshAccount(provider, {
   home,
   fetchImpl,
   maxRefreshAttempts = 5,
-  sessionKey = ""
+  sessionKey = "",
+  upstreamModel = ""
 } = {}) {
   if (!isAccountPoolProvider(provider)) {
     return { ok: false, error: "not-account-pool-provider" };
@@ -291,7 +310,8 @@ export async function pickAndRefreshAccount(provider, {
       account = pickAccount(pool, {
         strategy,
         excludeIds: [...tried],
-        providerId: provider.id
+        providerId: provider.id,
+        upstreamModel
       });
     }
     if (!account) break;
@@ -398,25 +418,47 @@ export function bindProviderToAccount(provider, account) {
   };
 }
 
-export function markAccountSuccess(provider, account, { home } = {}) {
+export function markAccountSuccess(provider, account, { home, upstreamModel = "" } = {}) {
   if (!provider?.id || !account?.id) return;
+  const now = new Date().toISOString();
+  const model = String(upstreamModel || "").trim();
+  const modelHealth = { ...(account.modelHealth || {}) };
+  if (model) {
+    modelHealth[model] = {
+      health: "healthy",
+      consecutiveFailures: 0,
+      lastError: "",
+      lastUsedAt: now,
+      lastSuccessAt: now,
+      cooldownUntil: null
+    };
+  }
   updateAccountRuntime(provider.id, account.id, {
     health: "healthy",
     consecutiveFailures: 0,
     lastError: "",
-    lastUsedAt: new Date().toISOString(),
-    lastSuccessAt: new Date().toISOString(),
-    cooldownUntil: null
+    lastUsedAt: now,
+    lastSuccessAt: now,
+    cooldownUntil: null,
+    modelHealth
   }, { poolKind: poolKindOf(provider), home });
+}
+
+// 认证、权限与限额反映账号本身不可用；5xx、协议兼容和临时网络错误则只影响
+// 该账号访问当前模型的路径。这样某个模型故障不会拖累同一账号上的其他模型。
+function isAccountScopedFailure(status) {
+  return [401, 403, 429].includes(Number(status) || 0);
 }
 
 export function markAccountFailure(provider, account, {
   status = 0,
   error = "",
   home,
-  retryAfterSec
+  retryAfterSec,
+  upstreamModel = ""
 } = {}) {
   if (!provider?.id || !account?.id) return;
+  const accountScoped = isAccountScopedFailure(status);
   const failures = (account.consecutiveFailures || 0) + 1;
   let health = "degraded";
   let cooldownUntil = null;
@@ -424,18 +466,34 @@ export function markAccountFailure(provider, account, {
     health = "cooldown";
     const seconds = Number.isFinite(Number(retryAfterSec))
       ? Math.max(30, Number(retryAfterSec))
-      : Math.min(900, 30 * failures);
+      : Math.min(900, 30 * (accountScoped ? failures : 1));
     cooldownUntil = new Date(Date.now() + seconds * 1000).toISOString();
-  } else if (status === 401) {
-    health = "degraded";
   }
-  updateAccountRuntime(provider.id, account.id, {
-    health,
-    consecutiveFailures: failures,
-    lastError: String(error || `status ${status}`).slice(0, 500),
-    lastUsedAt: new Date().toISOString(),
-    cooldownUntil
-  }, { poolKind: poolKindOf(provider), home });
+  const now = new Date().toISOString();
+  const message = String(error || `status ${status}`).slice(0, 500);
+  const model = String(upstreamModel || "").trim();
+  const modelHealth = { ...(account.modelHealth || {}) };
+  if (model) {
+    const current = modelHealth[model] || {};
+    modelHealth[model] = {
+      health,
+      consecutiveFailures: (current.consecutiveFailures || 0) + 1,
+      lastError: message,
+      lastUsedAt: now,
+      cooldownUntil
+    };
+  }
+  const runtimePatch = {
+    lastUsedAt: now,
+    modelHealth
+  };
+  if (accountScoped) {
+    runtimePatch.health = health;
+    runtimePatch.consecutiveFailures = failures;
+    runtimePatch.lastError = message;
+    runtimePatch.cooldownUntil = cooldownUntil;
+  }
+  updateAccountRuntime(provider.id, account.id, runtimePatch, { poolKind: poolKindOf(provider), home });
 }
 
 export function accountPoolReady(provider, { home } = {}) {
@@ -454,4 +512,39 @@ export function setPoolStrategy(providerId, strategy, opts = {}) {
   const pool = loadPool(providerId, opts);
   pool.strategy = strategy;
   return savePool(pool, opts);
+}
+
+/**
+ * Clears expired account/model cooldowns without issuing any upstream request.
+ * Recovered entries remain degraded until a real request succeeds, avoiding a
+ * background probe that might spend quota or refresh credentials unexpectedly.
+ */
+export function recoverExpiredAccountCooldowns(provider, { home, now = Date.now() } = {}) {
+  if (!provider?.id) throw new Error("provider.id is required");
+  const pool = loadPool(provider.id, { poolKind: poolKindOf(provider), home });
+  let recoveredAccounts = 0;
+  let recoveredModels = 0;
+  const accounts = pool.accounts.map((account) => {
+    let changed = false;
+    const next = { ...account, modelHealth: { ...(account.modelHealth || {}) } };
+    const accountUntil = Date.parse(account.cooldownUntil || "");
+    if (account.health === "cooldown" && Number.isFinite(accountUntil) && accountUntil <= now) {
+      next.health = "degraded";
+      next.cooldownUntil = null;
+      next.lastError = account.lastError || "冷却期已到期，等待下一次请求验证";
+      changed = true;
+      recoveredAccounts += 1;
+    }
+    for (const [model, value] of Object.entries(next.modelHealth)) {
+      const until = Date.parse(value?.cooldownUntil || "");
+      if (value?.health === "cooldown" && Number.isFinite(until) && until <= now) {
+        next.modelHealth[model] = { ...value, health: "degraded", cooldownUntil: null, lastError: value.lastError || "冷却期已到期，等待下一次请求验证" };
+        changed = true;
+        recoveredModels += 1;
+      }
+    }
+    return changed ? next : account;
+  });
+  if (recoveredAccounts || recoveredModels) savePool({ ...pool, accounts }, { home });
+  return { ok: true, recoveredAccounts, recoveredModels, pool: loadPool(provider.id, { poolKind: poolKindOf(provider), home }) };
 }

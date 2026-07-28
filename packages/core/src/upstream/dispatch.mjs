@@ -15,6 +15,7 @@
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
+import { callCursorSubscription } from "../cursor-subscription/client.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
@@ -83,7 +84,8 @@ async function runWithAccountPool(provider, opts, runner) {
     const picked = await pickAndRefreshAccount(provider, {
       excludeIds,
       fetchImpl: opts?.fetchImpl,
-      sessionKey: opts?.accountSessionKey
+      sessionKey: opts?.accountSessionKey,
+      upstreamModel: opts?.upstreamModel || ""
     });
     if (!picked.ok) {
       lastError = picked.error || "account pool unavailable";
@@ -97,7 +99,8 @@ async function runWithAccountPool(provider, opts, runner) {
       if (result?.kind === "error" && shouldFailoverStatus(result.status)) {
         markAccountFailure(provider, account, {
           status: result.status,
-          error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`
+          error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`,
+          upstreamModel: opts?.upstreamModel || ""
         });
         lastResult = withAccountMeta(result, account);
         clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
@@ -107,7 +110,8 @@ async function runWithAccountPool(provider, opts, runner) {
       if (result?.kind === "stream" && result.upstream && !result.upstream.ok && shouldFailoverStatus(result.upstream.status)) {
         markAccountFailure(provider, account, {
           status: result.upstream.status,
-          error: `stream status ${result.upstream.status}`
+          error: `stream status ${result.upstream.status}`,
+          upstreamModel: opts?.upstreamModel || ""
         });
         lastResult = withAccountMeta({
           kind: "error",
@@ -117,11 +121,11 @@ async function runWithAccountPool(provider, opts, runner) {
         clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
         continue;
       }
-      markAccountSuccess(provider, account);
+      markAccountSuccess(provider, account, { upstreamModel: opts?.upstreamModel || "" });
       return withAccountMeta(result, account);
     } catch (err) {
       const message = err?.message || String(err);
-      markAccountFailure(provider, account, { status: 0, error: message });
+      markAccountFailure(provider, account, { status: 0, error: message, upstreamModel: opts?.upstreamModel || "" });
       clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
       lastError = message;
       lastResult = withAccountMeta({
@@ -148,7 +152,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   const accountSessionKey = provider?.poolKind === "antigravity_oauth"
     ? antigravitySessionKey(chatBody, opts)
     : "";
-  const poolOpts = accountSessionKey ? { ...opts, accountSessionKey } : opts;
+  const poolOpts = { ...opts, ...(accountSessionKey ? { accountSessionKey } : {}), upstreamModel };
   return withDispatchRetry(provider, opts.model, retryOpts, () =>
     runWithAccountPool(provider, poolOpts, (activeProvider, account) =>
       dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
@@ -165,6 +169,17 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
   const upstreamOpts = { ...opts, proxyUrl: effectiveProxyUrl(provider, opts.proxyUrl) };
   const requestOverrides = collectRequestOverrides(provider, ctxModel);
   const upstreamOptsWithOverrides = applyHeaderOverrides(upstreamOpts, requestOverrides);
+
+  if (apiFormat === "cursor_subscription") {
+    const result = await callCursorSubscription(provider, { ...outbound, model: upstreamModel, stream }, {
+      keychain: upstreamOptsWithOverrides.cursorSubscriptionKeychain,
+      transport: upstreamOptsWithOverrides.cursorSubscriptionTransport,
+      signal: upstreamOptsWithOverrides.signal
+    });
+    if (!result.ok) return withAccountMeta({ kind: "error", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (stream) return withAccountMeta({ kind: "stream", upstream: result.response, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    return withAccountMeta({ kind: "json", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+  }
 
   if (apiFormat === "antigravity") {
     const built = buildAntigravityEnvelope(provider, upstreamModel, outbound, upstreamOptsWithOverrides);

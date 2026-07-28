@@ -1298,6 +1298,12 @@ test("server records sanitized native Responses stream diagnostics", async (t) =
   assert.equal(diag.doneCount, 1);
   assert.equal(diag.sawMeaningfulEvent, true);
   assert.equal(requestLog.responseSummary.finishReason, "completed");
+  assert.deepEqual(requestLog.responseSummary.streamTerminal, {
+    state: "completed",
+    reason: "protocol_terminal"
+  });
+  assert.equal(diag.terminalState, "completed");
+  assert.equal(diag.terminalReason, "protocol_terminal");
   assert.equal(requestLog.responseSummary.streamEventSummary.textDeltaCount, 1);
   assert.equal(requestLog.responseSummary.streamEventSummary.functionCallDeltaCount, 1);
   assert.equal(requestLog.responseSummary.toolCalls[0].name, "function_call_arguments");
@@ -1356,7 +1362,8 @@ test("server emits response.failed when native Responses stream disconnects", as
   assert.match(text, /delta.*partial/);
 });
 
-test("server cancels an idle native Responses stream and emits response.incomplete", async (t) => {
+test("server records upstream idle timeout as an incomplete stream terminal", async (t) => {
+  const logs = [];
   const upstream = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
@@ -1385,7 +1392,7 @@ test("server cancels an idle native Responses stream and emits response.incomple
     }],
     models: [{ id: "codex/gpt-5.5", providerId: "codex", upstreamModel: "gpt-5.5" }]
   });
-  const server = createServer();
+  const server = createServer({ onLog: (entry) => logs.push(entry) });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   t.after(async () => {
@@ -1405,6 +1412,12 @@ test("server cancels an idle native Responses stream and emits response.incomple
   assert.match(text, /event: response.incomplete/);
   assert.match(text, /"reason":"upstream_stall_timeout"/);
   assert.doesNotMatch(text, /event: response.failed/);
+  const requestLog = logs.find((entry) => entry.requestLog && entry.path === "/codex/v1/responses");
+  assert.deepEqual(requestLog?.responseSummary?.streamTerminal, {
+    state: "incomplete",
+    reason: "upstream_stall_timeout"
+  });
+  assert.equal(requestLog?.requestSummary?.streamDiagnostics?.terminalState, "incomplete");
 });
 
 test("server aborts the upstream Responses stream when the downstream client disconnects", async (t) => {
@@ -2541,4 +2554,38 @@ test("server returns 502 (not 500) when upstream is unreachable (status 0)", asy
   // 修复后：status 0 在 json() 出口收敛成 502，返回正常 JSON 错误体。
   assert.equal(result.status, 502, `expected 502, got ${result.status} body=${JSON.stringify(result.body)}`);
   assert.ok(result.body && (result.body.error || result.body.message), "should return JSON error body");
+});
+
+test("server records a trusted Codex parent-thread correlation id without exposing other headers", async (t) => {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ id: "x", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }));
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const logs = [];
+  const { tmp } = writeTempConfig({
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upstream.address().port}/v1` }],
+    models: [{ id: "p/a", providerId: "p", upstreamModel: "a" }],
+    clients: { codex: { enabled: true, allowedModels: ["*"] } }
+  });
+  const server = createServer({ onLog: (entry) => logs.push(entry) });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const response = await fetchJson(`http://127.0.0.1:${server.address().port}/codex/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Parent-Thread-Id": "019fa127-e5c6-76a3-8a45-41e97a44fed6",
+      "X-Unrelated-Secret": "must-not-be-recorded"
+    },
+    body: JSON.stringify({ model: "p/a", messages: [{ role: "user", content: "hello" }] })
+  });
+  assert.equal(response.status, 200);
+  const record = logs.find((entry) => entry.requestLog);
+  assert.equal(record.correlationThreadId, "019fa127-e5c6-76a3-8a45-41e97a44fed6");
+  assert.doesNotMatch(JSON.stringify(record), /must-not-be-recorded/);
 });

@@ -8,6 +8,7 @@ import {
   parseXaiImportPayload,
   upsertAccounts,
   loadPool,
+  savePool,
   listEligibleAccounts,
   pickAccount,
   bindProviderToAccount,
@@ -21,6 +22,7 @@ import {
   accountFromCodexAuthJson,
   poolKindOf,
   ensureFreshAccount,
+  markAccountFailure,
   isWebSsoJwt
 } from "../src/account-pool/index.mjs";
 import { providerReady, providerAuthHeaders, isCodexOAuthProvider } from "../src/upstream/clients.mjs";
@@ -92,6 +94,34 @@ test("picker · weighted round robin rotates accounts", () => {
     ];
     assert.equal(new Set(picks).size, 2);
     assert.deepEqual(picks.slice(0, 2).sort(), ["a1", "a2"].sort());
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("picker · model-specific failures avoid only the affected account-model route", () => {
+  const home = tmpHome();
+  try {
+    upsertAccounts("model-health-pool", [
+      { id: "a", email: "a@x.com", accessToken: "ta", refreshToken: "refresh-token-aaaaaaaaaaaaaaaa" },
+      { id: "b", email: "b@x.com", accessToken: "tb", refreshToken: "refresh-token-bbbbbbbbbbbbbbbb" }
+    ], { home, skipDuplicates: false });
+    const provider = { id: "model-health-pool", authMode: "account_pool", poolKind: "xai_oauth" };
+    const accountA = loadPool("model-health-pool", { home }).accounts.find((account) => account.id === "a");
+    markAccountFailure(provider, accountA, { status: 500, error: "model-a upstream error", upstreamModel: "model-a", home });
+
+    const pool = loadPool("model-health-pool", { home });
+    const updatedAccountA = pool.accounts.find((account) => account.id === "a");
+    assert.equal(updatedAccountA.modelHealth["model-a"].consecutiveFailures, 1);
+    assert.equal(updatedAccountA.health, "healthy", "5xx must not degrade the account for unrelated models");
+    assert.equal(updatedAccountA.consecutiveFailures, 0);
+    assert.equal(pickAccount(pool, { providerId: "model-health-pool", strategy: "lowest_error_rate", upstreamModel: "model-a" }).id, "b");
+    assert.equal(listPoolAccountsPublic("model-health-pool", { home }).accounts.find((account) => account.id === "a").modelHealth["model-a"].health, "degraded");
+
+    markAccountFailure(provider, updatedAccountA, { status: 429, error: "account quota exhausted", upstreamModel: "model-b", home });
+    const quotaLimited = loadPool("model-health-pool", { home }).accounts.find((account) => account.id === "a");
+    assert.equal(quotaLimited.health, "cooldown", "429 must cool down the whole account");
+    assert.equal(listEligibleAccounts(loadPool("model-health-pool", { home })).some((account) => account.id === "a"), false);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -644,4 +674,17 @@ test("parseCodexUsagePayload · remaining windows", async () => {
   assert.equal(q.secondaryRemainingPercent, 99);
   assert.match(q.summary, /5h 剩93%/);
   assert.equal(q.planType, "k12");
+});
+
+test("picker · expired cooldown is conservatively recovered as degraded", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-recover-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const { recoverExpiredAccountCooldowns } = await import("../src/account-pool/index.mjs");
+  savePool({ providerId: "recover-pool", poolKind: "xai_oauth", accounts: [{ id: "a", accessToken: "token", health: "cooldown", cooldownUntil: new Date(Date.now() - 1000).toISOString(), modelHealth: { "m": { health: "cooldown", cooldownUntil: new Date(Date.now() - 1000).toISOString() } } }] }, { home });
+  const result = recoverExpiredAccountCooldowns({ id: "recover-pool", poolKind: "xai_oauth" }, { home });
+  assert.equal(result.recoveredAccounts, 1);
+  assert.equal(result.recoveredModels, 1);
+  const account = loadPool("recover-pool", { poolKind: "xai_oauth", home }).accounts[0];
+  assert.equal(account.health, "degraded");
+  assert.equal(account.modelHealth.m.health, "degraded");
 });

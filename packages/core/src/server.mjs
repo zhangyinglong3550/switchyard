@@ -16,7 +16,8 @@ import { streamResponsesAsChat } from "./openai-adapter-out.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamResponsesAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
 import { SseParser } from "./sse-parser.mjs";
-import { iterateUpstreamBody, resolveStreamIdleTimeoutMs } from "./stream-idle-timeout.mjs";
+import { iterateUpstreamBody } from "./stream-idle-timeout.mjs";
+import { streamCompatPolicy } from "./stream-compat-policy.mjs";
 import {
   CODEX_RESPONSES_HEARTBEAT_MS,
   startStreamKeepalive,
@@ -68,6 +69,19 @@ function incomingHeadersFromReq(req) {
   return { ...(req?.headers || {}) };
 }
 
+// Codex Desktop sends its native task id on gateway requests. Retain only this
+// opaque identifier (never arbitrary request headers) so the mobile controller
+// can attach a gateway route to the exact Codex task.
+function codexThreadCorrelation(req, clientId) {
+  if (clientId !== "codex") return "";
+  const headers = req?.headers || {};
+  const value = headers["x-codex-parent-thread-id"] || headers["x-codex-thread-id"] || "";
+  const id = Array.isArray(value) ? value[0] : value;
+  return /^[0-9a-f]{8}-[0-9a-f-]{20,80}$/i.test(String(id || "").trim())
+    ? String(id).trim()
+    : "";
+}
+
 function dispatchOptsFromReq(req, base = {}) {
   return {
     ...base,
@@ -94,8 +108,12 @@ function bindRequestAbort(req, res) {
   return controller;
 }
 
-function streamIdleTimeoutMs(config, route) {
-  return resolveStreamIdleTimeoutMs(route?.model, route?.provider, config);
+function streamCompatibility(config, route, protocol = "") {
+  return streamCompatPolicy({ config, provider: route?.provider, model: route?.model, protocol });
+}
+
+function streamIdleTimeoutMs(config, route, protocol = "") {
+  return streamCompatibility(config, route, protocol).idleTimeoutMs;
 }
 
 function stripClientPrefix(pathname) {
@@ -129,7 +147,8 @@ export function createServer({ onLog } = {}) {
       requestLog: true,
       method: req.method,
       path: url.pathname,
-      clientId: clientId || null
+      clientId: clientId || null,
+      correlationThreadId: codexThreadCorrelation(req, clientId) || null
     };
     try {
       if (req.method === "GET" && path === "/health") {
@@ -291,6 +310,10 @@ function recordRoute(record, route, requestedModel) {
   record.providerId = route.provider.id;
   record.upstreamModel = route.upstreamModel;
   record.apiFormat = route.provider.apiFormat || "openai_chat";
+  if (record.routeRecovery) {
+    if (!record.requestSummary) record.requestSummary = {};
+    record.requestSummary.routeRecovery = record.routeRecovery;
+  }
 }
 
 function previewText(value, max = 1200) {
@@ -622,9 +645,13 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
     text: "",
     reasoning: "",
     toolCalls,
-    finishReason: summary?.sawTerminalEvent ? "completed" : "incomplete",
+    finishReason: summary?.terminalState || (summary?.sawTerminalEvent ? "completed" : "incomplete"),
     usage: streamUsage,
     error,
+    streamTerminal: summary?.terminalState ? {
+      state: summary.terminalState,
+      reason: summary.terminalReason || ""
+    } : null,
     streamDiagnostics: summary || null,
     streamEventSummary: {
       textDeltaCount,
@@ -887,7 +914,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
         protocol: "responses",
         model: body.model,
         idleTimeoutMs: streamIdleTimeoutMs(config, route),
-        retryUpstream: dispatchNativeStream,
+        retryUpstream: streamCompatibility(config, route, "responses").retryPreludeOnEof ? dispatchNativeStream : null,
         onStreamSummary: (summary) => {
           recordStreamDiagnostics(requestRecord, summary, { status: upstream?.status || 0 });
         },
@@ -940,9 +967,10 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
         });
       }
     }
-    // Antigravity is normalized to Chat SSE by dispatch, so it can use the
-    // same lossless Chat -> Responses bridge as OpenAI-compatible providers.
-    if (apiFormat !== "openai_chat" && apiFormat !== "antigravity") {
+    // Antigravity and Cursor subscription are normalized to Chat SSE by
+    // dispatch, so they can use the same lossless Chat -> Responses bridge as
+    // OpenAI-compatible providers.
+    if (apiFormat !== "openai_chat" && apiFormat !== "antigravity" && apiFormat !== "cursor_subscription") {
       const fallback = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, dispatchOptsFromReq(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       recordDispatchCompatibility(requestRecord, fallback);
       if (fallback.kind === "error") {
@@ -984,7 +1012,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
       // finish_reason. Do not convert that ambiguous terminal state into a
       // successful Codex response; keep the partial output and surface it as
       // incomplete instead.
-      acceptUsageFooterAsTerminal: !(route.provider.id === "ke" && route.upstreamModel === "kimi-k3"),
+      acceptUsageFooterAsTerminal: streamCompatibility(config, route, "responses").acceptUsageFooterAsTerminal,
       onUsage: (usage) => {
         applyUsageToRequestRecord(requestRecord, usage);
         if (!requestRecord.responseSummary) requestRecord.responseSummary = {};
@@ -1231,8 +1259,36 @@ function consumeSseLines(state, text, { flush = false, onLine } = {}) {
   }
 }
 
+function markStreamTerminal(streamState, state, reason = "") {
+  if (!streamState || streamState.terminalState === "completed") return;
+  streamState.terminalState = state;
+  streamState.terminalReason = reason;
+}
+
+function markStreamTerminalFromError(streamState, err) {
+  if (streamState?.sawTerminalEvent) {
+    markStreamTerminal(streamState, "completed", "protocol_terminal");
+    return;
+  }
+  if (err?.code === "SWITCHYARD_STREAM_IDLE_TIMEOUT") {
+    markStreamTerminal(streamState, "incomplete", "upstream_stall_timeout");
+    return;
+  }
+  if (err?.code === "SWITCHYARD_INCOMPLETE_STREAM") {
+    markStreamTerminal(streamState, "incomplete", "adapter_eof");
+    return;
+  }
+  if (err?.name === "AbortError" || err?.code === "ABORT_ERR") {
+    markStreamTerminal(streamState, "cancelled", "client_cancelled");
+    return;
+  }
+  markStreamTerminal(streamState, "failed", "upstream_error");
+}
+
 function publicStreamDiagnostics(diag, extra = {}) {
   if (!diag) return null;
+  const sawTerminalEvent = Boolean(extra.sawTerminalEvent ?? diag.sawTerminalEvent);
+  const terminalState = extra.terminalState || (sawTerminalEvent ? "completed" : "incomplete");
   return {
     protocol: diag.protocol,
     chunkCount: diag.chunkCount,
@@ -1243,7 +1299,9 @@ function publicStreamDiagnostics(diag, extra = {}) {
     retryCount: diag.retryCount,
     preludeRetryCount: diag.preludeRetryCount,
     usage: diag.usage || null,
-    sawTerminalEvent: Boolean(extra.sawTerminalEvent ?? diag.sawTerminalEvent),
+    terminalState,
+    terminalReason: extra.terminalReason || (sawTerminalEvent ? "protocol_terminal" : "adapter_eof"),
+    sawTerminalEvent,
     sawMeaningfulEvent: Boolean(extra.sawMeaningfulEvent ?? diag.sawMeaningfulEvent)
   };
 }
@@ -1264,7 +1322,7 @@ async function pipeRawStream(upstream, res, {
       : (response) => response.write(`: switchyard keepalive ${Date.now()}\n\n`)
   });
   let wroteUpstreamChunk = false;
-  const streamState = { sawTerminalEvent: false, sawMeaningfulEvent: false };
+  const streamState = { sawTerminalEvent: false, sawMeaningfulEvent: false, terminalState: "", terminalReason: "" };
   // 始终建 diag，以便提取流式 usage（chat/responses 均可）
   const streamDiagnostics = createStreamDiagnostics(protocol || "responses");
   let streamObserver = createSseObserver(streamDiagnostics, protocol || "responses", streamState);
@@ -1312,7 +1370,7 @@ async function pipeRawStream(upstream, res, {
           writeChunk(chunk);
         }
         streamObserver.flush();
-        if (protocol === "responses" && !streamState.sawTerminalEvent) {
+        if ((protocol === "responses" || upstream?.switchyardRequireTerminal) && !streamState.sawTerminalEvent) {
           const incomplete = new Error(wroteUpstreamChunk
             ? "Responses stream disconnected before completion"
             : "Responses stream ended before emitting completion");
@@ -1323,9 +1381,13 @@ async function pipeRawStream(upstream, res, {
           for (const pending of pendingPreludeChunks) res.write(pending);
           resetBufferedPrelude();
         }
+        markStreamTerminal(streamState, "completed", "protocol_terminal");
         return;
       } catch (err) {
-        if (streamState.sawTerminalEvent) return;
+        if (streamState.sawTerminalEvent) {
+          markStreamTerminal(streamState, "completed", "protocol_terminal");
+          return;
+        }
         const retryable = shouldRetryStreamError(err) || err?.code === "SWITCHYARD_INCOMPLETE_STREAM";
         if (!streamState.sawMeaningfulEvent && !retried && typeof retryUpstream === "function" && retryable) {
           retried = true;
@@ -1342,12 +1404,14 @@ async function pipeRawStream(upstream, res, {
           writeRawStreamHeaders(res, upstream);
           continue;
         }
+        markStreamTerminalFromError(streamState, err);
         try { if (typeof onError === "function") onError(err); } catch {}
         writeStreamError(res, err, { protocol, model });
         return;
       }
     }
   } catch (err) {
+    markStreamTerminalFromError(streamState, err);
     try { if (typeof onError === "function") onError(err); } catch {}
     writeStreamError(res, err, { protocol, model });
   } finally {
@@ -1500,7 +1564,16 @@ async function pipeStream(upstream, res, ctx) {
   });
   if (!upstream.body) {
     if (typeof ctx?.onStreamSummary === "function") {
-      try { ctx.onStreamSummary({ protocol: "chat", usage: null, sawTerminalEvent: false }); } catch {}
+      try {
+        ctx.onStreamSummary({
+          protocol: "chat",
+          usage: null,
+          terminalState: "incomplete",
+          terminalReason: "adapter_eof",
+          sawTerminalEvent: false,
+          sawMeaningfulEvent: false
+        });
+      } catch {}
     }
     writeStreamError(res, new Error("Chat stream ended before emitting completion"), { protocol: "chat" });
     res.end();
@@ -1509,7 +1582,7 @@ async function pipeStream(upstream, res, ctx) {
   const decoder = new TextDecoder();
   const lineState = { buffer: "" };
   const streamDiagnostics = createStreamDiagnostics("chat");
-  const streamState = { sawTerminalEvent: false, sawMeaningfulEvent: false };
+  const streamState = { sawTerminalEvent: false, sawMeaningfulEvent: false, terminalState: "", terminalReason: "" };
   const streamObserver = createSseObserver(streamDiagnostics, "chat", streamState);
   const writeLine = (line) => {
     if (line === "") {
@@ -1533,11 +1606,19 @@ async function pipeStream(upstream, res, ctx) {
     consumeSseLines(lineState, decoderTail, { flush: true, onLine: writeLine });
     streamObserver.flush();
     if (!streamState.sawTerminalEvent) {
-      writeStreamError(res, new Error("Chat stream disconnected before completion"), { protocol: "chat" });
+      const incomplete = new Error("Chat stream disconnected before completion");
+      incomplete.code = "SWITCHYARD_INCOMPLETE_STREAM";
+      markStreamTerminalFromError(streamState, incomplete);
+      writeStreamError(res, incomplete, { protocol: "chat" });
+    } else {
+      markStreamTerminal(streamState, "completed", "protocol_terminal");
     }
   } catch (err) {
     if (!streamState.sawTerminalEvent) {
+      markStreamTerminalFromError(streamState, err);
       writeStreamError(res, err, { protocol: "chat" });
+    } else {
+      markStreamTerminal(streamState, "completed", "protocol_terminal");
     }
   } finally {
     if (typeof ctx?.onStreamSummary === "function") {

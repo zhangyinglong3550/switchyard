@@ -1378,7 +1378,8 @@ function renderTurnResultActions(turn, summary) {
   const final = turn.entries.filter(({ message }) => message.role === "assistant" && !isToolMessage(message) && message.kind !== "thinking").map(({ message }) => message.text).join("\n\n");
   if (!final && summary.state === "running") return "";
   const failed = summary.state === "failed";
-  return `<div class="turn-actions" aria-label="结果快捷操作">${final ? `<button type="button" data-copy-value="${encodeURIComponent(final)}">复制</button>` : ""}<button type="button" data-turn-action="${failed ? "fix" : "continue"}">${failed ? "修复失败" : "继续"}</button>${failed ? '<button type="button" data-turn-action="verify">重新验证</button><button type="button" data-turn-action="failure">查看错误</button>' : '<button type="button" data-turn-action="summary">总结</button><button type="button" data-turn-action="files">查看修改</button><button type="button" data-turn-action="fork">Fork</button>'}</div>`;
+  const incomplete = summary.state === "incomplete";
+  return `<div class="turn-actions" aria-label="结果快捷操作">${final ? `<button type="button" data-copy-value="${encodeURIComponent(final)}">复制</button>` : ""}<button type="button" data-turn-action="${failed ? "fix" : incomplete ? "resume" : "continue"}">${failed ? "修复失败" : incomplete ? "从中断处继续" : "继续"}</button>${failed ? '<button type="button" data-turn-action="verify">重新验证</button><button type="button" data-turn-action="failure">查看错误</button><button type="button" data-turn-action="model">换模型继续</button>' : incomplete ? '<button type="button" data-turn-action="model">换模型继续</button><button type="button" data-turn-action="failure">查看路由</button>' : '<button type="button" data-turn-action="summary">总结</button><button type="button" data-turn-action="files">查看修改</button><button type="button" data-turn-action="fork">Fork</button>'}</div>`;
 }
 function renderTurnWork(turn) {
   const entries = turn.entries || [];
@@ -1548,6 +1549,7 @@ async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE
   }
   if (seq !== openSessionSeq) return;
   applySessionDetail(detail, { activate, instant: true, anchor });
+  syncLiveExecutionTimer();
   // Approval data is independent: never delay the first message paint on it.
   void loadApprovals().catch(() => {});
 }
@@ -1578,10 +1580,67 @@ async function openModelSheet() {
   }
 }
 
+function routeTerminalLabel(route = {}) {
+  const state = ({ completed: "已完成", incomplete: "未完成", failed: "失败", cancelled: "已取消" })[route.terminalState] || route.terminalState || "";
+  const reason = ({ protocol_terminal: "协议完成", adapter_eof: "上游 EOF", upstream_stall_timeout: "上游静默超时", upstream_error: "上游错误", client_cancelled: "客户端取消" })[route.terminalReason] || route.terminalReason || "";
+  return [state, reason].filter(Boolean).join(" · ");
+}
+
+let executionSummaryTimer = null;
+function liveExecutionElapsed() {
+  const at = Date.parse(current?.updatedAt || current?.createdAt || "");
+  if (!Number.isFinite(at)) return "";
+  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  return seconds >= 3600 ? `${Math.floor(seconds / 3600)}小时${Math.floor(seconds % 3600 / 60)}分` : seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`;
+}
+function renderLiveExecutionSummary() {
+  if (!current) return "";
+  const running = ["running", "queued", "waiting_for_approval"].includes(current.state);
+  const route = current.liveRoute || {};
+  const label = running ? `${stateLabel(current.state)} · ${liveExecutionElapsed() || "刚刚开始"}` : stateLabel(current.state || route.terminalState);
+  const upstream = [route.providerId, route.upstreamModel].filter(Boolean).join(" / ");
+  return `<section class="live-execution-summary ${running ? "running" : "terminal"}"><span class="live-execution-dot"></span><div><b>${escapeHtml(label || "执行状态")}</b><small>${escapeHtml([agentLabel(current.agent), current.model, upstream].filter(Boolean).join(" · ") || "等待实际路由")}</small></div></section>`;
+}
+function refreshLiveExecutionSummary() {
+  const node = document.querySelector("#messages > .live-execution-summary");
+  if (!node) return;
+  node.outerHTML = renderLiveExecutionSummary();
+}
+function syncLiveExecutionTimer() {
+  clearInterval(executionSummaryTimer); executionSummaryTimer = null;
+  if (current && ["running", "queued", "waiting_for_approval"].includes(current.state)) executionSummaryTimer = setInterval(refreshLiveExecutionSummary, 1000);
+}
+
+function renderLiveRouteCard(route) {
+  if (!route || !Object.values(route).some(Boolean)) return "";
+  const rows = [
+    ["请求", route.requestedModel],
+    ["命中", route.modelId],
+    ["上游", [route.providerId, route.upstreamModel].filter(Boolean).join(" / ")],
+    ["协议", route.apiFormat],
+    ["账号", route.account],
+    ["终态", routeTerminalLabel(route)]
+  ].filter(([, value]) => value);
+  if (!rows.length) return "";
+  return `<details class="live-route-card" open><summary><span>⌁</span><b>实际路由</b><small>${escapeHtml(routeTerminalLabel(route) || route.upstreamModel || "实时诊断")}</small><i>⌄</i></summary><dl>${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl></details>`;
+}
+
+function updateLiveRouteCard(route) {
+  if (!route || !current) return;
+  current.liveRoute = { ...(current.liveRoute || {}), ...route };
+  const turn = liveTurn();
+  const existing = turn.querySelector(":scope > .live-route-card");
+  refreshLiveExecutionSummary();
+  const html = renderLiveRouteCard(current.liveRoute);
+  if (!html) return;
+  if (existing) existing.outerHTML = html;
+  else turn.insertAdjacentHTML("afterbegin", html);
+}
+
 function liveTurn() {
   const host = $("#messages");
   let turn = host.querySelector(".conversation-turn:last-of-type");
-  if (!turn) { host.insertAdjacentHTML("beforeend", '<section class="conversation-turn" data-turn-id="live"></section>'); turn = host.querySelector(".conversation-turn:last-of-type"); }
+  if (!turn) { host.insertAdjacentHTML("beforeend", `${renderLiveExecutionSummary()}<section class="conversation-turn" data-turn-id="live"></section>`); turn = host.querySelector(".conversation-turn:last-of-type"); syncLiveExecutionTimer(); }
   return turn;
 }
 function liveTurnWork(turn) {
@@ -1593,6 +1652,7 @@ function appendEvent(event) {
   if (!current || event.sessionId !== current.id) return;
   sessionDetailCache.delete(current.id);
   if (event.goal) { current.goal = event.goal; renderGoalPanel(); }
+  if (event.route) updateLiveRouteCard(event.route);
   const host = $("#messages");
   if (event.type === "message" && event.summary) {
     const role = event.role || "assistant";
@@ -1727,8 +1787,9 @@ document.addEventListener("click", async (event) => {
       const action = turnAction.dataset.turnAction;
       if (action === "files") { document.querySelector(".produced-files")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
       if (action === "failure") { document.querySelector(".tl.failed")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+      if (action === "model") { await openModelSheet(); return; }
       if (action === "fork") { if (!current?.id) return; const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/fork`, { method: "POST", body: JSON.stringify({}) }); if (result.sessionId) await openSession(result.sessionId); return; }
-      const prompts = { continue: "继续完成这项工作", summary: "请总结本轮完成的工作、改动和验证结果", fix: "请定位并修复刚才失败的步骤", verify: "请重新运行验证，并报告结果" };
+      const prompts = { continue: "继续完成这项工作", resume: "请从刚才中断处继续，不要重复已完成的步骤。", summary: "请总结本轮完成的工作、改动和验证结果", fix: "请定位并修复刚才失败的步骤", verify: "请重新运行验证，并报告结果" };
       if (prompts[action]) { $("#message").value = prompts[action]; $("#message").focus(); updateComposerQueueState(); }
       return;
     }

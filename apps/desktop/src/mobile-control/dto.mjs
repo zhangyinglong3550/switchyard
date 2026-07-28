@@ -121,6 +121,22 @@ export function projectMobileSession(row = {}, overlay = {}) {
   };
 }
 
+function projectRoute(value) {
+  if (!value || typeof value !== "object") return null;
+  const terminal = value.streamTerminal || value.stream_terminal || {};
+  const route = {
+    requestedModel: cleanMobileText(value.requestedModel || value.requested_model || "", 160),
+    modelId: cleanMobileText(value.modelId || value.model_id || "", 160),
+    providerId: cleanMobileText(value.providerId || value.provider_id || "", 160),
+    upstreamModel: cleanMobileText(value.upstreamModel || value.upstream_model || "", 160),
+    apiFormat: cleanMobileText(value.apiFormat || value.api_format || "", 80),
+    account: cleanMobileText(value.account || value.accountEmail || value.account_email || value.accountId || value.account_id || "", 160),
+    terminalState: cleanMobileText(terminal.state || terminal.terminalState || value.terminalState || "", 80),
+    terminalReason: cleanMobileText(terminal.reason || terminal.terminalReason || value.terminalReason || "", 120)
+  };
+  return Object.values(route).some(Boolean) ? route : null;
+}
+
 function projectGoal(value) {
   if (!value || typeof value !== "object") return null;
   const plan = Array.isArray(value.plan) ? value.plan.map((item) => ({
@@ -160,6 +176,7 @@ export function projectMobileEvent(event = {}) {
     ...(Array.isArray(event.attachments) ? { attachments: event.attachments.map(projectAsset).filter(Boolean) } : {}),
     ...(event.delivery ? { delivery: projectAsset(event.delivery) } : {}),
     ...(event.tool ? { tool: projectTool(event.tool) } : {}),
+    ...(projectRoute(event.route) ? { route: projectRoute(event.route) } : {}),
     ...(projectGoal(event.goal) ? { goal: projectGoal(event.goal) } : {})
   };
 }

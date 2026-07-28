@@ -101,6 +101,7 @@ export function normalizeAccount(raw = {}) {
     lastError: String(raw.lastError || raw.last_error || "").slice(0, 500),
     lastUsedAt: normalizeTime(raw.lastUsedAt || raw.last_used_at),
     lastSuccessAt: normalizeTime(raw.lastSuccessAt || raw.last_success_at),
+    modelHealth: normalizeModelHealth(raw.modelHealth || raw.model_health),
     source: String(raw.source || "").trim(),
     notes: String(raw.notes || "").slice(0, 500),
     sub: String(raw.sub || "").trim(),
@@ -120,6 +121,24 @@ function parsePercent(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
   return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function normalizeModelHealth(raw = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [model, value] of Object.entries(raw)) {
+    const id = String(model || "").trim().slice(0, 240);
+    if (!id || !value || typeof value !== "object") continue;
+    out[id] = {
+      health: normalizeHealth(value.health),
+      cooldownUntil: normalizeTime(value.cooldownUntil || value.cooldown_until),
+      consecutiveFailures: Number.isFinite(Number(value.consecutiveFailures)) ? Math.max(0, Math.floor(Number(value.consecutiveFailures))) : 0,
+      lastError: String(value.lastError || value.last_error || "").slice(0, 500),
+      lastUsedAt: normalizeTime(value.lastUsedAt || value.last_used_at),
+      lastSuccessAt: normalizeTime(value.lastSuccessAt || value.last_success_at)
+    };
+  }
+  return out;
 }
 
 function normalizeHealth(value) {
@@ -209,6 +228,7 @@ export function publicAccountView(account) {
     lastError: account.lastError || "",
     lastUsedAt: account.lastUsedAt,
     lastSuccessAt: account.lastSuccessAt,
+    modelHealth: account.modelHealth || {},
     source: account.source,
     notes: account.notes || "",
     hasAccessToken: Boolean(account.accessToken),

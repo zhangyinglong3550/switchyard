@@ -13,6 +13,9 @@ import AdmZip from "adm-zip";
 
 const execFileAsync = promisify(execFile);
 import { readConfig, saveValidated, configFile, readRaw } from "./config-store.mjs";
+import { listConfigHistory, readConfigHistory } from "./config-history.mjs";
+import { preflightRoute } from "../../../packages/core/src/route-preflight.mjs";
+import { listPendingDiscoveredModels, approveDiscoveredModels } from "../../../packages/core/src/model-directory-sync.mjs";
 import { startGateway, stopGateway, restartGateway, reloadConfig, statusFromServer } from "./gateway-host.mjs";
 import {
   createMobilePairingChallenge,
@@ -20,10 +23,12 @@ import {
   mobileControlStatus,
   revokeMobileDevice,
   startMobileControl,
-  stopMobileControl
+  stopMobileControl,
+  listUnmatchedMobileGatewayRequests
 } from "./mobile-control-host.mjs";
 import { appendLog, snapshotLogs, subscribeLogs, logFilePath, readLogTail } from "./logs.mjs";
 import { listRequestLogs, usageByModel, usageByAgentModel, usageDaily } from "./request-log-store.mjs";
+import { buildHealthReport } from "./health-report.mjs";
 import { createProviderHealthMonitor } from "./provider-health.mjs";
 import { buildTestRequest, TEST_IMAGE_DATA_URL, TEST_IMAGE_LABEL } from "./test-console.mjs";
 import {
@@ -63,6 +68,7 @@ import { importProviders } from "../../../packages/core/src/importers/ccswitch.m
 import { parseSub2ApiDataFiles, publicSub2ApiDataImport } from "../../../packages/core/src/importers/sub2api-data.mjs";
 import { importSub2ApiDataToCodexPool } from "../../../packages/core/src/account-pool/import-sub2api.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
+import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/model-directory-sync.mjs";
 import {
   applyProfile, restoreProfile, restoreProfileBackup,
   profileTargets, listBackups,
@@ -102,6 +108,12 @@ import {
 } from "../../../packages/core/src/oauth-codex-local.mjs";
 import { refreshCodexTokens } from "../../../packages/core/src/account-pool/oauth-codex.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
+import {
+  clearCursorSubscriptionCredentials,
+  saveCursorSubscriptionCredentials
+} from "../../../packages/core/src/cursor-subscription/auth.mjs";
+import { normalizeCursorSubscriptionProvider } from "../../../packages/core/src/cursor-subscription/model-catalog.mjs";
+import { callCursorSubscription, clearCursorSubscriptionRuntime, cursorSubscriptionLaneSnapshot } from "../../../packages/core/src/cursor-subscription/client.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
 import { resolveRoute } from "../../../packages/core/src/router.mjs";
@@ -130,7 +142,8 @@ import {
   loadPool,
   syncAntigravityPoolToCliproxyDir,
   refreshPoolQuotas,
-  refreshAccountQuota
+  refreshAccountQuota,
+  recoverExpiredAccountCooldowns
 } from "../../../packages/core/src/account-pool/index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -997,6 +1010,9 @@ ipcMain.handle("config:save", (_e, payload) => {
   return r;
 });
 ipcMain.handle("config:file", () => configFile());
+ipcMain.handle("config:history:list", () => listConfigHistory());
+ipcMain.handle("config:history:restore", (_e, id) => { const result = saveValidated(readConfigHistory(id), { reason: "history-restore" }); try { reloadConfig(); } catch {} syncCodexArtifacts("config-history-restore"); return result; });
+ipcMain.handle("route:preflight", (_e, payload = {}) => preflightRoute(readConfig(), payload));
 ipcMain.handle("config:raw", () => readRaw());
 ipcMain.handle("gateway:status", () => statusFromServer());
 ipcMain.handle("gateway:start", async () => {
@@ -1013,6 +1029,7 @@ ipcMain.handle("gateway:restart", async () => {
   return result;
 });
 ipcMain.handle("mobile-control:status", () => mobileControlStatus());
+ipcMain.handle("mobile-control:unmatched-gateway-requests", () => listUnmatchedMobileGatewayRequests());
 ipcMain.handle("mobile-control:enable", () => startMobileControl());
 ipcMain.handle("mobile-control:disable", () => stopMobileControl());
 ipcMain.handle("mobile-control:pair-start", (_e, payload = {}) => {
@@ -1435,6 +1452,8 @@ ipcMain.handle("account-pool:list", (_e, payload = {}) => {
   });
 });
 
+ipcMain.handle("account-pool:recover-expired", (_e, payload = {}) => { const cfg = readConfig(); const provider = (cfg.providers || []).find((item) => item.id === String(payload.providerId || "").trim()); if (!provider) throw new Error("未找到账号池供应商"); return recoverExpiredAccountCooldowns(provider); });
+
 ipcMain.handle("account-pool:import-text", async (_e, payload = {}) => {
   const providerId = String(payload.providerId || "").trim();
   if (!providerId) throw new Error("providerId is required");
@@ -1690,6 +1709,49 @@ ipcMain.handle("account-pool:set-strategy", (_e, payload = {}) => {
   return savePool(pool);
 });
 
+ipcMain.handle("cursor-subscription:status", (_e, payload = {}) => {
+  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
+  const account = keychainAccountForProvider(provider);
+  const configured = hasKeychainSecret(account);
+  const lane = cursorSubscriptionLaneSnapshot(provider);
+  return {
+    ok: true,
+    configured,
+    status: configured ? lane.status : "unconfigured",
+    accountLabel: configured ? `Keychain · ${account.slice(0, 3)}***` : "未配置",
+    maxConcurrentRequests: 1,
+    streamIdleTimeoutMs: provider.streamIdleTimeoutMs
+  };
+});
+ipcMain.handle("cursor-subscription:connect", (_e, payload = {}) => {
+  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
+  const credentials = { accessToken: payload.accessToken, machineId: payload.machineId };
+  const result = saveCursorSubscriptionCredentials(provider, credentials, {
+    set: (account, secret) => setKeychainSecret(account, secret),
+    get: (account) => hasKeychainSecret(account),
+    delete: (account) => deleteKeychainSecret(account)
+  });
+  clearCursorSubscriptionRuntime(provider);
+  appendLog({ level: "info", msg: "cursor subscription credentials saved", providerId: provider.id });
+  return { ok: Boolean(result?.ok), status: "connected" };
+});
+ipcMain.handle("cursor-subscription:clear", (_e, payload = {}) => {
+  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
+  const result = clearCursorSubscriptionCredentials(provider, { delete: (account) => deleteKeychainSecret(account) });
+  clearCursorSubscriptionRuntime(provider);
+  appendLog({ level: "info", msg: "cursor subscription credentials cleared", providerId: provider.id });
+  return { ...result, status: "unconfigured" };
+});
+ipcMain.handle("cursor-subscription:test", async (_e, payload = {}) => {
+  const provider = { ...normalizeCursorSubscriptionProvider(payload.provider || payload), enabled: true };
+  const result = await callCursorSubscription(provider, {
+    model: String(payload.model || "auto"),
+    stream: false,
+    messages: [{ role: "user", content: "Reply with OK." }]
+  });
+  if (!result.ok) return { ok: false, status: result.status, error: result.payload?.error?.message || "Cursor 订阅通道测试失败" };
+  return { ok: true, status: result.status, bodyPreview: result.payload?.choices?.[0]?.message?.content || "连接成功" };
+});
 ipcMain.handle("provider:presets", () => listProviderPresets());
 ipcMain.handle("provider:test", async (_e, provider) => testProviderConnectivity(provider));
 ipcMain.handle("provider-health:list", () => getProviderHealthMonitor().snapshot());
@@ -1711,7 +1773,31 @@ ipcMain.handle("compat:packs", () => listCompatPacks());
 ipcMain.handle("compat:active", () => activeCompatSnapshot(readConfig()));
 ipcMain.handle("compat:registry:snapshot", () => registryRecommendationsForConfig(readConfig()));
 ipcMain.handle("compat:registry:recommend", (_e, payload = {}) => recommendCompatRules(payload));
+ipcMain.handle("model-directory:pending", (_e, payload = {}) => listPendingDiscoveredModels(readConfig(), String(payload.providerId || "")));
+ipcMain.handle("model-directory:approve", (_e, payload = {}) => { const merged = approveDiscoveredModels(readConfig(), payload.modelIds || [], { allowedClients: payload.allowedClients }); if (merged.approved) { saveValidated(merged.config, { reason: "model-directory-approve" }); try { reloadConfig(); } catch {} syncCodexArtifacts("model-directory-approve"); } return { ok: true, approved: merged.approved }; });
 ipcMain.handle("provider:discover-models", async (_e, provider) => discoverModelsForProvider(provider));
+ipcMain.handle("provider:sync-model-directory", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  const config = readConfig();
+  const provider = (config.providers || []).find((item) => item.id === providerId);
+  if (!provider) throw new Error(`未找到供应商：${providerId || "(空)"}`);
+  const discovered = await discoverModelsForProvider(provider);
+  if (!discovered.ok) return discovered;
+  const merged = mergeDiscoveredModelsIntoConfig(config, providerId, discovered.models);
+  // Persist the successful probe timestamp even when there are no additions;
+  // it is the only reliable indication that the local catalog was checked.
+  saveValidated(merged.config);
+  try { reloadConfig(); } catch {}
+  if (merged.added) syncCodexArtifacts("provider-model-directory-sync");
+  return {
+    ok: true,
+    url: discovered.url,
+    warning: discovered.warning || "",
+    added: merged.added,
+    known: merged.known,
+    models: merged.models
+  };
+});
 
 async function discoverModelsForProvider(provider) {
   const resolved = await resolveProbeProvider(provider);
@@ -1765,6 +1851,8 @@ async function discoverModelsForProvider(provider) {
   if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: errors.join(" | ") };
   return { ok: false, error: errors.join(" | ") || "未发现模型" };
 }
+
+ipcMain.handle("health-report:run", () => buildHealthReport({ config: readConfig(), gateway: statusFromServer(), providerHealth: getProviderHealthMonitor().snapshot(), mobile: mobileControlStatus() }));
 
 ipcMain.handle("gateway:doctor", () => {
   const cfg = readConfig();

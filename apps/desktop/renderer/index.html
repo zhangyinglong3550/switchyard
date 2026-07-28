@@ -931,6 +931,24 @@
           <div class="tiny muted" style="margin-top:6px;">高级凭证写入 <code>~/.switchyard/oauth/</code>，不会覆盖 Claude Code 的 Keychain / .credentials.json。</div>
         </details>
       </div>
+      <div class="callout" id="provider-cursor-subscription-panel" style="display:none;">
+        <div class="callout-title">Cursor 订阅桥接（实验性）</div>
+        <div class="callout-body">仅个人本机使用。非官方兼容能力，可能随 Cursor 更新失效。凭据只保存到系统安全存储；不要共享账号、不要远程暴露、不要把凭据粘贴到聊天或日志。</div>
+        <label style="margin-top:10px;"><input type="checkbox" name="cursorSubscriptionEnabled" id="provider-cursor-subscription-enabled"> 启用实验性桥接（默认关闭）</label>
+        <div class="row" style="margin-top:8px;">
+          <label>访问凭据 <input class="field" id="provider-cursor-access-token" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
+          <label>本机标识 <input class="field" id="provider-cursor-machine-id" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
+        </div>
+        <div class="row">
+          <label>流静默超时（毫秒）<input class="field" name="streamIdleTimeoutMs" type="number" min="60000" value="600000"></label>
+        </div>
+        <div id="provider-cursor-subscription-status" class="tiny muted" style="margin-top:8px;">未配置</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-cursor-subscription-connect">连接并安全保存</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-test">测试连接</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-clear">清除凭据</button>
+        </div>
+      </div>
       <div class="callout" id="provider-account-pool-panel" style="display:none;">
         <div class="callout-title" id="provider-pool-title">账号池</div>
         <div class="callout-body" id="provider-pool-body">
@@ -1053,6 +1071,7 @@
         <div class="actions" style="justify-content:flex-start; margin-top:10px;">
           <button class="btn" type="button" id="btn-provider-test">测试连接</button>
           <button class="btn" type="button" id="btn-provider-discover">查询模型</button>
+          <button class="btn" type="button" id="btn-provider-sync-models">同步模型目录</button>
         </div>
         <pre class="inline-console" id="provider-test-output">尚未测试</pre>
       </div>

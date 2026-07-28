@@ -400,6 +400,37 @@ test("registry publishes an error event when asynchronous message startup fails"
   ]);
 });
 
+test("registry projects live route diagnostics into mobile events without credentials", async (t) => {
+  const { registry, runtime } = fixture(t);
+  runtime.emit({
+    sessionId: "native-1",
+    type: "status",
+    summary: "running",
+    route: {
+      requestedModel: "gpt-alias",
+      modelId: "p1/m1",
+      providerId: "p1",
+      upstreamModel: "provider-model",
+      apiFormat: "openai_chat",
+      accountEmail: "user@example.com",
+      streamTerminal: { state: "incomplete", reason: "upstream_stall_timeout" },
+      apiKey: "secret-key"
+    }
+  });
+  const event = registry.listEvents({ after: 0 }).at(-1);
+  assert.deepEqual(event.route, {
+    requestedModel: "gpt-alias",
+    modelId: "p1/m1",
+    providerId: "p1",
+    upstreamModel: "provider-model",
+    apiFormat: "openai_chat",
+    account: "user@example.com",
+    terminalState: "incomplete",
+    terminalReason: "upstream_stall_timeout"
+  });
+  assert.doesNotMatch(JSON.stringify(event), /secret-key/);
+});
+
 test("registry maps runtime events into replayable mobile events", async (t) => {
   const { registry, runtime, ledger } = fixture(t);
   runtime.emit({
@@ -412,6 +443,17 @@ test("registry maps runtime events into replayable mobile events", async (t) => 
   assert.equal(events[0].sessionId, encodeMobileSessionId("codex", "native-1"));
   assert.equal(events[0].summary, "输出增量");
   assert.equal(ledger.latestId(), events[0].id);
+});
+
+test("registry releases an incomplete runtime session so the next mobile turn can start", async (t) => {
+  const { registry, runtime, calls } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  assert.equal((await registry.perform(sessionId, "sendMessage", { text: "第一条", messageId: "m-incomplete-1" }, "phone-1")).state, "running");
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.emit({ sessionId: "native-1", type: "status", summary: "incomplete" });
+  assert.equal((await registry.perform(sessionId, "sendMessage", { text: "第二条", messageId: "m-incomplete-2" }, "phone-1")).state, "running");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter(([name]) => name === "sendMessage").map(([, , payload]) => payload.text), ["第一条", "第二条"]);
 });
 
 test("registry exposes one-shot ACP approvals to mobile", async (t) => {
@@ -564,4 +606,53 @@ test("registry emits an approval event and waiting state so the current mobile s
   assert.equal(events[0].summary, "等待手机端一次性审批");
   assert.equal(events[1].type, "status");
   assert.equal(events[1].summary, "waiting_for_approval");
+});
+
+test("registry correlates trusted Codex gateway routes to the exact mobile session", async (t) => {
+  const { registry } = fixture(t);
+  const sessionId = registry.recordGatewayRequest({
+    traceLog: true,
+    clientId: "codex",
+    correlationThreadId: "019fa127-e5c6-76a3-8a45-41e97a44fed6",
+    requestedModel: "gpt-alias",
+    modelId: "p1/m1",
+    providerId: "p1",
+    upstreamModel: "provider-model",
+    apiFormat: "openai_chat"
+  });
+  assert.equal(sessionId, encodeMobileSessionId("codex", "019fa127-e5c6-76a3-8a45-41e97a44fed6"));
+  const started = registry.listEvents({ after: 0 }).at(-1);
+  assert.equal(started.summary, "running");
+  assert.equal(started.route.providerId, "p1");
+
+  registry.recordGatewayRequest({
+    requestLog: true,
+    clientId: "codex",
+    correlationThreadId: "019fa127-e5c6-76a3-8a45-41e97a44fed6",
+    requestedModel: "gpt-alias",
+    modelId: "p1/m1",
+    providerId: "p1",
+    upstreamModel: "provider-model",
+    apiFormat: "openai_chat",
+    status: 200,
+    responseSummary: { streamTerminal: { state: "incomplete", reason: "adapter_eof" } }
+  });
+  const finished = registry.listEvents({ after: 0 }).at(-1);
+  assert.equal(finished.summary, "incomplete");
+  assert.deepEqual(finished.route, {
+    requestedModel: "gpt-alias",
+    modelId: "p1/m1",
+    providerId: "p1",
+    upstreamModel: "provider-model",
+    apiFormat: "openai_chat",
+    account: "",
+    terminalState: "incomplete",
+    terminalReason: "adapter_eof"
+  });
+
+  assert.equal(registry.recordGatewayRequest({
+    requestLog: true,
+    clientId: "codex",
+    requestedModel: "unsafe-unmatched"
+  }), null, "unmatched gateway calls must never be assigned heuristically");
 });
