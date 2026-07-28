@@ -38,6 +38,7 @@
           <a data-tab="traces" data-nav-tier="detailed"><span class="icon-square">⌁</span>调用可视化</a>
           <a data-tab="skills" data-nav-tier="detailed"><span class="icon-square">✎</span>Skills</a>
           <a data-tab="plugins" data-nav-tier="detailed"><span class="icon-square">◇</span>插件</a>
+          <a data-tab="mobile-control" data-nav-tier="detailed"><span class="icon-square">▣</span>手机控制</a>
           <a data-tab="settings" data-nav-tier="detailed"><span class="icon-square">⚙</span>偏好设置</a>
         </nav>
       </div>
@@ -535,24 +536,19 @@
       </div>
     </section>
 
-    <!-- Settings -->
-    <section class="tab-panel" id="panel-settings">
-      <div class="toolbar"><div class="page-title">偏好设置</div></div>
-      <div class="page-scroll page-stack">
-        <div class="card">
-          <div class="hd"><h3>配置文件</h3></div>
-          <div class="bd">
-            <dl class="kv">
-              <dt>路径</dt><dd class="mono" id="settings-config-path">-</dd>
-              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件，可手动备份。</dd>
-            </dl>
-          </div>
+    <!-- Mobile Control -->
+    <section class="tab-panel" id="panel-mobile-control">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">手机控制</div>
+          <div class="tiny muted">通过一次性配对链接，在手机上安全查看和管理 Switchyard 会话。</div>
         </div>
+        <div style="flex:1;"></div>
+        <span class="status-pill stopped" id="mobile-control-status"><span class="dot"></span><span id="mobile-control-status-text">未启用</span></span>
+      </div>
+      <div class="page-scroll page-stack">
         <div class="card" id="mobile-control-card">
-          <div class="hd">
-            <h3>手机端控制</h3>
-            <span class="sub" id="mobile-control-status">未启用</span>
-          </div>
+          <div class="hd"><h3>连接与配对</h3><span class="sub">仅本机监听</span></div>
           <div class="bd mobile-control-grid">
             <div>
               <dl class="kv">
@@ -594,6 +590,22 @@
                 <div class="empty-state">启用后可管理配对设备</div>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab-panel" id="panel-settings">
+      <div class="toolbar"><div class="page-title">偏好设置</div></div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>配置文件</h3></div>
+          <div class="bd">
+            <dl class="kv">
+              <dt>路径</dt><dd class="mono" id="settings-config-path">-</dd>
+              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件，可手动备份。</dd>
+            </dl>
           </div>
         </div>
         <div class="card">

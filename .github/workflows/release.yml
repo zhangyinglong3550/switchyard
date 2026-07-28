@@ -111,7 +111,7 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   release:
     if: always() && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && needs.validate-release.result == 'success' && needs.build.result == 'success'

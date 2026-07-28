@@ -28,7 +28,11 @@ test("desktop wires mobile control lifecycle, pairing and packaged PWA assets", 
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.match(html, /data-tab="mobile-control"/);
+  assert.match(html, /id="panel-mobile-control"/);
+  assert.doesNotMatch(html.slice(html.indexOf('id="panel-settings"')), /id="mobile-control-card"/);
   assert.match(html, /Tailscale Serve/);
+  assert.match(renderer, /tab === "mobile-control"/);
   assert.match(renderer, /refreshMobileControl/);
   assert.match(renderer, /mobile-control:enable/);
   assert.match(renderer, /mobile-control:disable/);

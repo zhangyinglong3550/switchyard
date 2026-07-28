@@ -425,10 +425,8 @@ function setActiveTab(tab) {
   if (tab === "logs") refreshLogTail().catch(() => {});
   if (tab === "traces") renderLiveLogs();
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
-  if (tab === "settings") {
-    renderSettings();
-    refreshMobileControl().catch(() => {});
-  }
+  if (tab === "settings") renderSettings();
+  if (tab === "mobile-control") refreshMobileControl().catch(() => {});
 }
 
 document.querySelectorAll(".nav a").forEach((a) => {
@@ -1813,7 +1811,6 @@ async function restoreSelectedProfileBackup() {
 function renderSettings() {
   const pathEl = document.getElementById("settings-config-path");
   if (pathEl) pathEl.textContent = state.configPath || "-";
-  renderMobileControl();
 }
 
 function normalizeMobileTailscaleBase(value) {
@@ -1838,7 +1835,10 @@ function renderMobileControl() {
   const pairingUrl = document.getElementById("mobile-pairing-url");
   const tailscaleBase = document.getElementById("mobile-tailscale-base");
   const devices = document.getElementById("mobile-devices");
-  if (statusEl) statusEl.textContent = status.running ? "运行中 · 仅本机" : "未启用";
+  if (statusEl) {
+    statusEl.className = `status-pill ${status.running ? "running" : "stopped"}`;
+    statusEl.innerHTML = `<span class="dot"></span><span>${status.running ? "运行中 · 仅本机" : "未启用"}</span>`;
+  }
   if (urlEl) urlEl.textContent = status.url || `http://127.0.0.1:${status.configuredPort || 17889}`;
   if (toggle) {
     toggle.textContent = status.running ? "停用手机端" : "启用手机端";

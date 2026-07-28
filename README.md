@@ -2,7 +2,7 @@
 
 **本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build 里统一选择。
 
-[![version](https://img.shields.io/badge/version-2.2.10-blue)]()
+[![version](https://img.shields.io/badge/version-2.2.34-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
 [![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
 
@@ -120,7 +120,22 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 - **账号池**：官方 xAI 多号（供应商页）  
 - **客户端托管**：经 Switchyard 用任意供应商（客户端页 / 偏好设置 → Grok Build 三方模型）
 
-详细版里还可浏览 OpenCode / Grok 的 **Skills、会话、调用可视化**；偏好设置可编辑核心文件并查看 Grok 托管状态。
+详细版里还可浏览 OpenCode / Grok 的 **Skills、会话、调用可视化**；偏好设置可编辑核心文件并查看 Grok 托管状态。移动端配对和设备管理已迁移到独立的 **手机控制** 工具页。
+
+---
+
+### 7. 手机控制：在受控边界内查看和继续桌面 Agent 任务
+
+详细版的 **工具 → 手机控制** 是独立入口，不再混在偏好设置中。它通过一次性配对链接把手机接入桌面端的受控移动控制台：
+
+- 查看 Codex / Claude Code / Grok / OpenCode 的会话、运行状态、实时输出和任务规划；
+- 继续已有会话、创建任务、发送文件，并可对会话或项目置顶、刷新、批量整理；
+- 在明确标记为低风险的场景中处理一次性审批；高风险或永久授权仍必须回到桌面确认；
+- 配对、启停服务和已配对设备撤销都在桌面端完成。
+
+默认服务只监听 `127.0.0.1:17889`。远程访问推荐使用 **Tailscale Serve HTTPS**；不会暴露 Provider API Key、OAuth token、任意 Shell、本地文件系统或原始请求日志，也不要使用 Tailscale Funnel。
+
+更多安全边界和接入步骤见：[手机控制说明](docs/MOBILE-CONTROL-V1.zh-CN.md) · [Android 客户端说明](apps/android/README.zh-CN.md)。
 
 ---
 
@@ -133,6 +148,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 | 便宜模型也要能看图 | 视觉兜底链路 |
 | 多 Codex / 多 Grok 号 | 内置账号池，少依赖 CLI2API |
 | Grok Build 也想用公司/中转模型 | 一键写入 `sy-*` 托管块，走 `/grok/v1` |
+| 想在手机查看和继续桌面任务 | 独立手机控制页配对、实时状态和最小权限操作 |
 
 **不是又一个公网转发站**，而是给 AI 编程 Agent 用的 **本机模型控制台**。
 
@@ -164,6 +180,7 @@ xattr -cr /Applications/Switchyard.app
 | 会话 | 跨 Agent 会话浏览（Codex / Claude / Hermes / OpenCode / Grok） | ![会话](docs/assets/screenshots/07-sessions.png) |
 | 调用可视化 / 链路追踪 | 请求状态、延迟、重试与换号过程 | ![调用可视化](docs/assets/screenshots/08-traces.png) |
 | Skills | Skills 管理与安装（含 Grok / OpenCode 目录） | ![Skills](docs/assets/screenshots/09-skills.png) |
+| 手机控制 | 手机端启停、Tailscale HTTPS 配对链接与已配对设备撤销 | [手机控制说明](docs/MOBILE-CONTROL-V1.zh-CN.md) |
 | 偏好设置 | 核心文件编辑；Grok Build 托管状态与一键写入 | — |
 | 官方直连 vs 网关 | Codex 可仅写元数据、不转发 | ![接入模式](docs/assets/screenshots/12-official-direct.png) |
 
@@ -191,7 +208,7 @@ Codex / Claude Code / Hermes / OpenCode / Grok Build / 兼容客户端
 ```
 
 > **Grok Build 三方模型**：一键写入 `~/.grok/config.toml` 托管块 `[model.sy-*]`，网关入口 `/grok/v1`。  
-> 官方 xAI 账号池与「经 Switchyard 使用任意供应商模型」是两条线：池管订阅号，客户端页 / 偏好设置管 Grok Build 接三方。
+> 官方 xAI 账号池与「经 Switchyard 使用任意供应商模型」是两条线：池管订阅号，客户端页 / 偏好设置管 Grok Build 接三方；手机控制独立在工具页管理。
 
 ---
 
