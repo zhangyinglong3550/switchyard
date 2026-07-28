@@ -10,6 +10,17 @@ function hasNativeTokenStore() {
 function nativeVoiceInputAvailable() {
   try { return typeof window.SwitchyardNative?.startVoiceInput === "function"; } catch { return false; }
 }
+function nativeOpenExternalUrlAvailable() {
+  try { return typeof window.SwitchyardNative?.openExternalUrl === "function"; } catch { return false; }
+}
+function openConversationLink(anchor) {
+  const href = safeUrl(anchor?.href || "");
+  if (!href) return false;
+  if (nativeOpenExternalUrlAvailable()) {
+    try { window.SwitchyardNative.openExternalUrl(href); return true; } catch {}
+  }
+  return false;
+}
 function nativePairingEditAvailable() {
   try { return typeof window.SwitchyardNative?.editPairingLink === "function"; } catch { return false; }
 }
@@ -1707,6 +1718,8 @@ document.addEventListener("click", async (event) => {
     if (diffFilter) { const diff = diffFilter.closest("[data-diff]"); diff?.setAttribute("data-filter", diffFilter.dataset.diffFilter); diff?.querySelectorAll("[data-diff-filter]").forEach((button) => button.classList.toggle("selected", button === diffFilter)); return; }
     const diffContext = event.target.closest("[data-diff-context-toggle]");
     if (diffContext) { const diff = diffContext.closest("[data-diff]"); const collapsed = diff?.classList.toggle("context-collapsed"); diffContext.textContent = collapsed ? "显示未变内容" : "折叠未变内容"; return; }
+    const conversationLink = event.target.closest(".msg-body a[href]");
+    if (conversationLink && openConversationLink(conversationLink)) { event.preventDefault(); return; }
     const copyValue = event.target.closest("[data-copy-value]");
     if (copyValue) { await navigator.clipboard?.writeText(decodeURIComponent(copyValue.dataset.copyValue || "")); toast("已复制"); return; }
     const turnAction = event.target.closest("[data-turn-action]");

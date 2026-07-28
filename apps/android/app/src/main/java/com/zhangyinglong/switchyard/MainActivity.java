@@ -51,6 +51,7 @@ import java.net.URI;
 public final class MainActivity extends Activity {
   private static final String MOBILE_TOKEN_KEY = "switchyard_mobile_token";
   private static final int FILE_CHOOSER_REQUEST = 4101;
+  private static final int VOICE_RECOGNITION_REQUEST = 4102;
   private WebView webView;
   private SecureTokenStore tokenStore;
   private String trustedOrigin = "";
@@ -66,6 +67,7 @@ public final class MainActivity extends Activity {
   private int lastApprovalCount = -1;
   private SpeechRecognizer speechRecognizer;
   private boolean pendingVoiceRequest = false;
+  private boolean voiceFallbackAttempted = false;
   private final Runnable approvalPoller = new Runnable() {
     @Override public void run() {
       pollApprovalsOnce();
@@ -144,7 +146,15 @@ public final class MainActivity extends Activity {
     });
     webView.setWebViewClient(new WebViewClient() {
       @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-        return !isTrusted(request.getUrl());
+        Uri uri = request == null ? null : request.getUrl();
+        if (isTrusted(uri)) return false;
+        return openExternalUrl(uri == null ? "" : uri.toString());
+      }
+
+      @Override public boolean shouldOverrideUrlLoading(WebView view, String url) {
+        Uri uri = url == null ? null : Uri.parse(url);
+        if (isTrusted(uri)) return false;
+        return openExternalUrl(url);
       }
       @Override public void onPageFinished(WebView view, String url) {
         if (isTrusted(Uri.parse(url))) injectSecureStorage();
@@ -175,6 +185,21 @@ public final class MainActivity extends Activity {
 
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
+    if (requestCode == VOICE_RECOGNITION_REQUEST) {
+      dispatchVoiceState("processing");
+      String text = "";
+      if (resultCode == RESULT_OK && data != null) {
+        java.util.ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (matches != null && !matches.isEmpty()) text = matches.get(0);
+      }
+      if (!text.isEmpty() && webView != null) {
+        webView.evaluateJavascript("window.SwitchyardVoice && window.SwitchyardVoice.onResult(" + jsString(text) + ")", null);
+        dispatchVoiceState("done");
+      } else {
+        dispatchVoiceState("error");
+      }
+      return;
+    }
     if (requestCode != FILE_CHOOSER_REQUEST) return;
     ValueCallback<Uri[]> callback = fileChooserCallback;
     fileChooserCallback = null;
@@ -478,13 +503,36 @@ public final class MainActivity extends Activity {
     }
   }
 
+  private boolean openExternalUrl(String rawUrl) {
+    if (rawUrl == null || rawUrl.trim().isEmpty()) return true;
+    try {
+      Uri uri = Uri.parse(rawUrl);
+      String scheme = uri.getScheme();
+      if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) return true;
+      Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+      startActivity(Intent.createChooser(intent, "打开链接"));
+    } catch (ActivityNotFoundException error) {
+      Toast.makeText(this, "没有可用的浏览器打开此链接", Toast.LENGTH_LONG).show();
+    } catch (Exception error) {
+      Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show();
+    }
+    return true;
+  }
+
   private void beginVoiceInput() {
     if (speechRecognizer != null) return;
+    voiceFallbackAttempted = false;
     if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-      Toast.makeText(this, "此设备不支持语音识别", Toast.LENGTH_LONG).show();
+      launchVoiceRecognitionIntent();
       return;
     }
-    speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+    try {
+      speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+    } catch (Exception error) {
+      speechRecognizer = null;
+      launchVoiceRecognitionIntent();
+      return;
+    }
     speechRecognizer.setRecognitionListener(new RecognitionListener() {
       @Override public void onReadyForSpeech(android.os.Bundle params) { dispatchVoiceState("listening"); }
       @Override public void onBeginningOfSpeech() {}
@@ -493,6 +541,14 @@ public final class MainActivity extends Activity {
       @Override public void onEndOfSpeech() { dispatchVoiceState("processing"); }
       @Override public void onError(int error) {
         destroySpeechRecognizer();
+        // Some Android distributions report a recognizer as available but fail
+        // immediately because its bundled service is disabled. Fall back once
+        // to the system recognition activity before reporting a real failure.
+        if (!voiceFallbackAttempted) {
+          voiceFallbackAttempted = true;
+          launchVoiceRecognitionIntent();
+          return;
+        }
         dispatchVoiceState("error");
         runOnUiThread(() -> Toast.makeText(MainActivity.this, "语音识别失败，请重试", Toast.LENGTH_SHORT).show());
       }
@@ -511,13 +567,30 @@ public final class MainActivity extends Activity {
     });
     Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
       .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.CHINA.toString())
+      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault().toLanguageTag())
       .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
     try {
       speechRecognizer.startListening(intent);
     } catch (Exception error) {
       destroySpeechRecognizer();
       Toast.makeText(this, "无法启动语音识别", Toast.LENGTH_SHORT).show();
+    }
+  }
+
+  private void launchVoiceRecognitionIntent() {
+    try {
+      Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        .putExtra(RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault().toLanguageTag())
+        .putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出要发送的内容");
+      startActivityForResult(intent, VOICE_RECOGNITION_REQUEST);
+      dispatchVoiceState("listening");
+    } catch (ActivityNotFoundException error) {
+      dispatchVoiceState("error");
+      Toast.makeText(this, "当前设备未安装系统语音服务，请安装 Google 语音服务或系统语音输入组件", Toast.LENGTH_LONG).show();
+    } catch (Exception error) {
+      dispatchVoiceState("error");
+      Toast.makeText(this, "无法启动系统语音输入", Toast.LENGTH_SHORT).show();
     }
   }
 
@@ -573,6 +646,7 @@ public final class MainActivity extends Activity {
     @JavascriptInterface public void editPairingLink() { runOnUiThread(() -> beginPairingEdit()); }
     @JavascriptInterface public void downloadAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, false); }
     @JavascriptInterface public void openAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, true); }
+    @JavascriptInterface public void openExternalUrl(String url) { runOnUiThread(() -> openExternalUrl(url)); }
     @JavascriptInterface public void startVoiceInput() {
       runOnUiThread(() -> {
         if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
