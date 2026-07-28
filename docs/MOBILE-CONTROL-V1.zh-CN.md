@@ -1,7 +1,7 @@
 # Switchyard 移动控制一期方案
 
 > 调研更新：2026-07-23
-> 当前状态：**P0 已落地开发版：Codex / Claude Code / Grok / OpenCode 控制面、配对、设备撤销、PWA 会话控制、事件补拉和低风险一次性审批已接通；尚未作为生产远程服务发布。**
+> 当前状态（2026-07-28）：**Android 安装包与桌面端手机控制已发布。** 已支持 Codex / Claude Code / Grok / OpenCode 会话、实时事件、文件收发、目标进度、队列、低风险一次性审批、设备撤销，以及 Tailscale HTTPS 配对。
 
 ## 调研结论
 
@@ -99,7 +99,7 @@ flowchart LR
 2. **不开放 LAN bind**：P0 固定只监听 `127.0.0.1`，远程访问由 Tailscale Serve 终结。
 3. **短期配对码**：二维码只含一次性 challenge，10 分钟失效且只能完成一次设备注册。
 4. **设备 token**：注册后保存经系统 Keychain 保护的设备标识；可在桌面端逐台撤销。
-5. **最小动作集**：动作采用 allowlist（新建、续聊、切换下一轮模型、停止、改名、归档、Fork、删除、压缩），不提供通用 RPC、shell 或任意文件路径读取。
+5. **最小动作集**：动作采用 allowlist（新建、续聊、切换下一轮模型、停止、改名、归档、置顶、删除、队列管理），不提供通用 RPC、shell 或任意文件路径读取。
 6. **审批回流**：高风险动作仅显示“等待桌面确认”；移动端不能绕过 Codex/Claude 的原生审批。
 7. **日志脱敏**：沿用 request-log 的脱敏摘要；默认不向手机下发 prompt 全文、原始 provider headers 或 token。
 8. **事件幂等**：每次用户发送附带 `message_id`；服务端持久化已受理 ID。重连使用单调递增 `event_id` 补拉，禁止根据 UI 重试重复注入一条 prompt。

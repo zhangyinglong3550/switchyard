@@ -2,9 +2,9 @@
 
 **本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build 里统一选择。
 
-[![version](https://img.shields.io/badge/version-2.2.34-blue)]()
+[![version](https://img.shields.io/badge/version-2.2.41-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()
-[![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)]()
+[![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Android-lightgrey)]()
 
 ---
 
@@ -124,16 +124,29 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 
 ---
 
-### 7. 手机控制：在受控边界内查看和继续桌面 Agent 任务
+### 7. Android 手机控制：在受控边界内查看和继续桌面 Agent 任务
 
-详细版的 **工具 → 手机控制** 是独立入口，不再混在偏好设置中。它通过一次性配对链接把手机接入桌面端的受控移动控制台：
+Switchyard 现在提供**可安装的 Android 客户端**，不是仅供电脑浏览器访问的演示页。桌面端在 **详细 → 工具 → 手机控制** 启用服务、生成一次性配对链接；Android App 通过同一 Tailnet 的 **Tailscale HTTPS** 安全连接到桌面端。
 
-- 查看 Codex / Claude Code / Grok / OpenCode 的会话、运行状态、实时输出和任务规划；
-- 继续已有会话、创建任务、发送文件，并可对会话或项目置顶、刷新、批量整理；
+手机端支持：
+
+- 查看 **Codex / Claude Code / Grok / OpenCode** 会话、运行状态、实时流式输出、目标模式与分步执行进度；
+- 新建或继续会话，切换下一轮模型、思考程度和权限设置；向对话发送图片或文件，并查看 Agent 产出的可下载文件；
+- 会话/项目置顶、搜索、刷新、归档、重命名、停止，以及**批量选择删除**会话；
+- 生成中可选择“引导当前任务”或“加入队列”，并编辑、取消或恢复排队指令；
 - 在明确标记为低风险的场景中处理一次性审批；高风险或永久授权仍必须回到桌面确认；
-- 配对、启停服务和已配对设备撤销都在桌面端完成。
+- 在聊天中点击网页链接会交由**系统浏览器**打开，不会把外部网页加载进 App 内。
 
-默认服务只监听 `127.0.0.1:17889`。远程访问推荐使用 **Tailscale Serve HTTPS**；不会暴露 Provider API Key、OAuth token、任意 Shell、本地文件系统或原始请求日志，也不要使用 Tailscale Funnel。
+手机端刻意不提供不可靠的会话 Fork 快捷入口、语音输入或任意 Shell；模型密钥、OAuth token、完整原始请求日志和任意本机文件系统也不会下发到手机。
+
+默认服务只监听 `127.0.0.1:17889`。远程访问推荐使用 **Tailscale Serve HTTPS**；不要使用 Tailscale Funnel。
+
+**Android 快速接入：**
+
+1. 从 [GitHub Releases](https://github.com/zhangyinglong3550/switchyard/releases) 下载 `Switchyard-*-android.apk` 并安装；
+2. 电脑和手机加入同一个 Tailnet；桌面端 **工具 → 手机控制** 中启用手机端；
+3. 在终端执行 `tailscale serve --bg 17889`，将得到的 HTTPS 地址填回桌面端；
+4. 点击“生成配对链接”，在 Android App 中粘贴打开。链接一次有效，10 分钟后过期；设备可随时在桌面端撤销。
 
 更多安全边界和接入步骤见：[手机控制说明](docs/MOBILE-CONTROL-V1.zh-CN.md) · [Android 客户端说明](apps/android/README.zh-CN.md)。
 
@@ -148,7 +161,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 | 便宜模型也要能看图 | 视觉兜底链路 |
 | 多 Codex / 多 Grok 号 | 内置账号池，少依赖 CLI2API |
 | Grok Build 也想用公司/中转模型 | 一键写入 `sy-*` 托管块，走 `/grok/v1` |
-| 想在手机查看和继续桌面任务 | 独立手机控制页配对、实时状态和最小权限操作 |
+| 想在 Android 手机上查看和继续桌面任务 | 可安装 Android App、Tailscale HTTPS 配对、实时状态与最小权限操作 |
 
 **不是又一个公网转发站**，而是给 AI 编程 Agent 用的 **本机模型控制台**。
 
@@ -180,7 +193,7 @@ xattr -cr /Applications/Switchyard.app
 | 会话 | 跨 Agent 会话浏览（Codex / Claude / Hermes / OpenCode / Grok） | ![会话](docs/assets/screenshots/07-sessions.png) |
 | 调用可视化 / 链路追踪 | 请求状态、延迟、重试与换号过程 | ![调用可视化](docs/assets/screenshots/08-traces.png) |
 | Skills | Skills 管理与安装（含 Grok / OpenCode 目录） | ![Skills](docs/assets/screenshots/09-skills.png) |
-| 手机控制 | 手机端启停、Tailscale HTTPS 配对链接与已配对设备撤销 | [手机控制说明](docs/MOBILE-CONTROL-V1.zh-CN.md) |
+| 手机控制（Android） | 启停服务、Tailscale HTTPS 配对、实时会话/审批/文件、已配对设备撤销 | [Android 客户端说明](apps/android/README.zh-CN.md) |
 | 偏好设置 | 核心文件编辑；Grok Build 托管状态与一键写入 | — |
 | 官方直连 vs 网关 | Codex 可仅写元数据、不转发 | ![接入模式](docs/assets/screenshots/12-official-direct.png) |
 
@@ -219,6 +232,7 @@ Codex / Claude Code / Hermes / OpenCode / Grok Build / 兼容客户端
 | macOS Apple Silicon | `Switchyard-*-arm64.dmg` |
 | macOS Intel | `Switchyard-*.dmg` |
 | Windows x64 | `Switchyard Setup *.exe` 或 `*-win.zip` |
+| Android | `Switchyard-*-android.apk` |
 
 从 [GitHub Releases](https://github.com/zhangyinglong3550/switchyard/releases) 获取最新包。  
 已装 2.0+ 时，应用内可检测更新并安装重开。

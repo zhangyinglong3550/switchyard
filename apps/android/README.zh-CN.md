@@ -1,4 +1,4 @@
-# Switchyard Android（首版）
+# Switchyard Android 手机控制端
 
 这是 Switchyard 移动控制端的 Android 原生壳。它不会运行 Agent，也不会持有模型 Provider 凭据；它只通过 Tailscale HTTPS 访问已配对桌面端的 Mobile Control API。
 
@@ -6,16 +6,25 @@
 
 - 仅接受 `https://` 配对链接，桌面端仍只监听回环地址，由 Tailscale Serve 提供 HTTPS。
 - 配对 token 使用 Android Keystore 的 AES-GCM 加密后保存；不会写入 WebView 的 localStorage。
-- 禁止明文 HTTP、任意文件访问、混合内容和外部域名 WebView 跳转。
-- 原生层仅向 Switchyard 的同源页面暴露存取 token 的窄桥接，不向网页暴露 Shell、文件系统或模型凭据。
+- 禁止明文 HTTP、任意文件访问和混合内容；聊天里的 `http(s)` 链接只会交给系统浏览器处理，不会在 WebView 内加载外部页面。
+- 原生层仅向 Switchyard 的同源页面暴露存取 token、受控文件预览和外部链接打开的窄桥接，不向网页暴露 Shell、文件系统或模型凭据。
+- 不申请麦克风权限；不提供语音输入、会话 Fork 等不稳定快捷操作。
+
+## 可做什么
+
+- 查看 Codex、Claude Code、Grok、OpenCode 的会话、实时输出、审批状态、目标与分步执行进度。
+- 新建或继续任务；发送图片或文件；查看并下载 Agent 交付的文件。
+- 搜索、刷新、置顶、归档、重命名、停止会话，以及批量选择删除会话。
+- 在任务执行中发送引导或排队指令，并管理后续指令队列。
 
 ## 使用
 
-1. 桌面端开启移动控制，并通过 Tailscale Serve 暴露 `17889`。
-2. 在桌面端生成配对链接；链接形如 `https://<你的-tailscale-host>/?challenge=...`。
-3. 打开 Android App，粘贴该链接并连接。成功配对后，链接中的 challenge 会从地址栏移除。
-4. 如果链接输错或连接失败，顶部会保留“修改链接”；点击即可回到输入页，不需要卸载重装。
-5. 如需从系统跳转，可使用：`switchyard://pair?url=<URL-encoded-配对链接>`。
+1. 从 [GitHub Releases](https://github.com/zhangyinglong3550/switchyard/releases) 下载 `Switchyard-*-android.apk` 并安装。首次安装若被系统拦截，请仅对你确认来源的 APK 允许“安装未知应用”。
+2. 桌面端开启移动控制，并通过 Tailscale Serve 暴露 `17889`。
+3. 将桌面端显示的 Tailscale HTTPS 地址填入“手机控制”页，然后生成配对链接；链接形如 `https://<你的-tailscale-host>:17889/?challenge=...`。
+4. 打开 Android App，粘贴该链接并连接。成功配对后，链接中的 challenge 会从地址栏移除。
+5. 如果链接输错或连接失败，顶部会保留“修改链接”；点击即可回到输入页，不需要卸载重装。
+6. 如需从系统跳转，可使用：`switchyard://pair?url=<URL-encoded-配对链接>`。
 
 ## 构建
 
