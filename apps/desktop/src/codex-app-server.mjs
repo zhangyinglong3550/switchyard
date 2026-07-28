@@ -104,7 +104,7 @@ export class CodexAppServerClient {
       this.child = null;
     });
     await this.call("initialize", {
-      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.31" },
+      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.32" },
       capabilities: { experimentalApi: true, requestAttestation: false }
     }, initializeTimeoutMs);
     this.notify("initialized");
