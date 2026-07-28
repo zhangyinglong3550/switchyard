@@ -116,6 +116,17 @@ test("listModelsForClient hides disabled models", () => {
   assert.deepEqual(listModelsForClient(cfg, "codex").map((m) => m.id), ["m1"]);
 });
 
+test("publicModelsForClient hides disabled models without a client prefix", () => {
+  const cfg = mergeWithDefaults({
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: "http://x" }],
+    models: [
+      { id: "p/enabled", providerId: "p", upstreamModel: "enabled" },
+      { id: "p/disabled", providerId: "p", upstreamModel: "disabled", enabled: false }
+    ]
+  });
+  assert.deepEqual(publicModelsForClient(cfg).map((model) => model.id), ["p/enabled"]);
+});
+
 test("listModelsForClient applies provider and model visible agent scopes", () => {
   const cfg = mergeWithDefaults({
     providers: [

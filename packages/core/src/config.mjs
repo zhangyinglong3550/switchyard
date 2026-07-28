@@ -459,7 +459,11 @@ export function anthropicModelInfo(model, providerName, { idOverride, anthropicF
 }
 
 export function publicModelsForClient(config, clientId) {
-  const models = clientId ? listModelsForClient(config, clientId) : config.models;
+  // 未带 client 前缀的通用 /v1/models 也只能发布实际可路由的模型。
+  // 否则 UI 会展示已禁用模型，用户选中后又被路由到默认供应商。
+  const models = clientId
+    ? listModelsForClient(config, clientId)
+    : (config.models || []).filter((model) => model?.enabled !== false);
   if (clientId === "claude-code" || clientId === "claude-app") {
     const providerNames = new Map((config.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
     // Deduplicate discovery IDs: if two models produce the same ID (e.g. both have alias "claude-sonnet-4-6"),

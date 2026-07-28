@@ -82,12 +82,19 @@ export function resolveRoute(config, requestedModel, { clientId } = {}) {
   const router = buildRouter(config);
   const requested = String(requestedModel || "").trim();
   const clientDefaultModel = clientId && config.clients?.[clientId]?.defaultModel;
+  const requestedRoute = requested ? router.models.get(requested) : null;
+
+  // 完整 provider/model 是用户的明确选择。若该模型被禁用、不可见或不存在，
+  // 绝不能悄悄改用默认模型，否则会把请求送到错误供应商。
+  // 已删除供应商的 Codex 旧会话恢复由 server 层的窄范围逻辑单独处理。
+  const isQualifiedModelId = requested.includes("/") && !requested.startsWith("/") && !requested.endsWith("/");
+  if (requested && !requestedRoute && isQualifiedModelId) return null;
 
   // 1) 精确命中（完整 id 或唯一短名）
   // 2) 客户端默认
   // 3) 全局默认
   let candidate =
-    (requested ? router.models.get(requested) : null) ||
+    requestedRoute ||
     (clientDefaultModel ? router.models.get(String(clientDefaultModel).trim()) : null) ||
     (config.defaultModel ? router.models.get(String(config.defaultModel).trim()) : null);
 

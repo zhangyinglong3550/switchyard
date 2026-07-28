@@ -51,6 +51,25 @@ test("resolveRoute returns null when client disabled", () => {
   assert.equal(resolveRoute(cfg, "p/main", { clientId: "hermes" }), null);
 });
 
+test("resolveRoute does not fall back when an explicitly selected qualified model is disabled", () => {
+  const cfg = mergeWithDefaults({
+    defaultModel: "other/default",
+    providers: [
+      { id: "sub2api", apiFormat: "openai_responses", baseUrl: "http://sub2api" },
+      { id: "other", apiFormat: "openai_chat", baseUrl: "http://other" }
+    ],
+    models: [
+      { id: "sub2api/gpt", providerId: "sub2api", upstreamModel: "gpt", enabled: false },
+      { id: "other/default", providerId: "other", upstreamModel: "default" }
+    ]
+  });
+
+  assert.equal(resolveRoute(cfg, "sub2api/gpt", { clientId: "codex" }), null);
+  assert.equal(resolveRoute(cfg, "sub2api/missing", { clientId: "codex" }), null);
+  // 短名保持原有的默认模型兜底兼容性。
+  assert.equal(resolveRoute(cfg, "missing", { clientId: "codex" }).model.id, "other/default");
+});
+
 test("resolveRoute ignores disabled models", () => {
   const cfg = mergeWithDefaults({
     defaultModel: "p/disabled",

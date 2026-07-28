@@ -1383,6 +1383,23 @@ ipcMain.handle("import:sub2api:data-apply", async (_e, payload = {}) => {
       skipDuplicates: payload.skipDuplicates !== false
     });
     if (!result.ok) return result;
+
+    // 导入成功意味着该账号池已经可用。此前若模型通过「发现模型」加入，
+    // 它们会默认处于禁用状态，Codex 选中后会回退到其它默认供应商。
+    // 这里仅启用当前 Sub2API 供应商已有的模型，不擅自新增模型或修改其它供应商。
+    const cfg = readConfig();
+    const provider = (cfg.providers || []).find((item) => item.id === providerId);
+    const shouldEnableModels = provider?.presetId === "sub2api-codex" || providerId === "sub2api-codex";
+    const disabledModelIds = shouldEnableModels
+      ? (cfg.models || []).filter((model) => model?.providerId === providerId && model.enabled === false).map((model) => model.id)
+      : [];
+    if (disabledModelIds.length) {
+      cfg.models = cfg.models.map((model) => disabledModelIds.includes(model.id) ? { ...model, enabled: true } : model);
+      saveValidated(cfg);
+      try { reloadConfig(); } catch {}
+      syncCodexArtifacts("sub2api-import");
+    }
+
     sub2apiDataImportSessions.delete(importId);
     appendLog({
       level: result.errors?.length ? "warn" : "info",
