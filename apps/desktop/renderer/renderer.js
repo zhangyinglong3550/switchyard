@@ -1863,7 +1863,7 @@ function renderMobileControl() {
     <div class="mobile-device-row ${device.revokedAt ? "is-revoked" : ""}">
       <div>
         <strong>${escapeHtml(device.name || "移动设备")}</strong>
-        <div class="tiny muted">${device.revokedAt ? "已撤销" : `最近访问：${escapeHtml(device.lastSeenAt || "尚未访问")}`}</div>
+        <div class="tiny muted">${device.revokedAt ? "已撤销" : `最近访问：${escapeHtml(device.lastSeenAt ? formatDate(device.lastSeenAt) : "尚未访问")}`}</div>
       </div>
       ${device.revokedAt ? "" : `<button class="btn danger" type="button" data-mobile-device-revoke="${escapeHtml(device.id)}">撤销</button>`}
     </div>

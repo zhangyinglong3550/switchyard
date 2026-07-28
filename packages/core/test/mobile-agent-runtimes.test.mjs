@@ -69,7 +69,7 @@ test("ACP client negotiates protocol and separates responses, notifications and 
     params: {
       protocolVersion: 1,
       clientCapabilities: {},
-      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.32" }
+      clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.33" }
     }
   });
   child.stdout.emit("data", `${JSON.stringify({

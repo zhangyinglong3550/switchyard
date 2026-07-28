@@ -34,4 +34,5 @@ test("desktop wires mobile control lifecycle, pairing and packaged PWA assets", 
   assert.match(renderer, /mobile-control:disable/);
   assert.match(renderer, /mobile-control:pair-start/);
   assert.match(renderer, /mobile-control:device-revoke/);
+  assert.match(renderer, /formatDate\(device\.lastSeenAt\)/);
 });
