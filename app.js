@@ -226,7 +226,26 @@ async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (token) headers.authorization = `Bearer ${token}`;
   if (options.body) headers["content-type"] = "application/json";
-  const response = await fetch(url, { ...options, headers });
+  // Without a timeout a slow desktop (large session reads) leaves the detail
+  // page on skeletons forever; fail loudly so the user can retry instead.
+  const timeoutMs = Number(options.timeoutMs) || 25_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(url, { ...options, headers, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error("请求超时：桌面端可能正忙，请稍后重试");
+      timeoutError.status = 0; timeoutError.code = "timeout";
+      throw timeoutError;
+    }
+    const networkError = new Error("网络异常：与桌面端的连接被中断");
+    networkError.status = 0; networkError.code = "network";
+    throw networkError;
+  } finally {
+    clearTimeout(timer);
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(body.message || body.error || `HTTP ${response.status}`);
@@ -1012,11 +1031,15 @@ function renderPlanCard(message, key) {
   const isDone = (status) => ["completed", "done", "complete"].includes(status);
   const isDoing = (status) => ["in_progress", "running", "doing"].includes(status);
   const done = plan.filter((item) => isDone(item.status)).length;
-  const items = plan.map((item) => {
+  const activeIndex = plan.findIndex((item) => isDoing(item.status));
+  // Keep a concrete current-step indicator even before the runtime marks an
+  // item in progress. This mirrors Codex Desktop's "第 n / total 步" affordance.
+  const currentStep = activeIndex >= 0 ? activeIndex + 1 : Math.min(plan.length, Math.max(1, done + 1));
+  const items = plan.map((item, index) => {
     const cls = isDone(item.status) ? "done" : isDoing(item.status) ? "doing" : "todo";
-    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
+    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : cls === "todo" ? String(index + 1) : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
   }).join("");
-  return `<div class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"><div class="plan-head"><span class="ic">☰</span><b>执行计划</b><span class="prog">${done}/${plan.length}</span></div><div class="plan-items">${items}</div></div>`;
+  return `<div class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"><div class="plan-head"><span class="ic">☰</span><b>执行计划</b><span class="plan-progress-pill" aria-label="当前第 ${currentStep} 步，共 ${plan.length} 步">第 <strong>${currentStep}</strong> / ${plan.length} 步</span></div><div class="plan-items">${items}</div><div class="plan-foot"><span>${done === plan.length ? "全部步骤已完成" : `已完成 ${done} 项`}</span><span class="prog">${done}/${plan.length}</span></div></div>`;
 }
 
 // Parse Codex apply_patch blocks and standard unified diffs into row models
@@ -1145,6 +1168,14 @@ function renderToolGroup(messages, startIndex = 0) {
 }
 
 function renderMessage(message, extraClass = "", index = 0) {
+  try {
+    return renderMessageInner(message, extraClass, index);
+  } catch (error) {
+    console.warn("renderMessage fallback", error);
+    return `<div class="ai ${extraClass}"><div class="msg-body">${escapeHtml(String(message?.text || "（此条消息无法渲染）")).slice(0, 2000)}</div></div>`;
+  }
+}
+function renderMessageInner(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
   if (isToolMessage(message)) return renderToolGroup([message], index);
@@ -1153,6 +1184,34 @@ function renderMessage(message, extraClass = "", index = 0) {
   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
 function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}|${JSON.stringify(message.delivery || null)}`).join("\u001f"); }
+function goalStatusLabel(status) { return ({ in_progress: "进行中", complete: "已完成", blocked: "需要处理" })[status] || "进行中"; }
+function goalStepClass(status) {
+  const value = String(status || "").toLowerCase();
+  if (["completed", "complete", "done"].includes(value)) return "done";
+  if (["in_progress", "running", "doing", "active"].includes(value)) return "doing";
+  return "todo";
+}
+function renderGoalPanel() {
+  const host = $("#goal-panel"); const goal = current?.goal;
+  if (!host) return;
+  if (!goal?.objective && !goal?.plan?.length) { host.hidden = true; host.innerHTML = ""; return; }
+  const plan = Array.isArray(goal.plan) ? goal.plan : [];
+  const done = plan.filter((item) => goalStepClass(item.status) === "done").length;
+  const activeIndex = plan.findIndex((item) => goalStepClass(item.status) === "doing");
+  const step = plan.length ? (activeIndex >= 0 ? activeIndex + 1 : Math.min(plan.length, Math.max(1, done + (goal.status === "complete" ? 0 : 1)))) : 0;
+  const percent = plan.length ? Math.round((done / plan.length) * 100) : 0;
+  const collapsed = goal.status === "complete";
+  const steps = plan.map((item, index) => {
+    const cls = goalStepClass(item.status);
+    const mark = cls === "done" ? "✓" : cls === "todo" ? String(index + 1) : "";
+    return `<li class="goal-step ${cls}"><span>${mark}</span><b>${escapeHtml(item.step)}</b></li>`;
+  }).join("");
+  const blocked = goal.status === "blocked" && goal.blockedReason ? `<p class="goal-blocked">${escapeHtml(goal.blockedReason)}</p>` : "";
+  const budget = Number.isFinite(goal.tokenUsage) && Number.isFinite(goal.tokenBudget) ? `<small>${goal.tokenUsage} / ${goal.tokenBudget} tokens</small>` : "";
+  host.hidden = false;
+  host.innerHTML = `<details class="goal-card ${escapeHtml(goal.status || "in_progress")}"${collapsed ? "" : " open"}><summary><span class="goal-icon">${goal.status === "complete" ? "✓" : goal.status === "blocked" ? "!" : "◎"}</span><span class="goal-copy"><b>目标模式</b><strong>${escapeHtml(goal.objective)}</strong></span><span class="goal-state">${escapeHtml(goalStatusLabel(goal.status))}<i>⌄</i></span></summary><div class="goal-body">${plan.length ? `<div class="goal-progress"><span>第 <b>${step}</b> / ${plan.length} 步</span><em>${percent}%</em></div><div class="goal-track"><i style="width:${percent}%"></i></div><ol>${steps}</ol>` : ""}${blocked}<footer><span>${goal.status === "complete" ? "目标已完成" : `已完成 ${done} 项`}</span>${budget}</footer></div></details>`;
+}
+
 function renderSessionQueue() {
   const host = $("#session-queue");
   const queue = Array.isArray(current?.queue) ? current.queue : [];
@@ -1198,7 +1257,13 @@ function renderMessages(rows = [], { hasMore = false, total = rows.length } = {}
     flush();
     index = end;
   }
-  $("#messages").innerHTML = html.join("");
+  let rendered = html.join("");
+  try {
+    // Layout sanity check kept in one place: if any card throws during later
+    // DOM work we still have valid markup for the whole conversation.
+    if (!rendered.trim()) rendered = '<div class="empty">这个会话还没有消息。</div>';
+  } catch {}
+  $("#messages").innerHTML = rendered;
   for (const key of openKeys) {
     const node = $("#messages").querySelector(`[data-message-key="${CSS.escape(key)}"]`);
     if (!node) continue;
@@ -1288,13 +1353,13 @@ function applySessionDetail(detail, { activate = true, instant = false, anchor =
   $("#detail-title").textContent = current.title;
   $("#detail-meta").textContent = `${agentLabel(current.agent)}${current.model ? ` · ${current.model}` : ""}`;
   $("#chat-state-dot").className = current.state || "";
-  renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); updateComposerQueueState();
+  renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); renderGoalPanel(); updateComposerQueueState();
   const options = { hasMore: Boolean(current.hasMoreMessages), total: current.messagesTotal };
   if (activate) { renderMessages(current.messages || [], options); page("detail"); if (!anchor) scrollMessages({ force: true, instant }); }
   else syncMessages(current.messages || [], options);
 }
 async function fetchSessionDetail(id, { messageLimit = INITIAL_MESSAGE_LIMIT } = {}) {
-  const detail = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}?messages=${encodeURIComponent(messageLimit)}`);
+  const detail = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}?messages=${encodeURIComponent(messageLimit)}`, { timeoutMs: 45_000 });
   cacheSessionDetail(detail);
   return detail;
 }
@@ -1312,7 +1377,18 @@ async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE
       $("#messages").innerHTML = '<div class="skel-msg"><div class="skel m1"></div><div class="skel m2"></div><div class="skel m3"></div></div><div class="skel-msg" style="width:64%"><div class="skel m1"></div><div class="skel m2"></div></div><div class="skel-msg" style="width:78%"><div class="skel m1"></div><div class="skel m3"></div></div>';
     }
   }
-  const detail = await fetchSessionDetail(id, { messageLimit });
+  let detail;
+  try {
+    detail = await fetchSessionDetail(id, { messageLimit });
+  } catch (error) {
+    if (seq !== openSessionSeq) return;
+    sessionDetailCache.delete(id);
+    if (activate) {
+      $("#detail-title").textContent = "加载失败";
+      $("#messages").innerHTML = `<div class="empty detail-load-error"><strong>会话加载失败</strong><span>${escapeHtml(error.message || "请稍后重试")}</span><button type="button" class="detail-retry" data-retry-open="${escapeHtml(id)}">重新加载</button></div>`;
+    }
+    throw error;
+  }
   if (seq !== openSessionSeq) return;
   applySessionDetail(detail, { activate, instant: true, anchor });
   // Approval data is independent: never delay the first message paint on it.
@@ -1348,6 +1424,10 @@ async function openModelSheet() {
 function appendEvent(event) {
   if (!current || event.sessionId !== current.id) return;
   sessionDetailCache.delete(current.id);
+  if (event.goal) {
+    current.goal = event.goal;
+    renderGoalPanel();
+  }
   if (event.type === "message" && event.summary) {
     const role = event.role || "assistant"; const last = $("#messages").lastElementChild;
     if (role === "user" && last?.classList.contains("me") && last.querySelector(".msg-body")?.textContent === event.summary) return;
@@ -1487,6 +1567,8 @@ document.addEventListener("click", async (event) => {
     if (event.target.closest("#close-session-switcher") || event.target === $("#session-switcher")) { closeSessionSwitcher(); return; }
     if (event.target.closest("#continue-current-session")) { closeSessionSwitcher(); page("detail"); scrollMessages({ force: true }); return; }
     if (event.target.closest("#load-earlier-messages")) { await loadEarlierMessages(); return; }
+    const retryOpen = event.target.closest("[data-retry-open]");
+    if (retryOpen) { await openSession(retryOpen.dataset.retryOpen); return; }
     if (event.target.closest("#load-more-sessions")) { sessionDisplayLimit += SESSION_PAGE_SIZE; renderSessionList(); return; }
     const switchSession = event.target.closest("[data-switch-session]");
     if (switchSession) { closeSessionSwitcher(); await openSession(switchSession.dataset.switchSession); return; }

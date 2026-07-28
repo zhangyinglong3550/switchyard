@@ -669,3 +669,9 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 :root[data-theme="dark"] .group-head>svg:first-child{color:var(--accent)}
 :root[data-theme="dark"] .workspace-group.pinned-project .group-head{background:linear-gradient(90deg,rgba(61,45,33,.6),transparent)}
 :root[data-theme="dark"] .attachment-chip{background:var(--card)}
+
+/* v61: detail load error state with retry. */
+.detail-load-error{display:grid;gap:8px;justify-items:center;padding:52px 24px;text-align:center}
+.detail-load-error strong{color:var(--text);font-size:14px}
+.detail-load-error span{color:var(--muted);font-size:12px;line-height:1.6}
+.detail-retry{min-height:38px;padding:0 18px;border:0;border-radius:999px;background:var(--text);color:var(--bg);font-size:13px;font-weight:700}
