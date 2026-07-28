@@ -28,6 +28,7 @@ jobs:
       source_ref: ${{ steps.version.outputs.source_ref }}
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      android_version_code: ${{ steps.version.outputs.android_version_code }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,9 +58,11 @@ jobs:
           else
             source_ref="main"
           fi
+          android_version_code="$(node -e 'const [major, minor, patch] = process.argv[1].split(".").map(Number); const code = major * 1000000 + minor * 1000 + patch; if (!Number.isSafeInteger(code) || code < 1) process.exit(1); process.stdout.write(String(code));' "${package_version}")"
           echo "source_ref=${source_ref}" >> "${GITHUB_OUTPUT}"
           echo "tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
           echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+          echo "android_version_code=${android_version_code}" >> "${GITHUB_OUTPUT}"
 
   build:
     needs: validate-release
@@ -82,7 +85,15 @@ jobs:
             artifact_path: |
               dist/*.exe
               dist/*.zip
+          - os: ubuntu-latest
+            artifact_name: switchyard-android
+            package_command: cd apps/android && ./gradlew --no-daemon assembleRelease && cd ../.. && npm run android:release:check
+            artifact_path: apps/android/app/build/outputs/apk/release/*.apk
+            android: true
     runs-on: ${{ matrix.os }}
+    env:
+      SWITCHYARD_ANDROID_VERSION_CODE: ${{ needs.validate-release.outputs.android_version_code || '' }}
+      SWITCHYARD_ANDROID_VERSION_NAME: ${{ needs.validate-release.outputs.version || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,6 +103,14 @@ jobs:
         with:
           node-version: 24
           cache: npm
+
+      - name: 配置 Android JDK
+        if: matrix.android
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
 
       - name: 安装 Windows 测试依赖
         if: runner.os == 'Windows'
@@ -125,7 +144,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: 确认四类发布安装包齐全
+      - name: 确认五类发布安装包齐全
         shell: bash
         run: |
           set -euo pipefail
@@ -133,10 +152,12 @@ jobs:
           macos_packages=(release-assets/*.dmg)
           windows_installers=(release-assets/*.exe)
           windows_archives=(release-assets/*.zip)
+          android_packages=(release-assets/*.apk)
 
           [[ ${#macos_packages[@]} -eq 2 ]] || { echo "期望 2 个 macOS DMG，实际为 ${#macos_packages[@]}" >&2; exit 1; }
           [[ ${#windows_installers[@]} -eq 1 ]] || { echo "期望 1 个 Windows NSIS EXE，实际为 ${#windows_installers[@]}" >&2; exit 1; }
           [[ ${#windows_archives[@]} -eq 1 ]] || { echo "期望 1 个 Windows ZIP，实际为 ${#windows_archives[@]}" >&2; exit 1; }
+          [[ ${#android_packages[@]} -eq 1 ]] || { echo "期望 1 个 Android APK，实际为 ${#android_packages[@]}" >&2; exit 1; }
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -148,3 +169,4 @@ jobs:
             release-assets/*.dmg
             release-assets/*.exe
             release-assets/*.zip
+            release-assets/*.apk

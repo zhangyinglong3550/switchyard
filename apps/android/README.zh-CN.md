@@ -38,6 +38,8 @@ npm --prefix ../.. run android:release:check
 
 产物位于 `app/build/outputs/apk/release/`。检查脚本会读取 Gradle 输出元数据，报告 APK 路径、`versionCode`、`versionName` 和签名状态；只有显示 `signed (installable)` 的 APK 才应分发给测试手机。
 
+正式发布时，推送 `vX.Y.Z` 标签会由 GitHub Actions 自动构建 Android Release APK、执行签名校验，并与 macOS / Windows 安装包一起上传到 GitHub Release。Android 的 `versionName` 使用该标签版本，`versionCode` 由语义版本确定性生成，保证后续版本可覆盖安装。
+
 可通过环境变量（或同名 Gradle property）覆盖版本，不会修改已提交的构建文件：
 
 ```bash
