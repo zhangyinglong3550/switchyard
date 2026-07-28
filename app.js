@@ -1063,20 +1063,68 @@ function parsePlanArguments(tool) {
   } catch { return null; }
 }
 
-function renderPlanCard(message, key) {
+function planItemState(status) {
+  if (["completed", "done", "complete"].includes(status)) return "done";
+  if (["in_progress", "running", "doing", "active"].includes(status)) return "doing";
+  return "todo";
+}
+function planProgress(plan = []) {
+  const done = plan.filter((item) => planItemState(item.status) === "done").length;
+  const activeIndex = plan.findIndex((item) => planItemState(item.status) === "doing");
+  const currentIndex = activeIndex >= 0 ? activeIndex : Math.min(plan.length - 1, Math.max(0, done));
+  return { done, activeIndex, currentIndex, current: plan[currentIndex] || plan[0] };
+}
+function patchStats(messages = []) {
+  const files = new Set(); let adds = 0; let dels = 0;
+  for (const message of messages) {
+    const tool = message?.tool || {};
+    for (const file of tool.files || []) {
+      const id = file?.id || file?.path || file?.name;
+      if (id) files.add(id);
+    }
+    const patch = parseEditPatch(tool.arguments) || parseEditPatch(tool.output) || tool.patchStats;
+    if (patch) { adds += patch.adds || 0; dels += patch.dels || 0; }
+  }
+  return { files: files.size, adds, dels };
+}
+function executionState(plan, tools = []) {
+  if (tools.some((message) => message.tool?.status === "failed")) return "failed";
+  if (tools.some((message) => ["running", "pending", "waiting_for_approval"].includes(message.tool?.status))) return "running";
+  if (plan.some((item) => planItemState(item.status) === "doing")) return "running";
+  return plan.length && plan.every((item) => planItemState(item.status) === "done") ? "completed" : "idle";
+}
+function renderExecutionCard(message, tools = [], key = "") {
   const plan = parsePlanArguments(message?.tool);
   if (!plan) return renderToolItem(message, key);
-  const isDone = (status) => ["completed", "done", "complete"].includes(status);
-  const isDoing = (status) => ["in_progress", "running", "doing"].includes(status);
-  const done = plan.filter((item) => isDone(item.status)).length;
-  const activeIndex = plan.findIndex((item) => isDoing(item.status));
-  const currentIndex = activeIndex >= 0 ? activeIndex : Math.min(plan.length - 1, Math.max(0, done));
-  const current = plan[currentIndex] || plan[0];
+  const progress = planProgress(plan); const stats = patchStats(tools); const state = executionState(plan, tools);
+  const changes = [
+    stats.files ? `${stats.files} 个文件已更改` : "",
+    stats.adds ? `+${stats.adds}` : "",
+    stats.dels ? `−${stats.dels}` : ""
+  ].filter(Boolean).join(" · ");
+  const activity = tools.length ? toolActivitySummary(tools) : "正在规划下一步";
   const items = plan.map((item, index) => {
-    const cls = isDone(item.status) ? "done" : isDoing(item.status) ? "doing" : "todo";
-    return `<div class="plan-item ${cls}"><span class="box">${cls === "done" ? "✓" : cls === "todo" ? String(index + 1) : ""}</span><span class="txt">${escapeHtml(item.step)}</span></div>`;
+    const cls = planItemState(item.status);
+    return `<div class="execution-plan-item ${cls}"><span>${cls === "done" ? "✓" : cls === "doing" ? "" : String(index + 1)}</span><b>${escapeHtml(item.step)}</b></div>`;
   }).join("");
-  return `<details class="plan-card" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}"${activeIndex >= 0 ? " open" : ""}><summary class="plan-head"><span class="ic">☰</span><span class="plan-current"><b>执行计划</b><small>${escapeHtml(current?.step || "正在准备下一步")}</small></span><span class="plan-progress-pill" aria-label="当前第 ${currentIndex + 1} 步，共 ${plan.length} 步">${done}/${plan.length}<i>⌄</i></span></summary><div class="plan-items">${items}</div><div class="plan-foot"><span>${done === plan.length ? "全部步骤已完成" : `当前第 ${currentIndex + 1} 步`}</span><span class="prog">点击查看全部计划</span></div></details>`;
+  const rawPlan = encodeURIComponent(String(message?.tool?.arguments || ""));
+  const label = state === "failed" ? "执行遇到问题" : state === "completed" ? "计划已完成" : "正在执行";
+  return `<details class="execution-card ${state}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}" data-plan-raw="${escapeHtml(rawPlan)}"${state === "running" ? " open" : ""}><summary><span class="execution-icon">${state === "failed" ? "!" : state === "completed" ? "✓" : "○"}</span><span class="execution-copy"><b>${escapeHtml(label)}</b><strong>${escapeHtml(progress.current?.step || "正在准备下一步")}</strong><small>${escapeHtml(activity)}</small></span><span class="execution-progress">${progress.currentIndex + 1}/${plan.length}<i>⌄</i></span></summary>${changes ? `<div class="execution-stats"><span>第 ${progress.currentIndex + 1} / ${plan.length} 步</span><b>${escapeHtml(changes)}</b></div>` : ""}<div class="execution-plan">${items}</div></details>`;
+}
+function renderPlanCard(message, key) {
+  return renderExecutionCard(message, [], key);
+}
+function refreshLiveExecutionCard(work) {
+  const card = work?.querySelector(".execution-card[data-plan-raw]");
+  if (!card) return;
+  try {
+    const argumentsText = decodeURIComponent(card.dataset.planRaw || "");
+    const tools = [...work.querySelectorAll(".tl")].map((item) => ({
+      tool: { activity: item.dataset.toolActivity || "other", status: item.dataset.toolStatus || "completed", title: item.dataset.toolTitle || "", name: item.dataset.toolTitle || "", files: Array.from({ length: Number(item.dataset.toolFiles || 0) }), patchStats: { adds: Number(item.dataset.toolAdds || 0), dels: Number(item.dataset.toolDels || 0) } }
+    }));
+    const message = { tool: { id: card.dataset.toolId || "", name: "update_plan", arguments: argumentsText } };
+    card.outerHTML = renderExecutionCard(message, tools, card.dataset.messageKey || "live-plan");
+  } catch {}
 }
 
 // Parse Codex apply_patch blocks and standard unified diffs into row models
@@ -1179,7 +1227,7 @@ function renderToolItem(message, key, position = "") {
     : patch && (patch.adds || patch.dels) ? `${patch.adds ? `<span class="badge">+${patch.adds}</span>` : ""}${patch.dels ? `<span class="badge minus">−${patch.dels}</span>` : ""}`
     : '<span class="ok">✓</span>';
   const rowClass = `tl${status === "failed" ? " failed" : ""}${status === "running" || status === "pending" ? " running" : ""}${status === "failed" ? " open" : ""}`;
-  return `<div class="${rowClass}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}" data-tool-activity="${escapeHtml(activity)}" data-tool-title="${escapeHtml(title)}"><div class="tl-row"><span class="tl-ic ${escapeHtml(activity)}">${escapeHtml(TOOL_ROW_ICONS[activity] || TOOL_ROW_ICONS.other)}</span><span class="tl-main"><span class="tl-title${activity === "command" ? " mono" : ""}">${escapeHtml(title)}</span><span class="tl-sub">${escapeHtml(toolRowSubtitle(tool, activity))}</span></span><span class="tl-state">${duration ? `<span class="dur">${escapeHtml(duration)}</span>` : ""}${stateHtml}</span></div><div class="tl-detail">${renderToolDetail(message, activity, patch)}</div></div>`;
+  return `<div class="${rowClass}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(tool.id || "")}" data-tool-status="${escapeHtml(status)}" data-tool-activity="${escapeHtml(activity)}" data-tool-title="${escapeHtml(title)}" data-tool-files="${Number(tool.files?.length || 0)}" data-tool-adds="${Number(patch?.adds || 0)}" data-tool-dels="${Number(patch?.dels || 0)}"><div class="tl-row"><span class="tl-ic ${escapeHtml(activity)}">${escapeHtml(TOOL_ROW_ICONS[activity] || TOOL_ROW_ICONS.other)}</span><span class="tl-main"><span class="tl-title${activity === "command" ? " mono" : ""}">${escapeHtml(title)}</span><span class="tl-sub">${escapeHtml(toolRowSubtitle(tool, activity))}</span></span><span class="tl-state">${duration ? `<span class="dur">${escapeHtml(duration)}</span>` : ""}${stateHtml}</span></div><div class="tl-detail">${renderToolDetail(message, activity, patch)}</div></div>`;
 }
 function aggregateToolStatus(messages = []) {
   const statuses = messages.map((message) => message.tool?.status || "completed");
@@ -1326,11 +1374,13 @@ function renderTurnWork(turn) {
   const workEntries = entries.filter(({ message }) => isToolMessage(message) || message.kind === "thinking");
   if (!workEntries.length) return { html: "", summary: null };
   const tools = workEntries.map(({ message }) => message).filter(isToolMessage);
+  const planEntry = [...workEntries].reverse().find(({ message }) => isPlanToolMessage(message));
+  const actionTools = tools.filter((message) => !isPlanToolMessage(message));
   const summary = summarizeWork(tools);
   const thought = workEntries.filter(({ message }) => message.kind === "thinking").map(({ message, index }) => renderMessage(message, "", index)).join("");
-  const plans = workEntries.filter(({ message }) => isPlanToolMessage(message)).map(({ message, index }) => renderPlanCard(message, messageKey(message, index))).join("");
+  const execution = planEntry ? renderExecutionCard(planEntry.message, actionTools, messageKey(planEntry.message, planEntry.index)) : "";
   const phases = groupWorkByPhase(workEntries).map((group) => renderToolGroup(group.entries.map(({ message }) => message), group.entries[0]?.index || 0, group.phase)).join("");
-  return { summary, html: `<section class="turn-work" aria-label="工作过程"><div class="turn-work-label"><span>工作过程</span><small>${escapeHtml(summary.detail || summary.text)}</small></div>${plans}${thought}${phases}</section>` };
+  return { summary, html: `<section class="turn-work" aria-label="工作过程"><div class="turn-work-label"><span>工作过程</span><small>${escapeHtml(summary.detail || summary.text)}</small></div>${execution}${thought}${phases}</section>` };
 }
 function renderConversationTurn(turn) {
   const request = turn.request ? `<div class="turn-request">${renderMessage(turn.request, "", 0)}</div>` : "";
@@ -1572,8 +1622,9 @@ function appendEvent(event) {
     const message = { id: event.id, role: "tool", kind: "tool", text: event.summary || "正在使用工具", tool: event.tool || null };
     const toolId = event.tool?.id ? CSS.escape(event.tool.id) : ""; const existing = toolId ? host.querySelector(`[data-tool-id="${toolId}"]`) : null;
     if (isPlanToolMessage(message)) {
-      if (existing) existing.outerHTML = renderPlanCard(message, messageKey(message));
-      else liveTurnWork(liveTurn()).insertAdjacentHTML("beforeend", renderPlanCard(message, messageKey(message)));
+      const work = liveTurnWork(liveTurn()); const actionTools = [...work.querySelectorAll(".tl")].map((item) => ({ tool: { activity: item.dataset.toolActivity || "other", status: item.dataset.toolStatus || "completed", title: item.dataset.toolTitle || "", name: item.dataset.toolTitle || "", files: Array.from({ length: Number(item.dataset.toolFiles || 0) }), patchStats: { adds: Number(item.dataset.toolAdds || 0), dels: Number(item.dataset.toolDels || 0) } } }));
+      if (existing) existing.outerHTML = renderExecutionCard(message, actionTools, messageKey(message));
+      else work.insertAdjacentHTML("afterbegin", renderExecutionCard(message, actionTools, messageKey(message)));
     } else if (existing) {
       const group = existing.closest(".work-group"); existing.outerHTML = renderToolItem(message, messageKey(message)); refreshToolGroup(group);
     } else {
@@ -1581,6 +1632,7 @@ function appendEvent(event) {
       if (group) { group.querySelector(":scope > .work-items")?.insertAdjacentHTML("beforeend", renderToolItem(message, messageKey(message))); refreshToolGroup(group); }
       else work.insertAdjacentHTML("beforeend", renderToolGroup([message], 0, workPhase(message)));
     }
+    refreshLiveExecutionCard(host.querySelector(".conversation-turn:last-of-type .turn-work"));
     scrollMessages();
   }
 }

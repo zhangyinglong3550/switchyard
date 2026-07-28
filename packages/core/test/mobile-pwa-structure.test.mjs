@@ -87,7 +87,7 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(css, /\.plan-card\{/);
   assert.match(css, /\.plan-progress-pill\{/);
   assert.match(js, /currentIndex \+ 1/);
-  assert.match(js, /点击查看全部计划/);
+  assert.match(js, /正在执行|计划已完成/);
   assert.match(css, /\.tl-state \.badge\{/);
   assert.match(js, /richTextCache/);
   assert.match(js, /instant: true/);
@@ -150,8 +150,12 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function stripInternalUiDirectives/);
   assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
   assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
-  assert.match(html, /app\.js\?v=64/);
-  assert.match(html, /styles\.css\?v=64/);
+  assert.match(html, /app\.js\?v=65/);
+  assert.match(html, /styles\.css\?v=65/);
+  assert.match(js, /function renderExecutionCard/);
+  assert.match(js, /function patchStats/);
+  assert.match(js, /function refreshLiveExecutionCard/);
+  assert.match(js, /execution-card/);
   assert.match(js, /function openSessionSwitcher/);
   assert.match(js, /sessionDetailCache/);
   assert.match(js, /INITIAL_MESSAGE_LIMIT = 120/);
@@ -166,6 +170,7 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /data-diff-filter/);
   assert.match(css, /\.conversation-turn\{/);
   assert.match(css, /\.turn-completion\{/);
+  assert.match(css, /\.execution-card\{/);
   assert.match(css, /\.new-message-indicator\{/);
   assert.match(html, /id="session-select-toggle"/);
   assert.match(html, /id="session-selection-bar"/);
