@@ -437,6 +437,15 @@ test("cursor subscription · passes API reasoning effort to the local Cursor mod
     messages: [{ role: "user", content: "hello" }]
   }, {
     keychain: fakeKeychain(),
+    readLocalModel: (_model, { reasoningEffort }) => ({
+      ok: true,
+      requestedModel: {
+        modelId: "grok-4.5",
+        parameters: [{ id: "effort", value: reasoningEffort }],
+        builtInModel: true,
+        isVariantStringRepresentation: false
+      }
+    }),
     transport: async function* (options) {
       received = options.requestedModel;
       yield { type: "text", text: "done" };
