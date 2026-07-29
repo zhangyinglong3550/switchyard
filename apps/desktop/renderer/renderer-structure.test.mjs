@@ -69,15 +69,51 @@ test('renderer entry module parses before packaging', async () => {
   );
 });
 
-test('Cursor subscription settings preserve explicit experimental and local-only wording', () => {
+test('Cursor subscription settings present the local-only bridge without experimental labeling', () => {
   const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
   assert.match(html, /id="provider-cursor-subscription-panel"/);
-  assert.match(html, /Cursor 订阅桥接（实验性）/);
+  assert.match(html, /Cursor 订阅桥接/);
+  assert.doesNotMatch(html, /Cursor 订阅桥接（实验性）/);
   assert.match(html, /仅个人本机使用/);
-  assert.match(html, /非官方兼容能力，可能随 Cursor 更新失效/);
+  assert.doesNotMatch(html, /实验性桥接/);
+  assert.match(html, /id="btn-cursor-subscription-import-local"/);
+  assert.match(html, /从本机已登录 Cursor 自动导入/);
   assert.match(html, /id="btn-cursor-subscription-connect"/);
   assert.match(html, /id="btn-cursor-subscription-clear"/);
+  assert.match(js, /cursor-subscription:local-status/);
+  assert.match(js, /cursor-subscription:import-local/);
   assert.match(js, /cursor-subscription:connect/);
   assert.match(js, /cursor-subscription:clear/);
+});
+
+
+test('provider dialog exposes Cursor protocol, supports manual upstream models, and omits directory sync', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  assert.match(html, /option value="cursor_subscription"/);
+  assert.doesNotMatch(html, /id="btn-provider-sync-models"/);
+  assert.match(js, /data-discovery-upstream/);
+  assert.match(js, /上游模型 ID/);
+  assert.match(js, /请填写手动添加模型的上游模型 ID/);
+  assert.match(js, /const modelsById = new Map/);
+});
+
+test('mobile control exposes live Tailscale Serve status and a repair action', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+  assert.match(html, /id="mobile-tailscale-status"/);
+  assert.match(html, /id="mobile-tailscale-url"/);
+  assert.match(html, /id="btn-mobile-tailscale-repair"/);
+  assert.match(js, /mobile-control:connection-status/);
+  assert.match(js, /mobile-control:repair-connection/);
+  assert.match(main, /ipcMain\.handle\("mobile-control:connection-status"/);
+  assert.match(main, /ipcMain\.handle\("mobile-control:repair-connection"/);
+});
+
+test('desktop keeps single-instance behavior by default while allowing isolated package verification', () => {
+  const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+  assert.match(main, /SWITCHYARD_ALLOW_MULTIPLE_INSTANCES/);
+  assert.match(main, /app\.requestSingleInstanceLock\(\)/);
 });

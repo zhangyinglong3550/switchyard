@@ -1,8 +1,12 @@
 import { cursorSubscriptionKeychainAccount } from "./auth.mjs";
 
 export const CURSOR_SUBSCRIPTION_API_FORMAT = "cursor_subscription";
-export const CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL = "https://agent.api5.cursor.sh";
-export const CURSOR_SUBSCRIPTION_DEFAULT_IDLE_TIMEOUT_MS = 600000;
+export const CURSOR_SUBSCRIPTION_LEGACY_BASE_URL = "https://agent.api5.cursor.sh";
+export const CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL = "https://agentn.api5.cursor.sh";
+export const CURSOR_SUBSCRIPTION_DEFAULT_UPSTREAM_MODEL = "default";
+export const CURSOR_SUBSCRIPTION_DEFAULT_IDLE_TIMEOUT_MS = 90000;
+export const CURSOR_SUBSCRIPTION_DEFAULT_CONCURRENCY = 2;
+export const CURSOR_SUBSCRIPTION_MAX_CONCURRENCY = 3;
 
 export class CursorSubscriptionRequestError extends Error {
   constructor(message, code = "CURSOR_SUBSCRIPTION_UNSUPPORTED_REQUEST") {
@@ -29,18 +33,27 @@ function assertSafeBaseUrl(baseUrl) {
 
 export function normalizeCursorSubscriptionProvider(provider = {}) {
   const id = String(provider.id || "cursor-subscription").trim() || "cursor-subscription";
-  const baseUrl = assertSafeBaseUrl(provider.baseUrl || CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL);
+  // Cursor's current desktop client uses the non-privacy Agent endpoint.  The
+  // former agent.api5 host is kept only as a migration input: it no longer
+  // accepts the current desktop client's request contract reliably.
+  const requestedBaseUrl = provider.baseUrl === CURSOR_SUBSCRIPTION_LEGACY_BASE_URL
+    ? CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL
+    : (provider.baseUrl || CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL);
+  const baseUrl = assertSafeBaseUrl(requestedBaseUrl);
   const normalized = {
     ...provider,
     id,
-    name: provider.name || "Cursor 订阅桥接（实验性）",
+    name: provider.name || "Cursor 订阅桥接",
     providerType: "cursor_subscription",
     apiFormat: CURSOR_SUBSCRIPTION_API_FORMAT,
     authMode: "keychain",
     keychainAccount: cursorSubscriptionKeychainAccount({ ...provider, id }),
     baseUrl,
     enabled: provider.enabled === true,
-    maxConcurrentRequests: 1,
+    maxConcurrentRequests: Math.min(
+      CURSOR_SUBSCRIPTION_MAX_CONCURRENCY,
+      Math.max(1, Math.floor(Number(provider.maxConcurrentRequests) || CURSOR_SUBSCRIPTION_DEFAULT_CONCURRENCY))
+    ),
     streamIdleTimeoutMs: Number(provider.streamIdleTimeoutMs) > 0
       ? Number(provider.streamIdleTimeoutMs)
       : CURSOR_SUBSCRIPTION_DEFAULT_IDLE_TIMEOUT_MS
@@ -56,19 +69,123 @@ function contentIsText(content) {
   return Array.isArray(content) && content.every((part) => part && part.type === "text" && typeof part.text === "string");
 }
 
+function isFunctionTool(tool) {
+  return tool?.type === "function" && typeof tool?.function?.name === "string" && tool.function.name.trim().length > 0;
+}
+
 export function assertCursorSubscriptionRequest(body = {}) {
-  if (Array.isArray(body.tools) && body.tools.length) {
-    throw new CursorSubscriptionRequestError("Cursor 订阅桥接第一版不支持工具调用");
+  if (Array.isArray(body.tools) && body.tools.some((tool) => !isFunctionTool(tool))) {
+    throw new CursorSubscriptionRequestError("Cursor 订阅桥接仅支持 OpenAI function 类型工具");
   }
   for (const message of body.messages || []) {
-    if (!message || !["system", "user", "assistant"].includes(message.role) || !contentIsText(message.content) ||
-      (Array.isArray(message.tool_calls) && message.tool_calls.length)) {
-      throw new CursorSubscriptionRequestError("Cursor 订阅桥接第一版仅支持纯文本 system/user/assistant 对话");
+    const allowsToolResult = message?.role === "tool" && contentIsText(message.content);
+    const allowsTextMessage = ["system", "user", "assistant"].includes(message?.role) && contentIsText(message.content);
+    const allowsAssistantToolCalls = message?.role === "assistant" &&
+      Array.isArray(message?.tool_calls) && message.tool_calls.every((call) => isFunctionTool({ type: "function", function: call?.function }));
+    if (!message || (!allowsToolResult && !allowsTextMessage) ||
+      (message.role !== "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length) ||
+      (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length && !allowsAssistantToolCalls)) {
+      throw new CursorSubscriptionRequestError("Cursor 订阅桥接仅支持文本消息、function 工具调用及工具结果");
     }
   }
   return true;
 }
 
+export function resolveCursorSubscriptionModel(model) {
+  const requested = String(model || "").trim();
+  // `auto` is Switchyard's public catalog alias. Cursor's AgentService
+  // expects its concrete default model identifier instead.
+  return !requested || requested === "auto"
+    ? CURSOR_SUBSCRIPTION_DEFAULT_UPSTREAM_MODEL
+    : canonicalCursorSubscriptionModelId(requested);
+}
+
+// Cursor Agent CLI lists every combination of a model, reasoning setting and
+// acceleration as a separate ID (for example
+// `cursor-grok-4.5-medium-fast`). They are picker variants, not independent
+// models. Switchyard exposes one canonical model and lets the Agent send
+// reasoning/speed choices as parameters.
+const CURSOR_MODEL_VARIANT_SUFFIX_RE = /-(?:none|minimal|low|medium|high|xhigh|max|extra-high|thinking|fast)$/i;
+const CURSOR_DISPLAY_VARIANT_SUFFIX_RE = /\s+(?:none|minimal|low|medium|high|extra high|max|thinking|fast|priority)(?:\s+(?:none|minimal|low|medium|high|extra high|max|thinking|fast|priority))*\s*$/i;
+
+export function canonicalCursorSubscriptionModelId(value) {
+  let id = String(value || "").trim();
+  if (!id || id === "auto" || id === "default") return id || "auto";
+  while (CURSOR_MODEL_VARIANT_SUFFIX_RE.test(id)) {
+    id = id.replace(CURSOR_MODEL_VARIANT_SUFFIX_RE, "");
+  }
+  // The CLI calls this model `cursor-grok-4.5`, while Cursor Desktop's
+  // model-picker/API identity is `grok-4.5`.
+  if (/^cursor-grok-/i.test(id)) id = id.slice("cursor-".length);
+  return id || String(value || "").trim();
+}
+
+export function cursorSubscriptionDisplayName(value, fallback = "") {
+  const name = String(value || fallback || "").trim();
+  const normalized = name.replace(CURSOR_DISPLAY_VARIANT_SUFFIX_RE, "").trim();
+  return normalized || name;
+}
+
+function mergeCursorCatalogCapabilities(left = {}, right = {}) {
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right || {})) {
+    merged[key] = Boolean(merged[key] || value);
+  }
+  return merged;
+}
+
+/**
+ * Reduces Cursor's CLI variant matrix to one selectable model per base model.
+ * `aliases` retains every legacy raw ID so existing Switchyard configuration
+ * continues to resolve after the migration.
+ */
+export function collapseCursorSubscriptionModelCatalog(models = []) {
+  const output = [];
+  const byId = new Map();
+  for (const item of models || []) {
+    const rawId = String(item?.id || item?.upstreamModel || "").trim();
+    if (!rawId) continue;
+    const id = canonicalCursorSubscriptionModelId(rawId);
+    const next = {
+      ...item,
+      id,
+      upstreamModel: id,
+      displayName: cursorSubscriptionDisplayName(item?.displayName, id),
+      aliases: Array.from(new Set([...(item?.aliases || []), rawId, item?.upstreamModel].filter(Boolean)))
+    };
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, next);
+      output.push(next);
+      continue;
+    }
+    existing.aliases = Array.from(new Set([...(existing.aliases || []), ...(next.aliases || [])].filter(Boolean)));
+    existing.capabilities = mergeCursorCatalogCapabilities(existing.capabilities, next.capabilities);
+    if (!existing.contextWindow && next.contextWindow) existing.contextWindow = next.contextWindow;
+    if (!existing.maxOutputTokens && next.maxOutputTokens) existing.maxOutputTokens = next.maxOutputTokens;
+  }
+  return output;
+}
+
+// Cursor AgentService does not expose an OpenAI-compatible /models endpoint. These
+// are the current Cursor Desktop model identifiers, kept deliberately small so the
+// UI never offers historical migration-only IDs that are likely to be rejected.
+const CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES = {
+  text: true,
+  stream: true,
+  tools: true,
+  reasoning: true,
+  images: false,
+  multimodal: false
+};
+
 export const CURSOR_SUBSCRIPTION_STATIC_MODELS = [
-  { id: "auto", displayName: "Cursor Auto", capabilities: { text: true, stream: true, tools: false, images: false, multimodal: false } }
+  { id: "auto", displayName: "Auto", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "grok-4.5", displayName: "Cursor Grok 4.5", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "composer-2.5", displayName: "Composer 2.5", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "claude-opus-5", displayName: "Opus 5", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "claude-fable-5", displayName: "Fable 5", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "claude-sonnet-5", displayName: "Sonnet 5", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES },
+  { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", capabilities: CURSOR_SUBSCRIPTION_MODEL_CAPABILITIES }
 ];

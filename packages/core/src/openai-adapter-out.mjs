@@ -86,6 +86,7 @@ export function chatToResponses(body, upstreamModel) {
   }
   if (body.tool_choice !== undefined) out.tool_choice = toolChoiceToResponsesToolChoice(body.tool_choice);
   applyChatReasoningToResponses(out, body);
+  if (body.service_tier !== undefined) out.service_tier = body.service_tier;
   return out;
 }
 

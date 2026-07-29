@@ -196,14 +196,14 @@ const PROTOCOL_LABEL = {
   openai_responses: "OpenAI Responses",
   anthropic_messages: "Anthropic Messages",
   antigravity: "OpenAI 接入（Antigravity 自动转换）",
-  cursor_subscription: "Cursor 订阅桥接（实验性）"
+  cursor_subscription: "Cursor 订阅桥接"
 };
 
 const PROTOCOL_HELP = {
   openai_chat: "最通用，适合大多数 OpenAI-compatible / 中转服务",
   openai_responses: "OpenAI 新协议，Codex 和新版 OpenAI 更适合这条链路",
   anthropic_messages: "Claude / Claude Code 原生协议",
-  cursor_subscription: "仅个人本机使用的非官方实验性兼容链路",
+  cursor_subscription: "仅个人本机使用，复用本机 Cursor 登录态",
   antigravity: "对客户端统一暴露 OpenAI 兼容接口；网关自动转换到 Google Antigravity 上游"
 };
 
@@ -224,7 +224,7 @@ const AUTH_MODE_LABEL = {
   codex_oauth: "Codex OAuth",
   anthropic_oauth: "Anthropic 官方（Claude Code）",
   account_pool: "账号池（多账号）",
-  cursor_subscription: "Cursor 订阅桥接（实验性）",
+  cursor_subscription: "Cursor 订阅桥接",
   none: "无需认证"
 };
 
@@ -649,7 +649,7 @@ function syncProviderRiskNote(provider = null) {
     return;
   }
   if (providerHasCursorSubscriptionRisk(provider, preset, authMode)) {
-    note.textContent = preset?.riskNote || "Cursor 订阅桥接（实验性）：仅个人本机使用；非官方兼容能力，可能随 Cursor 更新失效。";
+    note.textContent = preset?.riskNote || "仅个人本机使用的 Cursor 订阅桥接；凭据只保存在系统安全存储。";
     return;
   }
   if (providerHasAnthropicOauthRisk(provider, preset, authMode)) {
@@ -677,6 +677,42 @@ async function refreshAnthropicOauthStatus() {
   }
 }
 
+async function refreshCursorSubscriptionLocalStatus() {
+  const statusEl = document.getElementById("provider-cursor-local-status");
+  if (!statusEl) return null;
+  try {
+    const state = await invoke("cursor-subscription:local-status");
+    statusEl.textContent = state?.ok
+      ? "已检测到本机 Cursor 登录态，可自动导入"
+      : "未检测到本机 Cursor 登录态；请先在 Cursor Desktop 登录";
+    return state;
+  } catch (error) {
+    statusEl.textContent = "本机 Cursor 登录态检测失败";
+    return null;
+  }
+}
+
+async function refreshCursorSubscriptionModelCatalog() {
+  const form = document.getElementById("provider-form");
+  const providerId = form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "cursor-subscription";
+  const provider = {
+    id: providerId,
+    presetId: "cursor-subscription",
+    providerType: "cursor_subscription",
+    apiFormat: "cursor_subscription",
+    baseUrl: form?.querySelector?.('[name="baseUrl"]')?.value?.trim() || "https://agentn.api5.cursor.sh"
+  };
+  try {
+    const result = await invoke("provider:discover-models", provider);
+    if (!result?.ok || !Array.isArray(result.models) || !result.models.length) return null;
+    state.providerDiscovery = result.models.map((model) => normalizeDiscoveredModelForProvider(provider, model));
+    renderProviderDiscovery();
+    return result;
+  } catch {
+    return null;
+  }
+}
+
 async function refreshCursorSubscriptionStatus() {
   const statusEl = document.getElementById("provider-cursor-subscription-status");
   if (!statusEl) return null;
@@ -684,13 +720,14 @@ async function refreshCursorSubscriptionStatus() {
   const provider = {
     id: form?.querySelector?.('[name="id"]')?.value?.trim() || form?._editId || "cursor-subscription",
     providerType: "cursor_subscription",
-    baseUrl: form?.querySelector?.('[name="baseUrl"]')?.value?.trim() || "https://agent.api5.cursor.sh",
-    streamIdleTimeoutMs: Number(form?.querySelector?.('[name="streamIdleTimeoutMs"]')?.value || 600000)
+    baseUrl: form?.querySelector?.('[name="baseUrl"]')?.value?.trim() || "https://agentn.api5.cursor.sh",
+    maxConcurrentRequests: Number(form?.querySelector?.('[name="maxConcurrentRequests"]')?.value || 2),
+    streamIdleTimeoutMs: Number(form?.querySelector?.('[name="streamIdleTimeoutMs"]')?.value || 90000)
   };
   try {
     const state = await invoke("cursor-subscription:status", { provider });
     const labels = { unconfigured: "未配置", connected: "已连接", auth_invalid: "认证失效", circuit_open: "暂时熔断", busy: "通道繁忙" };
-    statusEl.innerHTML = `<span class="chip ${state.configured ? "good" : "warn"}">${escapeHtml(labels[state.status] || state.status || "未知")}</span> <span class="tiny muted">${escapeHtml(state.accountLabel || "")}</span> <span class="tiny muted">· 并发固定 1 · 流静默超时 ${escapeHtml(String(state.streamIdleTimeoutMs || 600000))}ms</span>`;
+    statusEl.innerHTML = `<span class="chip ${state.configured ? "good" : "warn"}">${escapeHtml(labels[state.status] || state.status || "未知")}</span> <span class="tiny muted">${escapeHtml(state.accountLabel || "")}</span> <span class="tiny muted">· 并发 ${escapeHtml(String(state.maxConcurrentRequests || 2))} · 流静默超时 ${escapeHtml(String(state.streamIdleTimeoutMs || 90000))}ms</span>`;
     return state;
   } catch (err) {
     statusEl.textContent = `状态读取失败：${err?.message || String(err)}`;
@@ -771,7 +808,7 @@ function syncProviderAuthControls() {
     : mode === "account_pool"
     ? poolKindUi(preset?.poolKind || currentPoolKind()).authNote
     : mode === "cursor_subscription"
-    ? "Cursor 订阅桥接（实验性）：仅个人本机使用；凭据仅进入系统安全存储，默认关闭且固定单并发。"
+    ? "Cursor 订阅桥接：仅个人本机使用；凭据仅进入系统安全存储，保存后默认启用。并发可设为 1–3，建议 2。"
     : "已选择无需认证：适合 Ollama、LM Studio 等本机服务。";
   if (codexPanel) {
     codexPanel.style.display = mode === "codex_oauth" ? "" : "none";
@@ -802,7 +839,11 @@ function syncProviderAuthControls() {
   }
   if (cursorSubscriptionPanel) {
     cursorSubscriptionPanel.style.display = mode === "cursor_subscription" ? "" : "none";
-    if (mode === "cursor_subscription") refreshCursorSubscriptionStatus().catch(() => {});
+    if (mode === "cursor_subscription") {
+      refreshCursorSubscriptionStatus().catch(() => {});
+      refreshCursorSubscriptionLocalStatus().catch(() => {});
+      refreshCursorSubscriptionModelCatalog().catch(() => {});
+    }
   }
   syncProviderRiskNote();
 }
@@ -816,6 +857,10 @@ function applyProviderPreset(preset) {
   form.querySelector('[name="apiFormat"]').value = preset.apiFormat || "openai_chat";
   form.querySelector('[name="apiKeyEnv"]').value = preset.apiKeyEnv || "";
   if (preset.baseUrl) form.querySelector('[name="baseUrl"]').value = preset.baseUrl;
+  if (preset.id === "cursor-subscription") {
+    const enabled = document.getElementById("provider-cursor-subscription-enabled");
+    if (enabled) enabled.checked = true;
+  }
   if (preset.poolKind) {
     const kindInput = document.getElementById("provider-pool-kind");
     if (kindInput) kindInput.value = preset.poolKind;
@@ -1913,6 +1958,10 @@ function renderMobileControl() {
   const pairing = document.getElementById("mobile-pairing");
   const pairingUrl = document.getElementById("mobile-pairing-url");
   const tailscaleBase = document.getElementById("mobile-tailscale-base");
+  const tailscaleStatus = document.getElementById("mobile-tailscale-status");
+  const tailscaleUrl = document.getElementById("mobile-tailscale-url");
+  const repair = document.getElementById("btn-mobile-tailscale-repair");
+  const connection = mobile.connection || {};
   const devices = document.getElementById("mobile-devices");
   if (statusEl) {
     statusEl.className = `status-pill ${status.running ? "running" : "stopped"}`;
@@ -1924,12 +1973,21 @@ function renderMobileControl() {
     toggle.classList.toggle("primary", !status.running);
   }
   if (pair) pair.disabled = !status.running;
+  if (tailscaleStatus) {
+    tailscaleStatus.textContent = !connection.installed ? "未安装"
+      : !connection.online ? "未连接"
+      : connection.serveConfigured ? "在线 · HTTPS 转发正常"
+      : connection.conflict ? "在线 · 端口已被其他 Serve 占用" : "在线 · HTTPS 转发缺失";
+  }
+  if (tailscaleUrl) tailscaleUrl.textContent = connection.expectedUrl || "-";
+  if (repair) repair.disabled = !status.running || !connection.installed || !connection.online || connection.serveConfigured || connection.conflict;
   if (pairing) pairing.hidden = !mobile.challenge?.pairingUrl;
   if (pairingUrl) pairingUrl.value = mobile.challenge?.pairingUrl || "";
   if (tailscaleBase && document.activeElement !== tailscaleBase) {
     const saved = String(localStorage.getItem("switchyard.mobile-control.tailscale-base") || "");
+    const detected = String(connection.expectedUrl || "");
     try {
-      const normalized = saved ? normalizeMobileTailscaleBase(saved) : "";
+      const normalized = detected || (saved ? normalizeMobileTailscaleBase(saved) : "");
       if (normalized && normalized !== saved) localStorage.setItem("switchyard.mobile-control.tailscale-base", normalized);
       tailscaleBase.value = normalized;
     } catch {
@@ -1952,6 +2010,9 @@ function renderMobileControl() {
 async function refreshMobileControl() {
   const status = await invoke("mobile-control:status");
   state.mobileControl.status = status || { running: false };
+  state.mobileControl.connection = await invoke("mobile-control:connection-status").catch((error) => ({
+    installed: false, online: false, serveConfigured: false, expectedUrl: null, error: error.message
+  }));
   state.mobileControl.devices = status?.running
     ? await invoke("mobile-control:devices").catch(() => [])
     : [];
@@ -2009,7 +2070,10 @@ function renderProviderDiscovery() {
         <td colspan="4">
           <div class="discovery-expand-body">
             <div class="row">
+              <label>上游模型 ID <input class="field" data-discovery-upstream="${index}" value="${escapeHtml(model.upstreamModel || "")}" placeholder="例：gpt-5.6-sol"></label>
               <label>显示名 <input class="field" data-discovery-display="${index}" value="${escapeHtml(model.displayName || "")}"></label>
+            </div>
+            <div class="row">
               <label>别名（逗号分隔） <input class="field" data-discovery-aliases="${index}" value="${escapeHtml((model.aliases || []).join(", "))}"></label>
             </div>
             <div class="row">
@@ -2090,6 +2154,11 @@ function renderProviderDiscovery() {
     });
   });
 
+  wrap.querySelectorAll("[data-discovery-upstream]").forEach((el) => {
+    el.addEventListener("input", () => {
+      state.providerDiscovery[Number(el.dataset.discoveryUpstream)].upstreamModel = el.value.trim();
+    });
+  });
   wrap.querySelectorAll("[data-discovery-display]").forEach((el) => {
     el.addEventListener("input", () => {
       state.providerDiscovery[Number(el.dataset.discoveryDisplay)].displayName = el.value.trim();
@@ -2195,11 +2264,15 @@ function collectProviderForm() {
   } else if (authMode === "cursor_subscription") {
     data.providerType = "cursor_subscription";
     data.apiFormat = "cursor_subscription";
-    data.baseUrl = data.baseUrl || "https://agent.api5.cursor.sh";
+    // The legacy agent.api5 endpoint no longer accepts the current Cursor
+    // Agent request contract. Avoid saving it back from older form state.
+    data.baseUrl = !data.baseUrl || data.baseUrl === "https://agent.api5.cursor.sh"
+      ? "https://agentn.api5.cursor.sh"
+      : data.baseUrl;
     data.keychainAccount = data.id;
     data.enabled = raw.cursorSubscriptionEnabled === "on";
-    data.maxConcurrentRequests = 1;
-    data.streamIdleTimeoutMs = Math.max(60000, Number(raw.streamIdleTimeoutMs || 600000));
+    data.maxConcurrentRequests = Math.min(3, Math.max(1, Math.floor(Number(raw.maxConcurrentRequests || 2))));
+    data.streamIdleTimeoutMs = Math.max(60000, Number(raw.streamIdleTimeoutMs || 90000));
     delete data.apiKeyEnv;
     delete data.apiKey;
   } else if (authMode === "keychain") {
@@ -2404,6 +2477,8 @@ function openProviderDialog(editId) {
     form.querySelector('[name="routingMode"]').value = existing.routingMode || "auto";
     form.querySelector('[name="apiKeyEnv"]').value = existing.apiKeyEnv || "";
     form.querySelector('[name="apiKey"]').value = existing.apiKey || "";
+    const cursorEnabled = document.getElementById("provider-cursor-subscription-enabled");
+    if (cursorEnabled) cursorEnabled.checked = existing.providerType === "cursor_subscription" ? existing.enabled !== false : false;
     fillRetryFormFields(form, existing.retry);
     renderAuthModeOptions(providerPresetById(existing.presetId), existing.authMode || "api_key");
     if (existing.poolKind) {
@@ -2683,6 +2758,19 @@ document.getElementById("btn-pool-import-dir")?.addEventListener("click", async 
     toast(err?.message || String(err));
   }
 });
+document.getElementById("btn-cursor-subscription-import-local")?.addEventListener("click", async () => {
+  const button = document.getElementById("btn-cursor-subscription-import-local");
+  if (button) { button.disabled = true; button.textContent = "正在安全导入…"; }
+  try {
+    const result = await invoke("cursor-subscription:import-local", { provider: collectProviderForm() });
+    if (!result?.ok) return toast(result?.error || "自动导入失败", "error");
+    await refreshCursorSubscriptionStatus();
+    toast("已从本机 Cursor 导入并安全保存；点击“保存供应商”后生效");
+  } catch (err) { toast(err?.message || String(err), "error"); }
+  finally {
+    if (button) { button.disabled = false; button.textContent = "从本机已登录 Cursor 自动导入"; }
+  }
+});
 document.getElementById("btn-cursor-subscription-connect")?.addEventListener("click", async () => {
   const accessToken = document.getElementById("provider-cursor-access-token")?.value?.trim() || "";
   const machineId = document.getElementById("provider-cursor-machine-id")?.value?.trim() || "";
@@ -2706,6 +2794,25 @@ document.getElementById("btn-cursor-subscription-test")?.addEventListener("click
     await refreshCursorSubscriptionStatus();
   } catch (err) { output.textContent = `测试失败：${err?.message || String(err)}`; }
 });
+document.getElementById("btn-cursor-subscription-show-creds")?.addEventListener("click", async () => {
+  const form = document.getElementById("provider-form");
+  const provider = {
+    id: form?.querySelector?.("[name=\"id\"]")?.value?.trim() || form?._editId || "cursor-subscription",
+    providerType: "cursor_subscription"
+  };
+  try {
+    const result = await invoke("cursor-subscription:show-credentials", { provider });
+    const statusEl = document.getElementById("provider-cursor-subscription-status");
+    if (!result?.ok) {
+      statusEl.innerHTML = "<span class=\"chip warn\">未保存凭据</span> " + escapeHtml(result?.reason || "");
+      return;
+    }
+    statusEl.innerHTML = "<span class=\"chip good\">已保存</span> <span class=\"tiny\">Token: " + escapeHtml(result.accessTokenPreview) + " (" + result.accessTokenLength + "字符)</span> <span class=\"tiny\">MachineID: " + escapeHtml(result.machineIdPreview) + " (" + result.machineIdLength + "字符)</span>";
+  } catch (err) {
+    toast("凭据读取失败：" + (err?.message || String(err)));
+  }
+});
+
 document.getElementById("btn-cursor-subscription-clear")?.addEventListener("click", async () => {
   try {
     await invoke("cursor-subscription:clear", { provider: collectProviderForm() });
@@ -2759,6 +2866,8 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
       allowedClients: item.allowedClients || ["*"],
       capabilities: { ...item.capabilities }
     }));
+  const incompleteModel = discoveredModels.find((model) => !String(model.upstreamModel || "").trim());
+  if (incompleteModel) throw new Error("请填写手动添加模型的上游模型 ID");
   const newId = data.id;
   if (editId) {
     const previous = providers.find((p) => p.id === editId);
@@ -2779,21 +2888,18 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
       return { ...m, id: newModelId, providerId: newId };
     });
   }
-  if (editId) {
-    const resolvedEditId = editId !== newId ? newId : editId;
-    const existingById = new Map(models.map((m) => [m.id, m]));
-    for (const item of discoveredModels) {
-      existingById.set(item.id, {
-        ...existingById.get(item.id),
-        ...item,
-        providerId: newId
-      });
-    }
-    models = Array.from(existingById.values());
-  } else {
-    const existingIds = new Set(models.map((m) => m.id));
-    for (const item of discoveredModels) if (!existingIds.has(item.id)) models.push({ ...item, providerId: newId });
+  // A discovery refresh and a manual entry can refer to the same local model.
+  // Merge by model id in both create and edit flows so repeated saves never
+  // produce the duplicate-model-id validation error.
+  const modelsById = new Map(models.map((model) => [model.id, model]));
+  for (const item of discoveredModels) {
+    modelsById.set(item.id, {
+      ...modelsById.get(item.id),
+      ...item,
+      providerId: newId
+    });
   }
+  models = Array.from(modelsById.values());
   const next = { ...state.config, providers, models };
     await invoke("config:save", next);
     await refreshAll().then(() => checkFirstLaunch());
@@ -2883,25 +2989,6 @@ document.getElementById("btn-provider-discover").addEventListener("click", async
   }
 });
 
-document.getElementById("btn-provider-sync-models")?.addEventListener("click", async () => {
-  const output = document.getElementById("provider-test-output");
-  const providerId = currentProviderFormId();
-  if (!providerId) return toast("请先保存供应商后再同步模型目录", "error");
-  output.textContent = "正在同步模型目录…";
-  try {
-    const result = await invoke("provider:sync-model-directory", { providerId });
-    if (!result.ok) {
-      output.textContent = `同步失败：${result.error || "未知错误"}`;
-      return;
-    }
-    await refreshAll();
-    output.textContent = [`已同步：新增 ${result.added || 0} 个，已有 ${result.known || 0} 个`, result.warning || ""].filter(Boolean).join("\n");
-    toast(result.added ? `已新增 ${result.added} 个待启用模型` : "模型目录已是最新");
-  } catch (err) {
-    output.textContent = `同步失败：${err.message || String(err)}`;
-  }
-});
-
 document.getElementById("btn-discovery-add-manual")?.addEventListener("click", () => {
   const providerId = document.getElementById("provider-form")?.querySelector('[name="id"]')?.value?.trim() || "unknown";
   const newModel = {
@@ -2918,7 +3005,9 @@ document.getElementById("btn-discovery-add-manual")?.addEventListener("click", (
   };
   state.providerDiscovery.push(newModel);
   renderProviderDiscovery();
-  // auto-open edit panel for the new row
+  // Keep model creation inline: the required upstream model id is visible in
+  // the expanded row, and the save guard gives a precise validation message
+  // instead of leaking a config validation error.
   const idx = state.providerDiscovery.length - 1;
   const expandRow = document.getElementById(`discovery-expand-${idx}`);
   if (expandRow) expandRow.style.display = "";
@@ -3047,6 +3136,7 @@ function collectModelForm() {
     ...(retry ? { retry } : {}),
     ...(pricing ? { pricing } : {}),
     allowedClients: collectClientScopeOptions("model-visible-clients"),
+    agentScopeOverride: true,
     capabilities: {
       text: raw["cap-text"] === "on",
       tools: raw["cap-tools"] === "on",
@@ -4402,7 +4492,7 @@ document.getElementById("sessions-tbody")?.addEventListener("click", async (even
       const row = await invoke("agent:sessions:read", { id: view.dataset.sessionView });
       openSessionViewer(row);
     } else if (rename) {
-      // Electron 渲染进程不支持 window.prompt，改用应用内对话框
+      // Electron 渲染进程不支持原生输入提示，改用应用内对话框
       openSessionRenameDialog({
         id: rename.dataset.sessionRename,
         name: rename.dataset.sessionName || ""
@@ -5233,13 +5323,33 @@ document.getElementById("btn-mobile-control-toggle")?.addEventListener("click", 
   }
 });
 
+
+document.getElementById("btn-mobile-tailscale-repair")?.addEventListener("click", async () => {
+  const button = document.getElementById("btn-mobile-tailscale-repair");
+  if (button) button.disabled = true;
+  try {
+    state.mobileControl.connection = await invoke("mobile-control:repair-connection");
+    const connection = state.mobileControl.connection || {};
+    if (connection.expectedUrl) {
+      localStorage.setItem("switchyard.mobile-control.tailscale-base", connection.expectedUrl);
+    }
+    renderMobileControl();
+    toast(connection.serveConfigured ? "手机安全连接已恢复" : `修复失败：${connection.error || "Tailscale Serve 未生效"}`, connection.serveConfigured ? "success" : "error");
+  } catch (error) {
+    toast(`修复手机安全连接失败：${error.message}`, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
 document.getElementById("btn-mobile-pair")?.addEventListener("click", async () => {
   try {
     state.mobileControl.challenge = await invoke("mobile-control:pair-start", {
       ttlMs: 10 * 60 * 1000
     });
+    const detectedBase = String(state.mobileControl.connection?.expectedUrl || "");
     const savedBase = String(localStorage.getItem("switchyard.mobile-control.tailscale-base") || "");
-    const remoteBase = savedBase ? normalizeMobileTailscaleBase(savedBase) : "";
+    const remoteBase = detectedBase || (savedBase ? normalizeMobileTailscaleBase(savedBase) : "");
     if (remoteBase && remoteBase !== savedBase) localStorage.setItem("switchyard.mobile-control.tailscale-base", remoteBase);
     if (remoteBase && state.mobileControl.challenge?.pairingPath) {
       state.mobileControl.challenge.pairingUrl = `${remoteBase}${state.mobileControl.challenge.pairingPath}`;

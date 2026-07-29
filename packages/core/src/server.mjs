@@ -8,6 +8,7 @@ import { loadConfig, listModelsForClient, publicModelsForClient } from "./config
 import { isDeletedProviderModelRequest, resolveRoute } from "./router.mjs";
 import { activeCodexSwitchyardModel, buildCodexModelCatalog } from "./profile-writer.mjs";
 import { dispatchChat, dispatchResponses } from "./upstream/dispatch.mjs";
+import { describeProtocolRoute } from "./protocol-capabilities.mjs";
 import { readJsonResponse } from "./upstream/clients.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
@@ -269,21 +270,23 @@ function errorMessage(err) {
   return details ? `${base} (${details})` : base;
 }
 
-function nativeRoutingDecision(provider, clientProtocol) {
+export function nativeRoutingDecision(provider, clientProtocol) {
   const apiFormat = provider?.apiFormat || "openai_chat";
+  const protocolRoute = describeProtocolRoute({ clientProtocol, provider });
   const mode = provider?.routingMode || "auto";
-  if (mode === "gateway") return { ok: true, native: false, mode, apiFormat };
-  if (apiFormat === clientProtocol) return { ok: true, native: true, mode, apiFormat };
+  if (mode === "gateway") return { ok: true, native: false, mode, apiFormat, protocolRoute };
+  if (apiFormat === clientProtocol) return { ok: true, native: true, mode, apiFormat, protocolRoute };
   if (mode === "native") {
     return {
       ok: false,
       native: false,
       mode,
       apiFormat,
+      protocolRoute,
       error: `Provider ${provider?.id || "(unknown)"} routingMode=native requires ${clientProtocol}, but apiFormat is ${apiFormat}`
     };
   }
-  return { ok: true, native: false, mode, apiFormat };
+  return { ok: true, native: false, mode, apiFormat, protocolRoute };
 }
 
 function rejectRoutingError(res, record, decision) {
@@ -388,14 +391,20 @@ function summarizeMessages(messages) {
 
 function summarizeRequest(chatBody, route, protocol) {
   const messages = summarizeMessages(chatBody.messages || []);
-  const upstreamProtocol = route?.provider?.apiFormat || "openai_chat";
+  const protocolRoute = describeProtocolRoute({
+    clientProtocol: protocol,
+    provider: route?.provider
+  });
   return {
     protocol,
     modelId: route?.model?.id || "",
     upstreamModel: route?.upstreamModel || "",
     providerId: route?.provider?.id || "",
     conversionChain: {
-      steps: protocol === upstreamProtocol ? [protocol] : [protocol, upstreamProtocol]
+      mode: protocolRoute.mode,
+      lossless: protocolRoute.lossless,
+      steps: protocolRoute.steps,
+      features: protocolRoute.features
     },
     compatRules: {
       outbound: activePatchDescriptors({ provider: route?.provider, model: route?.model, direction: "outbound" }),

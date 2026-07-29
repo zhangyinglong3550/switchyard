@@ -18,6 +18,7 @@ import android.webkit.WebView;
 import android.webkit.ValueCallback;
 import android.webkit.DownloadListener;
 import android.webkit.WebViewClient;
+import android.webkit.URLUtil;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Button;
@@ -34,6 +35,7 @@ import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
+import android.os.Message;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -110,6 +112,13 @@ public final class MainActivity extends Activity {
     webView.setWebChromeClient(new WebChromeClient() {
       @Override public boolean onConsoleMessage(ConsoleMessage message) { return true; }
 
+      @Override public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+        // Conversation links are handled by the capture-phase JavaScript
+        // listener. Reject any residual target=_blank popup instead of letting
+        // WebView create an unmanaged child window.
+        return false;
+      }
+
       @Override public boolean onShowFileChooser(
           WebView view,
           ValueCallback<Uri[]> callback,
@@ -139,6 +148,7 @@ public final class MainActivity extends Activity {
     webView.setWebViewClient(new WebViewClient() {
       @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
         Uri uri = request == null ? null : request.getUrl();
+        if (request != null && !request.isForMainFrame()) return false;
         if (isTrusted(uri)) return false;
         return openExternalUrl(uri == null ? "" : uri.toString());
       }
@@ -475,15 +485,22 @@ public final class MainActivity extends Activity {
   private boolean openExternalUrl(String rawUrl) {
     if (rawUrl == null || rawUrl.trim().isEmpty()) return true;
     try {
+      if (!URLUtil.isNetworkUrl(rawUrl)) {
+        Toast.makeText(this, "仅支持打开 HTTP 或 HTTPS 链接", Toast.LENGTH_SHORT).show();
+        return true;
+      }
       Uri uri = Uri.parse(rawUrl);
       String scheme = uri.getScheme();
-      if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) return true;
+      if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) || uri.getHost() == null || uri.getHost().isEmpty()) {
+        Toast.makeText(this, "链接无效", Toast.LENGTH_SHORT).show();
+        return true;
+      }
       Intent intent = new Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE);
       if (intent.resolveActivity(getPackageManager()) == null) {
         Toast.makeText(this, "没有可用的浏览器打开此链接", Toast.LENGTH_LONG).show();
         return true;
       }
-      startActivity(intent);
+      startActivity(Intent.createChooser(intent, "使用浏览器打开链接"));
     } catch (Exception error) {
       Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show();
     }

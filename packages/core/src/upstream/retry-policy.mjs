@@ -4,6 +4,7 @@
 export const DEFAULT_RETRY_STATUSES = [0, 429, 500, 502, 503, 504];
 export const DEFAULT_RETRY_BACKOFF_MS = [500, 1500, 3000];
 export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+export const DEFAULT_RETRY_AFTER_MAX_MS = 60_000;
 
 function asInt(value, fallback) {
   const n = Number(value);
@@ -37,7 +38,8 @@ export function resolveRetryPolicy(provider = null, model = null, opts = {}) {
       maxAttempts: 1,
       onStatus: new Set(DEFAULT_RETRY_STATUSES),
       backoffMs: [...DEFAULT_RETRY_BACKOFF_MS],
-      retryStream: true
+      retryStream: true,
+      maxRetryAfterMs: DEFAULT_RETRY_AFTER_MAX_MS
     };
   }
 
@@ -50,7 +52,8 @@ export function resolveRetryPolicy(provider = null, model = null, opts = {}) {
     maxAttempts,
     onStatus: new Set(asStatusList(raw.onStatus, DEFAULT_RETRY_STATUSES)),
     backoffMs: asBackoffList(raw.backoffMs, DEFAULT_RETRY_BACKOFF_MS),
-    retryStream: raw.retryStream !== false
+    retryStream: raw.retryStream !== false,
+    maxRetryAfterMs: Math.max(0, asInt(raw.maxRetryAfterMs, DEFAULT_RETRY_AFTER_MAX_MS))
   };
 }
 
@@ -86,6 +89,43 @@ export function backoffForAttempt(policy, attemptIndexZeroBased) {
   const list = policy?.backoffMs?.length ? policy.backoffMs : DEFAULT_RETRY_BACKOFF_MS;
   const idx = Math.min(Math.max(0, attemptIndexZeroBased), list.length - 1);
   return Math.max(0, Number(list[idx]) || 0);
+}
+
+function headerValue(headers, name) {
+  if (!headers) return "";
+  if (typeof headers.get === "function") return String(headers.get(name) || "").trim();
+  const target = String(name || "").toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() === target) return String(value || "").trim();
+  }
+  return "";
+}
+
+function resultHeaders(result) {
+  return result?.headers || result?.upstream?.headers || null;
+}
+
+export function retryAfterMs(headers, { now = Date.now(), maxMs = DEFAULT_RETRY_AFTER_MAX_MS } = {}) {
+  const value = headerValue(headers, "retry-after");
+  if (!value) return 0;
+  let milliseconds = 0;
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    milliseconds = Math.ceil(Number(value) * 1000);
+  } else {
+    const at = Date.parse(value);
+    if (Number.isFinite(at)) milliseconds = Math.max(0, at - now);
+  }
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return 0;
+  return Math.min(milliseconds, Math.max(0, Number(maxMs) || 0));
+}
+
+export function retryDelayForResult(result, policy, attemptIndexZeroBased, now = Date.now()) {
+  const localBackoff = backoffForAttempt(policy, attemptIndexZeroBased);
+  const upstreamBackoff = retryAfterMs(resultHeaders(result), {
+    now,
+    maxMs: policy?.maxRetryAfterMs ?? DEFAULT_RETRY_AFTER_MAX_MS
+  });
+  return Math.max(localBackoff, upstreamBackoff);
 }
 
 export function sleep(ms, { signal } = {}) {
@@ -157,7 +197,8 @@ export async function withDispatchRetry(provider, model, opts, runner) {
 
     // 失败流要释放 body，再退避重试
     if (last?.kind === "stream") await cancelUpstreamBody(last);
-    const waitMs = backoffForAttempt(policy, attempt - 1);
+    const waitMs = retryDelayForResult(last, policy, attempt - 1);
+    attempts[attempts.length - 1].waitMs = waitMs;
     await sleep(waitMs, { signal: opts?.signal });
   }
   return attachRetryMeta(last, attempts, policy);

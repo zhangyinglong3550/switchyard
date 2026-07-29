@@ -424,12 +424,14 @@ export function createMobileControlStore({
       attachments: attachments.map((asset) => publicAsset(asset)).filter(Boolean)
     };
     const previous = rows.findIndex((row) => row.messageId === message);
+    const duplicate = previous >= 0;
     if (previous >= 0) rows.splice(previous, 1);
     rows.push(entry);
     state.mobileMessages[session] = rows.slice(-MAX_MOBILE_MESSAGES_PER_SESSION);
     save();
     return {
       ...entry,
+      duplicate,
       attachments: entry.attachments.map((asset) => ({ ...asset }))
     };
   };

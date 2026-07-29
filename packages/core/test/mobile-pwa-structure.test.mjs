@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { notificationStateLabel, parseStructuredNotification } from "../../../apps/mobile/structured-notification.mjs";
 
 test("mobile PWA contains chat, create, approval and settings surfaces without provider secrets", () => {
   const root = path.resolve("apps/mobile");
@@ -150,9 +151,13 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function stripInternalUiDirectives/);
   assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
   assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
-  assert.match(html, /app\.js\?v=67/);
-  assert.match(html, /styles\.css\?v=67/);
+  assert.match(html, /app\.js\?v=68/);
+  assert.match(html, /styles\.css\?v=68/);
   assert.match(js, /function renderExecutionCard/);
+  assert.match(js, /parseStructuredNotification/);
+  assert.match(js, /class="structured-notification/);
+  assert.match(css, /\.structured-notification\{/);
+  assert.match(css, /\.composer \.runtime-shortcut\{[^}]*display:flex/);
   assert.match(js, /function patchStats/);
   assert.match(js, /function refreshLiveExecutionCard/);
   assert.match(js, /execution-card/);
@@ -262,4 +267,33 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /escapeRegExp/);
   assert.match(css, /\.content-hit\{/);
   assert.equal(manifest.display, "standalone");
+});
+
+test("Android shell captures conversation links before WebView navigation and opens only browser-safe URLs", () => {
+  const root = path.resolve("apps");
+  const js = fs.readFileSync(path.join(root, "mobile", "app.js"), "utf8");
+  const android = fs.readFileSync(path.join(root, "android", "app", "src", "main", "java", "com", "zhangyinglong", "switchyard", "MainActivity.java"), "utf8");
+
+  assert.match(js, /document\.addEventListener\("click",\s*\(event\)\s*=>\s*\{[\s\S]*?\.msg-body a\[href\][\s\S]*?stopImmediatePropagation\(\)/);
+  assert.match(android, /onCreateWindow\(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg\)/);
+  assert.match(android, /request\.isForMainFrame\(\)/);
+  assert.match(android, /URLUtil\.isNetworkUrl\(rawUrl\)/);
+  assert.match(android, /Intent\.createChooser\(intent, "使用浏览器打开链接"\)/);
+});
+
+
+test("mobile structured notifications use one generic tagged-JSON adapter", () => {
+  const subagent = parseStructuredNotification('<subagent_notification> {"agent_path":"019fac","status":{"completed":"已完成 **只读审查**"}}');
+  assert.deepEqual(subagent, {
+    tag: "subagent_notification",
+    label: "子任务通知",
+    state: "completed",
+    text: "已完成 **只读审查**"
+  });
+  assert.equal(notificationStateLabel(subagent.state), "已完成");
+  assert.deepEqual(
+    parseStructuredNotification('<workflow_notice> {"status":{"running":"正在同步任务"}}'),
+    { tag: "workflow_notice", label: "Workflow Notice", state: "running", text: "正在同步任务" }
+  );
+  assert.equal(parseStructuredNotification("<strong>普通 Markdown</strong>"), null);
 });

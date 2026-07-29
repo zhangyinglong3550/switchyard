@@ -761,9 +761,11 @@ export function createSessionRegistry({
       const attachments = runtimeAttachmentsFor(item.attachments || []);
       const effectiveModel = store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id);
       if (effectiveModel && typeof runtime.setModel === "function") await runtime.setModel(nativeId, effectiveModel);
-      store.rememberMobileMessage({ sessionId: mobileSessionId, messageId: item.messageId, text: item.text, attachments: item.attachments || [] });
+      const remembered = store.rememberMobileMessage({ sessionId: mobileSessionId, messageId: item.messageId, text: item.text, attachments: item.attachments || [] });
       detailCache.delete(mobileSessionId);
-      ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
+      if (!remembered.duplicate) {
+        ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
+      }
       ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
       void Promise.resolve().then(() => runtime.sendMessage(nativeId, {
         text: item.text,
@@ -772,6 +774,12 @@ export function createSessionRegistry({
       })).catch((error) => {
         activeSessions.delete(mobileSessionId);
         detailCache.delete(mobileSessionId);
+        if (error?.code === "CODEX_DESKTOP_SYNC_UNAVAILABLE") {
+          store.prependQueueItem?.({ sessionId: mobileSessionId, ...item });
+          setQueuePaused(mobileSessionId, true);
+          ledger.append({ sessionId: mobileSessionId, type: "status", summary: "桌面 Codex 暂未提供共享连接，消息已保留；重新打开桌面会话后可在手机继续发送" });
+          return;
+        }
         ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
       });
     } catch (error) {

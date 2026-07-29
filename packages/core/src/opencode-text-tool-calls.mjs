@@ -320,6 +320,19 @@ function transformEvent(event, decoder) {
   return changed ? output : [event];
 }
 
+export function extractOpenCodeTextToolCalls(text, {
+  tools = [],
+  restoreToolName = (name) => name
+} = {}) {
+  const decoder = new TextToolCallDecoder(buildToolIndex(tools, restoreToolName));
+  const first = decoder.push(text);
+  const tail = decoder.flush();
+  return {
+    text: `${first.text || ""}${tail.text || ""}`,
+    toolCalls: first.toolCalls || []
+  };
+}
+
 export function transformOpenCodeTextToolCalls(upstream, {
   tools = [],
   restoreToolName = (name) => name

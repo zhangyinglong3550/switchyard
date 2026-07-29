@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
-import { normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
+import { canonicalCursorSubscriptionModelId, cursorSubscriptionDisplayName, isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
 
 export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
@@ -116,7 +116,10 @@ export function mergeWithDefaults(input) {
     if (typeof input.defaultModel === "string") out.defaultModel = input.defaultModel;
     if (Array.isArray(input.providers)) out.providers = input.providers.map(normalizeKnownProvider);
     if (Array.isArray(input.models)) {
-      out.models = normalizeKnownVisionFallbacks(input.models.map((model) => normalizeKnownModel(model, out.providers)), out.providers);
+      out.models = normalizeKnownVisionFallbacks(
+        collapseReasoningVariantModels(input.models.map((model) => normalizeKnownModel(model, out.providers)), out.providers),
+        out.providers
+      );
     }
     if (input.clients && typeof input.clients === "object") {
       out.clients = { ...out.clients };
@@ -135,6 +138,90 @@ export function mergeWithDefaults(input) {
         out.clients[key] = normalized;
       }
     }
+  }
+  return out;
+}
+
+// Reasoning level is a runtime choice made by the Agent (`reasoning_effort`),
+// not a distinct model. Earlier builds incorrectly saved virtual rows such as
+// `gpt-5.4-mini-high` and `gemini-3.6-flash-low`. Keep their old IDs as
+// aliases so existing Agent settings still resolve, but publish one base model
+// to every picker.
+const REASONING_VARIANT_MODEL_RE = /^(gpt-5\.4-(?:mini|nano))-(none|low|medium|high|xhigh|max)$|^(gemini-3\.6-flash)-(low|medium|high)$/i;
+
+function canonicalReasoningVariant(value) {
+  const source = String(value || "").trim();
+  const match = source.match(REASONING_VARIANT_MODEL_RE);
+  if (!match) return null;
+  return {
+    base: match[1] || match[3],
+    variant: source
+  };
+}
+
+function modelIdForUpstream(model, upstreamModel) {
+  const id = String(model?.id || "");
+  const oldUpstream = String(model?.upstreamModel || "");
+  if (oldUpstream && id.endsWith(`/${oldUpstream}`)) {
+    return `${id.slice(0, -oldUpstream.length)}${upstreamModel}`;
+  }
+  return id;
+}
+
+function mergeModelCapabilities(left = {}, right = {}) {
+  const out = { ...left };
+  for (const [key, value] of Object.entries(right || {})) {
+    out[key] = Boolean(out[key] || value);
+  }
+  return out;
+}
+
+export function collapseReasoningVariantModels(models = [], providers = []) {
+  const providerById = new Map((providers || []).map((provider) => [provider.id, provider]));
+  const out = [];
+  const byRoute = new Map();
+  for (const model of models || []) {
+    const provider = providerById.get(model?.providerId);
+    const isSupportedProvider = provider?.apiFormat === "antigravity" ||
+      provider?.apiFormat === "cursor_subscription" ||
+      provider?.authMode === "codex_oauth" ||
+      provider?.providerType === "codex_oauth" ||
+      String(provider?.baseUrl || "").includes("chatgpt.com/backend-api/codex");
+    const cursorVariant = isCursorSubscriptionProvider(provider)
+      ? canonicalCursorSubscriptionModelId(model?.upstreamModel || model?.id)
+      : "";
+    const normalized = isSupportedProvider && canonicalReasoningVariant(model?.upstreamModel || model?.id);
+    const upstreamModel = cursorVariant || normalized?.base || model?.upstreamModel;
+    const next = cursorVariant && cursorVariant !== (model?.upstreamModel || model?.id)
+      ? {
+          ...model,
+          id: modelIdForUpstream(model, upstreamModel),
+          upstreamModel,
+          displayName: cursorSubscriptionDisplayName(model?.displayName, upstreamModel),
+          aliases: Array.from(new Set([...(model?.aliases || []), model.id, model.upstreamModel].filter(Boolean)))
+        }
+      : normalized
+      ? {
+          ...model,
+          id: modelIdForUpstream(model, upstreamModel),
+          upstreamModel,
+          displayName: String(model?.displayName || "").replace(/[\s·-]+(?:none|low|medium|high|xhigh|max)\s*$/i, "").trim() || upstreamModel,
+          aliases: Array.from(new Set([...(model?.aliases || []), model.id, model.upstreamModel, normalized.variant].filter(Boolean)))
+        }
+      : model;
+    const routeKey = `${next?.providerId || ""}\u0000${next?.upstreamModel || next?.id || ""}`;
+    const existing = byRoute.get(routeKey);
+    if (!existing) {
+      byRoute.set(routeKey, next);
+      out.push(next);
+      continue;
+    }
+    existing.enabled = existing.enabled !== false || next?.enabled !== false;
+    existing.aliases = Array.from(new Set([...(existing.aliases || []), ...(next?.aliases || []), next?.id, next?.upstreamModel].filter(Boolean)));
+    existing.capabilities = mergeModelCapabilities(existing.capabilities, next?.capabilities);
+    existing.allowedClients = Array.from(new Set([...(existing.allowedClients || []), ...(next?.allowedClients || [])].filter(Boolean)));
+    if (!existing.contextWindow && next?.contextWindow) existing.contextWindow = next.contextWindow;
+    if (!existing.maxOutputTokens && next?.maxOutputTokens) existing.maxOutputTokens = next.maxOutputTokens;
   }
   return out;
 }
@@ -239,7 +326,11 @@ function normalizeKnownModel(model, providers = []) {
   ].filter(Boolean).join(" ").toLowerCase();
   let next = {
     ...model,
-    allowedClients: normalizeStringList(model.allowedClients, ["*"])
+    allowedClients: normalizeStringList(model.allowedClients, ["*"]),
+    // Provider scope remains the default for existing configurations. A model
+    // edited in the desktop form explicitly sets this flag, making its Agent
+    // scope an override rather than an additional restriction.
+    agentScopeOverride: model.agentScopeOverride === true
   };
   if ((haystack.includes("xiaomimimo.com") || haystack.includes("xiaomi") || haystack.includes("mimo")) && /\bmimo-v2\.5(?!-pro)\b/.test(haystack)) {
     next = {
@@ -348,7 +439,8 @@ export function validateConfig(config) {
     if (!provider.baseUrl) throw new Error(`Provider ${provider.id} requires baseUrl`);
     if (provider.providerType === "cursor_subscription") {
       if (provider.enabled !== false && config.host !== "127.0.0.1") throw new Error("Cursor subscription bridge requires config.host to be 127.0.0.1");
-      if (Number(provider.maxConcurrentRequests || 1) !== 1) throw new Error("Cursor subscription bridge supports exactly one concurrent request");
+      const concurrency = Number(provider.maxConcurrentRequests || 2);
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 3) throw new Error("Cursor subscription bridge supports 1 to 3 concurrent requests");
     }
   }
   const modelIds = new Set();
@@ -387,8 +479,13 @@ export function modelVisibleToClient(config, model, clientId) {
   const filter = clientConfig(config, clientId);
   if (filter.enabled === false) return false;
   const provider = (config.providers || []).find((item) => item.id === model.providerId);
-  if (!clientScopeAllows(provider?.allowedClients, clientId)) return false;
-  if (!clientScopeAllows(model.allowedClients, clientId)) return false;
+  // Provider visibility is a default. Model-level configuration is the
+  // explicit exception, so a model can be exposed to an Agent even when its
+  // provider is otherwise hidden from that Agent.
+  const effectiveScope = model.agentScopeOverride === true
+    ? model.allowedClients
+    : provider?.allowedClients;
+  if (!clientScopeAllows(effectiveScope, clientId)) return false;
   const allow = new Set(filter.allowedModels || ["*"]);
   const keys = [model.id, model.upstreamModel, claudeCodeDiscoveryModelId(model), claudeAppDiscoveryModelId(model), ...(model.aliases || [])].filter(Boolean);
   return allow.has("*") || keys.some((key) => allow.has(key));

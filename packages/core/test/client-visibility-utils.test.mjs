@@ -13,21 +13,21 @@ const config = {
   ],
   models: [
     { id: "codex-only/a", providerId: "codex-only", upstreamModel: "a" },
-    { id: "codex-only/b", providerId: "codex-only", upstreamModel: "b", allowedClients: ["claude-code"] },
-    { id: "all/c", providerId: "all", upstreamModel: "c", allowedClients: ["claude-code"], aliases: ["c-alias"] },
+    { id: "codex-only/b", providerId: "codex-only", upstreamModel: "b", allowedClients: ["claude-code"], agentScopeOverride: true },
+    { id: "all/c", providerId: "all", upstreamModel: "c", allowedClients: ["claude-code"], agentScopeOverride: true, aliases: ["c-alias"] },
     { id: "all/d", providerId: "all", upstreamModel: "d" },
     { id: "all/disabled", providerId: "all", upstreamModel: "disabled", enabled: false }
   ],
   clients: {
     codex: { enabled: true, allowedModels: ["*"] },
-    "claude-code": { enabled: true, allowedModels: ["c-alias", "all/d"] },
+    "claude-code": { enabled: true, allowedModels: ["*"] },
     hermes: { enabled: false, allowedModels: ["*"] }
   }
 };
 
 test("client visibility utils · filters models by provider, model and client scopes", () => {
   assert.deepEqual(modelsForClient(config, "codex").map((model) => model.id), ["codex-only/a", "all/d"]);
-  assert.deepEqual(modelsForClient(config, "claude-code").map((model) => model.id), ["all/c", "all/d"]);
+  assert.deepEqual(modelsForClient(config, "claude-code").map((model) => model.id), ["codex-only/b", "all/c", "all/d"]);
   assert.deepEqual(modelsForClient(config, "hermes"), []);
 });
 

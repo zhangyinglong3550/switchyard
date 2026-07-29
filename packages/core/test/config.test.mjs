@@ -53,6 +53,62 @@ test("mergeWithDefaults preserves per-agent default model", () => {
   assert.equal(cfg.clients["claude-code"].defaultModel, "deepseek/deepseek-v4-pro");
 });
 
+test("mergeWithDefaults collapses persisted reasoning variants into one Agent-selectable model", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "codex-pool", apiFormat: "openai_responses", authMode: "codex_oauth", baseUrl: "https://chatgpt.com/backend-api/codex" },
+      { id: "antigravity", apiFormat: "antigravity", baseUrl: "https://daily-cloudcode-pa.googleapis.com" }
+    ],
+    models: [
+      { id: "codex-pool/gpt-5.4-mini-none", providerId: "codex-pool", upstreamModel: "gpt-5.4-mini-none", enabled: false, capabilities: { stream: true } },
+      { id: "codex-pool/gpt-5.4-mini-high", providerId: "codex-pool", upstreamModel: "gpt-5.4-mini-high", capabilities: { reasoning: true } },
+      { id: "antigravity/gemini-3.6-flash-low", providerId: "antigravity", upstreamModel: "gemini-3.6-flash-low", capabilities: { stream: true } },
+      { id: "antigravity/gemini-3.6-flash-high", providerId: "antigravity", upstreamModel: "gemini-3.6-flash-high", capabilities: { reasoning: true } }
+    ]
+  });
+
+  assert.deepEqual(cfg.models.map((model) => model.id), [
+    "codex-pool/gpt-5.4-mini",
+    "antigravity/gemini-3.6-flash"
+  ]);
+  assert.deepEqual(cfg.models.map((model) => model.upstreamModel), [
+    "gpt-5.4-mini",
+    "gemini-3.6-flash"
+  ]);
+  assert.equal(cfg.models[0].enabled, true);
+  assert.equal(cfg.models[0].capabilities.reasoning, true);
+  assert.ok(cfg.models[0].aliases.includes("codex-pool/gpt-5.4-mini-high"));
+  assert.ok(cfg.models[1].aliases.includes("gemini-3.6-flash-low"));
+});
+
+test("mergeWithDefaults collapses Cursor CLI reasoning and speed variants into the desktop model identity", () => {
+  const cfg = mergeWithDefaults({
+    providers: [{ id: "cursor", providerType: "cursor_subscription", baseUrl: "https://agentn.api5.cursor.sh", enabled: true }],
+    models: [
+      { id: "cursor/cursor-grok-4.5-low", providerId: "cursor", upstreamModel: "cursor-grok-4.5-low", displayName: "Cursor Grok 4.5 Low" },
+      { id: "cursor/cursor-grok-4.5-high-fast", providerId: "cursor", upstreamModel: "cursor-grok-4.5-high-fast", displayName: "Cursor Grok 4.5 Fast" }
+    ]
+  });
+  assert.deepEqual(cfg.models.map((model) => ({
+    id: model.id,
+    upstreamModel: model.upstreamModel,
+    displayName: model.displayName,
+    aliases: model.aliases
+  })), [{
+    id: "cursor/grok-4.5",
+    upstreamModel: "grok-4.5",
+    displayName: "Cursor Grok 4.5",
+    aliases: [
+      "cursor/cursor-grok-4.5-low",
+      "cursor-grok-4.5-low",
+      "cursor/cursor-grok-4.5-high-fast",
+      "cursor-grok-4.5-high-fast",
+      "cursor/grok-4.5",
+      "grok-4.5"
+    ]
+  }]);
+});
+
 test("validateConfig rejects duplicate provider id", () => {
   const cfg = mergeWithDefaults({
     providers: [
@@ -127,7 +183,7 @@ test("publicModelsForClient hides disabled models without a client prefix", () =
   assert.deepEqual(publicModelsForClient(cfg).map((model) => model.id), ["p/enabled"]);
 });
 
-test("listModelsForClient applies provider and model visible agent scopes", () => {
+test("listModelsForClient inherits provider scope until a model explicitly overrides it", () => {
   const cfg = mergeWithDefaults({
     providers: [
       { id: "p-codex", apiFormat: "openai_chat", baseUrl: "http://x", allowedClients: ["codex"] },
@@ -135,8 +191,8 @@ test("listModelsForClient applies provider and model visible agent scopes", () =
     ],
     models: [
       { id: "p-codex/a", providerId: "p-codex", upstreamModel: "a" },
-      { id: "p-codex/b", providerId: "p-codex", upstreamModel: "b", allowedClients: ["claude-code"] },
-      { id: "p-all/c", providerId: "p-all", upstreamModel: "c", allowedClients: ["claude-code"] },
+      { id: "p-codex/b", providerId: "p-codex", upstreamModel: "b", allowedClients: ["claude-code"], agentScopeOverride: true },
+      { id: "p-all/c", providerId: "p-all", upstreamModel: "c", allowedClients: ["claude-code"], agentScopeOverride: true },
       { id: "p-all/d", providerId: "p-all", upstreamModel: "d" }
     ],
     clients: {
@@ -146,7 +202,29 @@ test("listModelsForClient applies provider and model visible agent scopes", () =
   });
 
   assert.deepEqual(listModelsForClient(cfg, "codex").map((m) => m.id), ["p-codex/a", "p-all/d"]);
-  assert.deepEqual(listModelsForClient(cfg, "claude-code").map((m) => m.id), ["p-all/c", "p-all/d"]);
+  assert.deepEqual(listModelsForClient(cfg, "claude-code").map((m) => m.id), ["p-codex/b", "p-all/c", "p-all/d"]);
+});
+
+test("model Agent scope explicitly overrides its provider scope", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "p", apiFormat: "openai_chat", baseUrl: "http://x", allowedClients: ["codex"] }
+    ],
+    models: [
+      // Existing models inherit their provider scope.
+      { id: "p/inherited", providerId: "p", upstreamModel: "inherited" },
+      // Saving a model-level Agent scope makes that setting authoritative.
+      { id: "p/claude-only", providerId: "p", upstreamModel: "claude-only", allowedClients: ["claude-code"], agentScopeOverride: true },
+      { id: "p/all-agents", providerId: "p", upstreamModel: "all-agents", allowedClients: ["*"], agentScopeOverride: true }
+    ],
+    clients: {
+      codex: { enabled: true, allowedModels: ["*"] },
+      "claude-code": { enabled: true, allowedModels: ["*"] }
+    }
+  });
+
+  assert.deepEqual(listModelsForClient(cfg, "codex").map((model) => model.id), ["p/inherited", "p/all-agents"]);
+  assert.deepEqual(listModelsForClient(cfg, "claude-code").map((model) => model.id), ["p/claude-only", "p/all-agents"]);
 });
 
 test("resolveRoute uses per-agent default model before global default", () => {

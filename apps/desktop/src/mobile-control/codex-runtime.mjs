@@ -82,12 +82,36 @@ function threadRows(result) {
   return [];
 }
 
+function taggedNotificationTitle(value) {
+  const source = String(value || "");
+  const match = source.match(/^\s*<([a-z][a-z0-9_.-]*)>\s*([\s\S]+?)\s*$/i);
+  if (!match) return "";
+  let payload;
+  try { payload = JSON.parse(match[2]); } catch { return ""; }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const status = payload.status && typeof payload.status === "object" ? payload.status : null;
+  const entry = status && (Object.entries(status).find(([key]) => /^(completed|complete|done|failed|error|running|pending)$/i.test(key)) || Object.entries(status)[0]);
+  const text = typeof entry?.[1] === "string"
+    ? entry[1]
+    : [payload.message, payload.summary, payload.content, payload.output, payload.result, payload.text].find((item) => typeof item === "string" && item.trim()) || "";
+  if (!text) return "";
+  const first = String(text).replace(/[*`_#]/g, "").replace(/\s+/g, " ").trim().slice(0, 88);
+  if (!first) return "";
+  const prefix = String(match[1]).toLowerCase() === "subagent_notification" ? "子任务" : "Agent 通知";
+  return `${prefix}：${first}`;
+}
+
+export function cleanCodexSessionTitle(value, fallback = "Codex 任务") {
+  const tagged = taggedNotificationTitle(value);
+  return tagged || String(value || "").trim() || fallback;
+}
+
 function normalizeThread(thread = {}) {
   const cwd = thread.cwd || thread.directory || "";
   return {
     id: String(thread.id || ""),
     agentId: "codex",
-    name: thread.name || thread.title || thread.id || "Codex 任务",
+    name: cleanCodexSessionTitle(thread.name || thread.title || thread.id || "Codex 任务"),
     state: statusName(thread.status),
     updatedAt: isoFromTimestamp(thread.updatedAt || thread.updated_at || thread.createdAt || thread.created_at),
     model: String(thread.model || ""),
@@ -148,7 +172,7 @@ function localThread(row = {}) {
   return {
     id: String(row.sessionId || ""),
     agentId: "codex",
-    name: row.title || row.preview || row.sessionId || "Codex 任务",
+    name: cleanCodexSessionTitle(row.title || row.preview || row.sessionId || "Codex 任务"),
     state: "completed",
     updatedAt: Number(row.mtimeMs) ? new Date(row.mtimeMs).toISOString() : null,
     model: "",
@@ -451,6 +475,23 @@ export function createCodexRuntime({
   const desktopUnavailable = (error) => new Error(
     `Codex Desktop 会话暂时不可连接：${error?.message || String(error)}`
   );
+  const requireDesktopSync = async () => {
+    // If the mobile service started while Codex Desktop was not ready, it may
+    // be connected to a private app-server. Retry the shared daemon on each
+    // Desktop-owned send so reopening a task in Codex recovers without
+    // restarting Switchyard.
+    if (client.usingProxy !== false) return false;
+    if (typeof client.reconnect === "function") {
+      try { await client.reconnect(); } catch {}
+      if (client.usingProxy !== false) return true;
+    }
+    const error = new Error(
+      "当前 Codex Desktop 没有提供可用的共享会话连接。消息已保留在手机待发送队列，避免只写入本地而桌面看不到。请在桌面 Codex 中重新打开该会话后，在手机点“继续发送”。"
+    );
+    error.code = "CODEX_DESKTOP_SYNC_UNAVAILABLE";
+    error.retryable = true;
+    throw error;
+  };
   const resumeDesktopThread = async (sessionId) => {
     const resume = async () => {
       const result = await client.request("thread/resume", {
@@ -683,6 +724,10 @@ export function createCodexRuntime({
     };
     const local = readNativeFallback(sid);
     if (isDesktopOwned(local)) {
+      // Never resume or start a Desktop-owned thread through the private
+      // fallback app-server: that would make the phone's turn invisible to
+      // Codex Desktop. Establish the shared transport first.
+      await requireDesktopSync();
       await resumeDesktopThread(sid);
       const result = await client.request("turn/start", turnParams, 60_000);
       const turnId = String(result?.turn?.id || result?.id || "");

@@ -1,3 +1,5 @@
+import { notificationStateLabel, parseStructuredNotification } from "./structured-notification.mjs?v=68";
+
 const $ = (selector) => document.querySelector(selector);
 const TOKEN_KEY = "switchyard_mobile_token";
 const CURSOR_KEY = "switchyard_mobile_event_cursor";
@@ -1297,6 +1299,12 @@ function renderMessageInner(message, extraClass = "", index = 0) {
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
   if (isToolMessage(message)) return renderToolGroup([message], index);
   if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
+  const notification = parseStructuredNotification(text);
+  if (notification) {
+    const state = notificationStateLabel(notification.state);
+    const stateClass = String(notification.state || "notice").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "notice";
+    return `<details class="structured-notification ${escapeHtml(stateClass)}" data-message-key="${escapeHtml(key)}"><summary><span class="structured-notification-icon">${state === "失败" ? "!" : state === "已完成" ? "✓" : "◎"}</span><span class="structured-notification-copy"><b>${escapeHtml(notification.label)}</b><strong>${escapeHtml(state)}</strong><small>${escapeHtml(firstLine(notification.text)).slice(0, 120)}</small></span><span class="structured-notification-fold">⌄</span></summary><div class="structured-notification-body">${renderRichText(notification.text)}</div></details>`;
+  }
   const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
@@ -1756,6 +1764,17 @@ function closeWorkspaceMenus(except = null) {
   document.querySelectorAll(".group-menu:not([hidden])").forEach((menu) => { if (menu !== except) menu.hidden = true; });
 }
 
+// Capture links before WebView's own navigation pipeline sees target="_blank".
+// Android's native bridge owns external navigation; this prevents the WebView
+// from attempting a second popup/navigation for the same tap.
+document.addEventListener("click", (event) => {
+  const conversationLink = event.target?.closest?.(".msg-body a[href]");
+  if (!conversationLink) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  openConversationLink(conversationLink);
+}, true);
+
 document.addEventListener("click", async (event) => {
   try {
     const commandOption = event.target.closest("[data-command-index]");
@@ -1767,13 +1786,6 @@ document.addEventListener("click", async (event) => {
     if (diffFilter) { const diff = diffFilter.closest("[data-diff]"); diff?.setAttribute("data-filter", diffFilter.dataset.diffFilter); diff?.querySelectorAll("[data-diff-filter]").forEach((button) => button.classList.toggle("selected", button === diffFilter)); return; }
     const diffContext = event.target.closest("[data-diff-context-toggle]");
     if (diffContext) { const diff = diffContext.closest("[data-diff]"); const collapsed = diff?.classList.toggle("context-collapsed"); diffContext.textContent = collapsed ? "显示未变内容" : "折叠未变内容"; return; }
-    const conversationLink = event.target.closest(".msg-body a[href]");
-    if (conversationLink) {
-      event.preventDefault();
-      event.stopPropagation();
-      openConversationLink(conversationLink);
-      return;
-    }
     const copyValue = event.target.closest("[data-copy-value]");
     if (copyValue) { await navigator.clipboard?.writeText(decodeURIComponent(copyValue.dataset.copyValue || "")); toast("已复制"); return; }
     const approvalOpen = event.target.closest("[data-approval-open]");

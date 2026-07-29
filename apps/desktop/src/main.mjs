@@ -21,6 +21,8 @@ import {
   createMobilePairingChallenge,
   listMobileDevices,
   mobileControlStatus,
+  mobileControlConnectionStatus,
+  repairMobileControlConnection,
   revokeMobileDevice,
   startMobileControl,
   stopMobileControl,
@@ -42,6 +44,7 @@ import { buildIssueBundleReport, issueBundleFileStem, saveIssueBundleFiles } fro
 import {
   deleteKeychainSecret,
   describeKeychainSecret,
+  getKeychainSecret,
   hasKeychainSecret,
   keychainAccountForProvider,
   setKeychainSecret
@@ -110,9 +113,12 @@ import { refreshCodexTokens } from "../../../packages/core/src/account-pool/oaut
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
 import {
   clearCursorSubscriptionCredentials,
+  parseCursorSubscriptionCredentials,
   saveCursorSubscriptionCredentials
 } from "../../../packages/core/src/cursor-subscription/auth.mjs";
-import { normalizeCursorSubscriptionProvider } from "../../../packages/core/src/cursor-subscription/model-catalog.mjs";
+import { isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "../../../packages/core/src/cursor-subscription/model-catalog.mjs";
+import { readLocalCursorModelCatalog, readLocalCursorSubscriptionCredentials } from "../../../packages/core/src/cursor-subscription/local-auth.mjs";
+import { cursorAgentCliModelCatalog, findCursorAgentExecutable } from "../../../packages/core/src/cursor-subscription/agent-cli.mjs";
 import { callCursorSubscription, clearCursorSubscriptionRuntime, cursorSubscriptionLaneSnapshot } from "../../../packages/core/src/cursor-subscription/client.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
@@ -750,10 +756,11 @@ async function downloadAndInstallUpdate(info = pendingUpdateInfo) {
 
 
 function modelsForProfile(cfg, models) {
-  const providerNames = new Map((cfg.providers || []).map((provider) => [provider.id, provider.name || provider.id]));
+  const providerById = new Map((cfg.providers || []).map((provider) => [provider.id, provider]));
   return (models || []).map((model) => ({
     ...model,
-    providerName: providerNames.get(model.providerId) || model.providerId
+    providerName: providerById.get(model.providerId)?.name || model.providerId,
+    providerApiFormat: providerById.get(model.providerId)?.apiFormat || ""
   }));
 }
 
@@ -1029,6 +1036,8 @@ ipcMain.handle("gateway:restart", async () => {
   return result;
 });
 ipcMain.handle("mobile-control:status", () => mobileControlStatus());
+ipcMain.handle("mobile-control:connection-status", () => mobileControlConnectionStatus());
+ipcMain.handle("mobile-control:repair-connection", () => repairMobileControlConnection());
 ipcMain.handle("mobile-control:unmatched-gateway-requests", () => listUnmatchedMobileGatewayRequests());
 ipcMain.handle("mobile-control:enable", () => startMobileControl());
 ipcMain.handle("mobile-control:disable", () => stopMobileControl());
@@ -1713,15 +1722,56 @@ ipcMain.handle("cursor-subscription:status", (_e, payload = {}) => {
   const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
   const account = keychainAccountForProvider(provider);
   const configured = hasKeychainSecret(account);
+  const cliAvailable = Boolean(findCursorAgentExecutable());
   const lane = cursorSubscriptionLaneSnapshot(provider);
   return {
     ok: true,
-    configured,
-    status: configured ? lane.status : "unconfigured",
-    accountLabel: configured ? `Keychain · ${account.slice(0, 3)}***` : "未配置",
-    maxConcurrentRequests: 1,
-    streamIdleTimeoutMs: provider.streamIdleTimeoutMs
+    configured: configured || cliAvailable,
+    status: configured || cliAvailable ? lane.status : "unconfigured",
+    accountLabel: cliAvailable ? "Cursor Agent CLI · 文本优先" : (configured ? `Keychain · ${account.slice(0, 3)}***` : "未配置"),
+    maxConcurrentRequests: provider.maxConcurrentRequests,
+    streamIdleTimeoutMs: provider.streamIdleTimeoutMs,
+    cliAvailable
   };
+});
+ipcMain.handle("cursor-subscription:show-credentials", (_e, payload = {}) => {
+  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
+  const account = keychainAccountForProvider(provider);
+  if (!hasKeychainSecret(account)) return { ok: false, reason: "未保存凭据" };
+  const secret = getKeychainSecret(account);
+  const parsed = parseCursorSubscriptionCredentials(secret);
+  if (!parsed) return { ok: false, reason: "凭据解析失败" };
+  return {
+    ok: true,
+    accessTokenPreview: parsed.accessToken.slice(0, 12) + "..." + parsed.accessToken.slice(-6),
+    accessTokenLength: parsed.accessToken.length,
+    machineIdPreview: parsed.machineId.slice(0, 8) + "...",
+    machineIdLength: parsed.machineId.length
+  };
+});
+ipcMain.handle("cursor-subscription:local-status", () => {
+  const local = readLocalCursorSubscriptionCredentials();
+  return { ok: Boolean(local.ok), reason: local.ok ? "" : local.reason };
+});
+ipcMain.handle("cursor-subscription:import-local", (_e, payload = {}) => {
+  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
+  const credentials = readLocalCursorSubscriptionCredentials();
+  if (!credentials.ok) {
+    const hints = {
+      access_token_not_found: "未检测到 Cursor 桌面端登录态，请先在本机 Cursor 完成登录后重试。",
+      machine_id_not_found: "未找到 Cursor 本机标识，请完全退出并重新打开 Cursor 后重试。",
+      unsupported_platform: "自动导入目前仅支持 macOS。"
+    };
+    throw new Error(hints[credentials.reason] || "未检测到可导入的本机 Cursor 登录态。");
+  }
+  const result = saveCursorSubscriptionCredentials(provider, credentials, {
+    set: (account, secret) => setKeychainSecret(account, secret),
+    get: (account) => hasKeychainSecret(account),
+    delete: (account) => deleteKeychainSecret(account)
+  });
+  clearCursorSubscriptionRuntime(provider);
+  appendLog({ level: "info", msg: "cursor subscription local session imported", providerId: provider.id });
+  return { ok: Boolean(result?.ok), status: "connected" };
 });
 ipcMain.handle("cursor-subscription:connect", (_e, payload = {}) => {
   const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
@@ -1808,6 +1858,20 @@ async function discoverModelsForProvider(provider) {
   const preset = providerPresetFor({ ...provider, ...probe, authMode: provider.authMode });
   const hints = presetModelHints(preset);
   const presetModels = Array.from(hints.values()).map((model) => normalizeHintModel(model));
+  // Cursor AgentService has no compatible /models endpoint. Read the local
+  // Cursor Desktop picker instead; it reflects the signed-in user's currently
+  // enabled models without sending credentials or probing every model.
+  if (isCursorSubscriptionProvider(probe)) {
+    const localCatalog = readLocalCursorModelCatalog();
+    if (localCatalog.ok) return { ok: true, url: "cursor-desktop:local-model-picker", models: localCatalog.models };
+    // The CLI is only a fallback. Its `--list-models` output contains the
+    // full reasoning/speed cross-product, while the Desktop picker exposes
+    // the actual base model identities and parameter capabilities.
+    const cliCatalog = cursorAgentCliModelCatalog();
+    if (cliCatalog.ok) return { ok: true, url: "cursor-agent-cli:local-model-catalog", models: cliCatalog.models };
+    if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: "未读取到本机 Cursor 模型目录，已显示内置兜底列表" };
+    return { ok: false, error: "未读取到本机 Cursor 模型目录" };
+  }
   // 无 /models 的内网网关：直接返回预制模型，避免先打失败接口
   if (preset?.preferPresetModels && presetModels.length) {
     return { ok: true, url: "preset:models", models: presetModels };
@@ -2522,7 +2586,8 @@ async function searchSkillHub({ keyword = "", limit = 20 } = {}) {
 
 // 单实例锁：应用关窗后驻留后台，若用户再次启动，不开新实例（避免重复
 // 拉起网关导致端口冲突），而是唤出已有窗口。
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const allowMultipleInstances = process.env.SWITCHYARD_ALLOW_MULTIPLE_INSTANCES === "1";
+const gotSingleInstanceLock = allowMultipleInstances || app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.exit(0); // 第二实例直接退出，跳过清理钩子（它未启动网关）
 } else {
@@ -2666,6 +2731,27 @@ async function testProviderConnectivity(provider) {
     }
   }
   const apiFormat = probe.apiFormat || "openai_chat";
+  if (apiFormat === "cursor_subscription" || probe.providerType === "cursor_subscription") {
+    const cursorProvider = { ...normalizeCursorSubscriptionProvider(probe), enabled: true };
+    const result = await callCursorSubscription(cursorProvider, {
+      model: "auto",
+      stream: false,
+      messages: [{ role: "user", content: "Reply with OK." }]
+    });
+    return result.ok
+      ? {
+          ok: true,
+          status: result.status,
+          url: "cursor-agent-cli:local",
+          bodyPreview: `Cursor Agent CLI 文本链路测试成功：${result.payload?.choices?.[0]?.message?.content || "OK"}`
+        }
+      : {
+          ok: false,
+          status: result.status,
+          url: "cursor-agent-cli:local",
+          error: result.payload?.error?.message || "Cursor 订阅通道测试失败"
+        };
+  }
   if (apiFormat === "antigravity") {
     const token = String(probe._antigravityAccessToken || probe.apiKey || "").trim();
     const projectId = String(probe._antigravityProjectId || probe.projectId || probe.project || "").trim();

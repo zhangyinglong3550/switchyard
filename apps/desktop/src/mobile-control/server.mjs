@@ -62,7 +62,7 @@ function bearer(req) {
 }
 
 function staticType(file) {
-  if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (/\.m?js$/.test(file)) return "text/javascript; charset=utf-8";
   if (file.endsWith(".css")) return "text/css; charset=utf-8";
   if (file.endsWith(".webmanifest")) return "application/manifest+json; charset=utf-8";
   return "text/html; charset=utf-8";
@@ -96,6 +96,7 @@ export function createMobileControlServer({
       "/": "index.html",
       "/index.html": "index.html",
       "/app.js": "app.js",
+      "/structured-notification.mjs": "structured-notification.mjs",
       "/styles.css": "styles.css",
       "/manifest.webmanifest": "manifest.webmanifest",
       "/sw.js": "sw.js"

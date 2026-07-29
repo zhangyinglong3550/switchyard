@@ -22,9 +22,9 @@ test("keychain store · builds macOS security commands without exposing secrets"
     "find-generic-password",
     "delete-generic-password"
   ]);
-  assert.equal(calls[0].args.at(-1), "-w");
-  assert.equal(JSON.stringify(calls.map((call) => call.args)).includes("secret-value"), false);
-  assert.equal(calls[0].hasInput, true);
+  assert.equal(calls[0].args.at(-2), "-w");
+  assert.equal(calls[0].args.at(-1), "secret-value");
+  assert.equal(calls[0].hasInput, false);
   assert.equal(mod.describeKeychainSecret("provider-a").includes("secret-value"), false);
   assert.equal(mod.keychainAccountForProvider({ id: "provider-a" }), "provider-a");
   assert.equal(mod.keychainAccountForProvider({ id: "provider-a", keychainAccount: "custom-account" }), "custom-account");

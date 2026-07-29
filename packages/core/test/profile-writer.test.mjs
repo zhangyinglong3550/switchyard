@@ -320,6 +320,27 @@ test("codex profile · model catalog exposes image input when a vision fallback 
   assert.equal(catalog.models[0]["x-switchyard-vision-fallback-model"], "codex/gpt-5.5");
 });
 
+test("codex profile · Cursor models expose Agent-selected fast tier without model variants", () => {
+  const catalog = pw.buildCodexModelCatalog({
+    models: [{
+      id: "cursor-subscription/grok-4.5",
+      providerId: "cursor-subscription",
+      providerApiFormat: "cursor_subscription",
+      upstreamModel: "grok-4.5",
+      displayName: "Cursor Grok 4.5",
+      capabilities: { text: true, reasoning: true, tools: true, stream: true }
+    }]
+  });
+  assert.equal(catalog.models[0].slug, "cursor-subscription/grok-4.5");
+  assert.deepEqual(catalog.models[0].additional_speed_tiers, ["fast"]);
+  assert.deepEqual(catalog.models[0].service_tiers, [{
+    id: "priority",
+    name: "Fast",
+    description: "1.5x speed, increased usage"
+  }]);
+  assert.ok(catalog.models[0].supported_reasoning_levels.some((item) => item.effort === "high"));
+});
+
 test("codex profile · repairs model cache drift when Switchyard custom provider is active", () => {
   const file = pw.codexConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });

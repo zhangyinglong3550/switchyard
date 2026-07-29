@@ -201,6 +201,7 @@ export function responsesToChat(body, upstreamModel) {
   if (body.tool_choice !== undefined) chat.tool_choice = body.tool_choice;
   if (body.reasoning !== undefined) chat.reasoning = body.reasoning;
   if (body.reasoning_effort !== undefined) chat.reasoning_effort = body.reasoning_effort;
+  if (body.service_tier !== undefined) chat.service_tier = body.service_tier;
   return chat;
 }
 

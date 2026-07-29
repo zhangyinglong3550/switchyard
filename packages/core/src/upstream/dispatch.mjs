@@ -148,7 +148,12 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   // 若外层 withDispatchRetry 再叠一轮重试，会放大成「池尝试 × 重试」次上游调用
   // （默认 3×3=9），对 5xx/限流场景反而加剧压力。故账号池供应商关闭外层重试，
   // 由池内换号兜底；非池供应商保留外层重试（默认最多 3 次）。
-  const retryOpts = isAccountPoolProvider(provider) ? { ...opts, retry: { enabled: false } } : opts;
+  // Cursor subscription requests are single-account, quota-sensitive calls.
+  // Retrying a 429 through the generic dispatcher both hides the original
+  // upstream message and needlessly trips its lane circuit breaker.
+  const retryOpts = isAccountPoolProvider(provider) || provider?.apiFormat === "cursor_subscription"
+    ? { ...opts, retry: { enabled: false } }
+    : opts;
   const accountSessionKey = provider?.poolKind === "antigravity_oauth"
     ? antigravitySessionKey(chatBody, opts)
     : "";
@@ -177,7 +182,15 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       signal: upstreamOptsWithOverrides.signal
     });
     if (!result.ok) return withAccountMeta({ kind: "error", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-    if (stream) return withAccountMeta({ kind: "stream", upstream: result.response, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (stream) {
+      const upstream = Array.isArray(outbound.tools) && outbound.tools.length && !result.response.switchyardNativeToolCalls
+        ? transformOpenCodeTextToolCalls(result.response, {
+          tools: outbound.tools,
+          restoreToolName: (name) => ctx._switchyardToolNameSafeToRaw?.get(name) || name
+        })
+        : result.response;
+      return withAccountMeta({ kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    }
     return withAccountMeta({ kind: "json", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
 
@@ -246,7 +259,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       ctx,
       send: (body) => callOpenAIChat(provider, body, upstreamOptsWithOverrides)
     });
-    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, headers: maybeRetry.headers, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const payload = normalizeChatPayload(maybeRetry.payload);
     return withAccountMeta({ kind: "json", status: maybeRetry.status, payload: applyInbound(payload, ctx), rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   }
@@ -266,7 +279,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
     }
     const upstream = await callOpenAIResponses(provider, responsesBody, upstreamOptsWithOverrides);
     if (stream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-    if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     if (codexOAuth) {
       const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
       return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
@@ -287,7 +300,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       ctx,
       send: (body) => callAnthropicMessages(provider, body, upstreamOptsWithOverrides)
     });
-    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (!maybeRetry.ok) return withAccountMeta({ kind: "error", status: maybeRetry.status, headers: maybeRetry.headers, payload: maybeRetry.payload, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     const rawAnth = maybeRetry.payload;
     const chatLike = anthropicMessagesToChatResponse(rawAnth, upstreamModel);
     return withAccountMeta({ kind: "json", status: maybeRetry.status, payload: applyInbound(chatLike, ctx), rawPayload: rawAnth, rectifiers: maybeRetry.rectifiers, errorClass: maybeRetry.errorClass, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
@@ -332,7 +345,7 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
   }
   const upstream = await callOpenAIResponses(provider, upstreamBody, upstreamOptsWithOverrides);
   if (clientRequestedStream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-  if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+  if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   if (codexOAuth) {
     const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
     return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
@@ -488,10 +501,10 @@ function cloneValue(value) {
 
 async function readOrRetryRectified({ upstream, body, apiFormat, ctx, send }) {
   const payload = await readJsonResponse(upstream);
-  if (upstream.ok) return { ok: true, status: upstream.status, payload, rectifiers: [] };
+  if (upstream.ok) return { ok: true, status: upstream.status, headers: upstream.headers, payload, rectifiers: [] };
   const rectified = rectifyUpstreamRequest({ apiFormat, body, payload, status: upstream.status, ctx });
   if (!rectified.applied) {
-    return { ok: false, status: upstream.status, payload, rectifiers: [], errorClass: rectified.errorClass || "" };
+    return { ok: false, status: upstream.status, headers: upstream.headers, payload, rectifiers: [], errorClass: rectified.errorClass || "" };
   }
   const retry = await send(rectified.body);
   const retryPayload = await readJsonResponse(retry);
@@ -503,6 +516,7 @@ async function readOrRetryRectified({ upstream, body, apiFormat, ctx, send }) {
   return {
     ok: retry.ok,
     status: retry.status,
+    headers: retry.headers,
     payload: retryPayload,
     rectifiers: [rectifier],
     errorClass: rectified.errorClass || rectifier.errorClass || ""

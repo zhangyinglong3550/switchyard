@@ -330,7 +330,11 @@ function isOfficialCodexModel({ providerId, upstreamModel }) {
   return /^gpt-5(?:$|[._-])/.test(String(upstreamModel || "").toLowerCase());
 }
 
-function supportsCodexPriorityTier({ providerId, upstreamModel }) {
+function supportsCodexPriorityTier({ providerId, providerApiFormat, upstreamModel }) {
+  // Cursor exposes its acceleration as the `fast` picker parameter. Codex's
+  // Agent UI calls the equivalent choice `priority`; the subscription bridge
+  // maps it back to Cursor's local parameter without creating fake model IDs.
+  if (providerApiFormat === "cursor_subscription") return true;
   if (!/^(codex|openai|official-gpt)$/i.test(String(providerId || ""))) return false;
   const model = String(upstreamModel || "").toLowerCase();
   if (!/^gpt-5(?:$|[._-])/.test(model)) return false;
@@ -431,7 +435,7 @@ function codexCatalogModelFrom(model, index = 0, options = {}) {
   const providerId = String(model?.providerId || "").trim();
   const upstreamModel = String(model?.upstreamModel || slug).trim();
   const isOfficialGpt = /^(codex|openai|official-gpt)$/i.test(providerId) || /\bgpt[-_\w.]*/i.test(upstreamModel);
-  const supportsPriority = supportsCodexPriorityTier({ providerId, upstreamModel });
+  const supportsPriority = supportsCodexPriorityTier({ providerId, providerApiFormat: model?.providerApiFormat, upstreamModel });
   return {
     ...CODEX_MODEL_TEMPLATE,
     slug,

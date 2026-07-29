@@ -1632,9 +1632,10 @@ test("server routingMode=gateway forces Responses conversion even when protocols
   assert.deepEqual(received.input, [{ type: "message", role: "user", content: "ping" }]);
   // gateway 模式走 Responses→Chat→Responses；思考档位必须透传（对齐 CC Switch / Codex++）
   assert.deepEqual(received.reasoning, { effort: "low" });
-  // 其它非 Chat 可表达字段仍会在往返中丢弃
+  // Agent 选择的速度档位也必须穿过 Responses→Chat→Responses，Cursor
+  // 订阅桥接会把 priority 映射回本机 Cursor 的 fast 参数。
   assert.equal(received.text, undefined);
-  assert.equal(received.service_tier, undefined);
+  assert.equal(received.service_tier, "priority");
 });
 
 test("server routingMode=native rejects mismatched client and provider protocols", async (t) => {

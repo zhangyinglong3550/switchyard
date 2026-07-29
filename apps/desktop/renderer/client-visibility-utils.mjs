@@ -40,8 +40,10 @@ export function modelsForClient(config, clientId) {
   return (config?.models || []).filter((model) => {
     if (model.enabled === false) return false;
     const provider = providers.get(model.providerId);
-    if (!scopeAllowsClient(provider?.allowedClients, clientId)) return false;
-    if (!scopeAllowsClient(model.allowedClients, clientId)) return false;
+    const effectiveScope = model.agentScopeOverride === true
+      ? model.allowedClients
+      : provider?.allowedClients;
+    if (!scopeAllowsClient(effectiveScope, clientId)) return false;
     return modelMatchesAllowed(model, filter.allowedModels);
   });
 }

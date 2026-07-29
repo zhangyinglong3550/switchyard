@@ -16,6 +16,7 @@ import {
   encodeMobileSessionId
 } from "./mobile-control/session-registry.mjs";
 import { createMobileControlServer } from "./mobile-control/server.mjs";
+import { ensureTailscaleServe, inspectTailscaleServe } from "./mobile-control/tailscale-serve.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_HOST = "127.0.0.1";
@@ -23,6 +24,7 @@ const DEFAULT_PORT = 17889;
 
 let instance = null;
 let startPromise = null;
+let tailscaleStatus = null;
 
 function mobileRoot() {
   return path.join(os.homedir(), ".switchyard", "mobile-control");
@@ -170,6 +172,13 @@ export async function startMobileControl({
       throw error;
     }
     instance = { root, store, ledger, registry, server, codexClient, runtimes, unsubscribeGatewayLogs };
+    const inspectConnection = process.env.SWITCHYARD_TAILSCALE_AUTO_REPAIR === "0"
+      ? inspectTailscaleServe
+      : ensureTailscaleServe;
+    tailscaleStatus = await inspectConnection({ port }).catch((error) => ({
+      installed: false, online: false, serveConfigured: false, expectedUrl: null,
+      repaired: false, error: error?.message || String(error)
+    }));
     return mobileControlStatus();
   })();
   try {
@@ -205,6 +214,18 @@ export function mobileControlStatus() {
     configuredPort: Number(process.env.SWITCHYARD_MOBILE_CONTROL_PORT) || DEFAULT_PORT,
     root: mobileRoot()
   };
+}
+
+export async function mobileControlConnectionStatus() {
+  const port = mobileControlStatus().configuredPort;
+  tailscaleStatus = await inspectTailscaleServe({ port });
+  return tailscaleStatus;
+}
+
+export async function repairMobileControlConnection() {
+  const port = mobileControlStatus().configuredPort;
+  tailscaleStatus = await ensureTailscaleServe({ port });
+  return tailscaleStatus;
 }
 
 export function createMobilePairingChallenge(options = {}) {

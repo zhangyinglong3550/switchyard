@@ -73,7 +73,7 @@ function fixture(t) {
     models: [
       { id: "p1/m1", providerId: "p1", enabled: true, allowedClients: ["codex"], capabilities: { tools: true }, contextWindow: 200000 },
       { id: "p1/hidden", providerId: "p1", enabled: false, allowedClients: ["codex"] },
-      { id: "p1/claude-only", providerId: "p1", enabled: true, allowedClients: ["claude-code"] }
+      { id: "p1/claude-only", providerId: "p1", enabled: true, allowedClients: ["claude-code"], agentScopeOverride: true }
     ],
     clients: { codex: { enabled: true } }
   });

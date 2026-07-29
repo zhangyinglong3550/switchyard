@@ -1,3 +1,5 @@
+import { CURSOR_SUBSCRIPTION_STATIC_MODELS } from "./cursor-subscription/model-catalog.mjs";
+
 const CODEX_CHAT_REASONING = {
   deepseek: {
     supportsThinking: true,
@@ -799,25 +801,22 @@ export const PROVIDER_PRESETS = [
   },
   {
     id: "cursor-subscription",
-    label: "Cursor 订阅桥接（实验性）",
+    label: "Cursor 订阅桥接",
     providerId: "cursor-subscription",
-    name: "Cursor 订阅桥接（实验性）",
+    name: "Cursor 订阅桥接",
     providerType: "cursor_subscription",
     apiFormat: "cursor_subscription",
-    baseUrl: "https://agent.api5.cursor.sh",
+    baseUrl: "https://agentn.api5.cursor.sh",
     authModes: ["cursor_subscription"],
     defaultAuthMode: "cursor_subscription",
-    enabled: false,
-    maxConcurrentRequests: 1,
-    streamIdleTimeoutMs: 600000,
-    experimental: true,
+    enabled: true,
+    maxConcurrentRequests: 2,
+    streamIdleTimeoutMs: 90000,
     riskLevel: "high",
-    riskNote: "Cursor 订阅桥接（实验性）：仅个人本机使用；非官方兼容能力，可能随 Cursor 更新失效。凭据仅保存在本机系统安全存储，禁止共享账号、远程暴露或多账号轮换。",
-    note: "第一版只支持纯文本流式对话；不支持工具调用、图片、文件、动态模型发现或自动 fallback。",
+    riskNote: "仅个人本机使用的 Cursor 订阅桥接。凭据仅保存在本机系统安全存储；不要共享账号、远程暴露或多账号轮换。",
+    note: "支持文本流式对话和 OpenAI function 工具调用。模型目录提供当前 Cursor Desktop 常用模型；可用范围仍取决于本机 Cursor 账号。",
     preferPresetModels: true,
-    models: [
-      { id: "auto", displayName: "Cursor Auto", capabilities: { text: true, tools: false, reasoning: false, images: false, stream: true, multimodal: false } }
-    ]
+    models: CURSOR_SUBSCRIPTION_STATIC_MODELS
   },
   {
     id: "custom-openai",
@@ -848,7 +847,7 @@ export const AUTH_MODE_LABELS = {
   codex_oauth: "Codex OAuth（复用 codex login）",
   anthropic_oauth: "Anthropic 官方（复用 Claude Code 登录）",
   account_pool: "账号池（多账号）",
-  cursor_subscription: "Cursor 订阅桥接（实验性）",
+  cursor_subscription: "Cursor 订阅桥接",
   none: "无需认证"
 };
 

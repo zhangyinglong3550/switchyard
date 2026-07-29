@@ -223,3 +223,57 @@ test("dispatchChat does not retry 400", async (t) => {
   assert.equal(hits, 1);
   assert.equal(result.retryCount, 0);
 });
+
+test("retry policy honors a bounded Retry-After header over its local backoff", async () => {
+  const { retryDelayForResult } = await import("../src/upstream/retry-policy.mjs");
+  const policy = resolveRetryPolicy(null, null, { retry: { backoffMs: [50], maxRetryAfterMs: 10_000 } });
+  const delay = retryDelayForResult(
+    { kind: "error", status: 429, headers: new Headers({ "retry-after": "2" }) },
+    policy,
+    0,
+    Date.parse("2026-07-28T00:00:00Z")
+  );
+  assert.equal(delay, 2_000);
+});
+
+test("retry policy falls back to local backoff for invalid Retry-After", async () => {
+  const { retryDelayForResult } = await import("../src/upstream/retry-policy.mjs");
+  const policy = resolveRetryPolicy(null, null, { retry: { backoffMs: [125] } });
+  const delay = retryDelayForResult(
+    { kind: "stream", upstream: new Response("busy", { status: 503, headers: { "retry-after": "not-a-delay" } }) },
+    policy,
+    0,
+    Date.parse("2026-07-28T00:00:00Z")
+  );
+  assert.equal(delay, 125);
+});
+
+test("dispatchChat carries upstream Retry-After into its retry decision", async (t) => {
+  resetPatches();
+  let hits = 0;
+  const up = await spawnUpstream((req, res) => {
+    hits += 1;
+    if (hits === 1) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "0.01" });
+      res.end(JSON.stringify({ error: "rate limited" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x",
+      object: "chat.completion",
+      model: "u-model",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]
+    }));
+  });
+  t.after(() => close(up));
+  const result = await dispatchChat(
+    { id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` },
+    "u-model",
+    { messages: [{ role: "user", content: "go" }] },
+    { model: { id: "p/u-model", retry: { maxAttempts: 2, backoffMs: [0], maxRetryAfterMs: 1_000 } } }
+  );
+  assert.equal(result.kind, "json");
+  assert.equal(hits, 2);
+  assert.ok(result.retryAttempts[0].waitMs >= 10);
+});

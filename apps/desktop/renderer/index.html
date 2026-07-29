@@ -238,6 +238,7 @@
                   <option value="openai_responses">OpenAI Responses</option>
                   <option value="anthropic_messages">Anthropic Messages</option>
                   <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
+          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
                 </select>
               </label>
             </div>
@@ -555,20 +556,24 @@
                 <dt>本机地址</dt><dd class="mono" id="mobile-control-url">http://127.0.0.1:17889</dd>
                 <dt>网络边界</dt><dd>仅监听 127.0.0.1，不开放局域网或公网端口。</dd>
               </dl>
+              <dl class="kv mobile-tailscale-health">
+                <dt>Tailscale</dt><dd id="mobile-tailscale-status">检测中…</dd>
+                <dt>安全地址</dt><dd class="mono" id="mobile-tailscale-url">-</dd>
+              </dl>
               <label class="mobile-tailscale-base">Tailscale HTTPS 地址
-                <input class="field mono" id="mobile-tailscale-base" placeholder="https://你的设备.tailnet.ts.net">
+                <input class="field mono" id="mobile-tailscale-base" placeholder="自动检测，也可手动填写">
                 <span class="tiny muted">仅用于生成手机配对链接；服务仍只监听本机。请不要使用 Funnel。</span>
               </label>
               <div class="actions mobile-control-actions">
                 <button class="btn primary" id="btn-mobile-control-toggle" type="button">启用手机端</button>
                 <button class="btn" id="btn-mobile-pair" type="button" disabled>生成配对链接</button>
+                <button class="btn" id="btn-mobile-tailscale-repair" type="button">修复安全连接</button>
               </div>
             </div>
             <div class="callout compact">
               <div class="callout-title">Tailscale Serve 安全连接</div>
               <div class="callout-body">
-                启用后在终端运行 <code>tailscale serve --bg 17889</code>，把生成的 HTTPS 地址填到左侧，手机加入同一 Tailnet，
-                再使用 Tailscale 提供的 HTTPS 地址打开页面。不要使用 Funnel。
+                Switchyard 会检测并恢复 <code>127.0.0.1:17889</code> 的 Tailscale HTTPS 转发。手机需加入同一 Tailnet；不会开放局域网端口，也不会启用 Funnel。
               </div>
             </div>
             <div class="mobile-pairing" id="mobile-pairing" hidden>
@@ -808,6 +813,7 @@
           <option value="openai_responses">OpenAI Responses（Codex / 新版 OpenAI）</option>
           <option value="anthropic_messages">Anthropic Messages（Claude / Claude Code）</option>
           <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
+          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
         </select>
       </label>
       <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
@@ -932,20 +938,26 @@
         </details>
       </div>
       <div class="callout" id="provider-cursor-subscription-panel" style="display:none;">
-        <div class="callout-title">Cursor 订阅桥接（实验性）</div>
-        <div class="callout-body">仅个人本机使用。非官方兼容能力，可能随 Cursor 更新失效。凭据只保存到系统安全存储；不要共享账号、不要远程暴露、不要把凭据粘贴到聊天或日志。</div>
-        <label style="margin-top:10px;"><input type="checkbox" name="cursorSubscriptionEnabled" id="provider-cursor-subscription-enabled"> 启用实验性桥接（默认关闭）</label>
-        <div class="row" style="margin-top:8px;">
+        <div class="callout-title">Cursor 订阅桥接</div>
+        <div class="callout-body">仅个人本机使用。普通文本对话优先调用本机 Cursor Agent CLI（官方客户端路径、只读 Ask 模式），工具调用仍使用兼容桥接；凭据不会写入配置或日志。不要共享账号、不要远程暴露。</div>
+        <label style="margin-top:10px;"><input type="checkbox" name="cursorSubscriptionEnabled" id="provider-cursor-subscription-enabled" checked> 启用订阅桥接</label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-cursor-subscription-import-local">从本机已登录 Cursor 自动导入</button>
+          <span id="provider-cursor-local-status" class="tiny muted">正在检测本机 Cursor 登录态…</span>
+        </div>
+        <details style="margin-top:10px;"><summary class="tiny muted">无法自动导入？手动填写凭据</summary><div class="row" style="margin-top:8px;">
           <label>访问凭据 <input class="field" id="provider-cursor-access-token" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
           <label>本机标识 <input class="field" id="provider-cursor-machine-id" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
-        </div>
+        </div></details>
         <div class="row">
-          <label>流静默超时（毫秒）<input class="field" name="streamIdleTimeoutMs" type="number" min="60000" value="600000"></label>
+          <label>并发请求数<input class="field" name="maxConcurrentRequests" type="number" min="1" max="3" value="2"></label>
+          <label>流静默超时（毫秒）<input class="field" name="streamIdleTimeoutMs" type="number" min="60000" value="90000"></label>
         </div>
         <div id="provider-cursor-subscription-status" class="tiny muted" style="margin-top:8px;">未配置</div>
         <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
           <button class="btn primary" type="button" id="btn-cursor-subscription-connect">连接并安全保存</button>
           <button class="btn" type="button" id="btn-cursor-subscription-test">测试连接</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-show-creds">显示凭据</button>
           <button class="btn" type="button" id="btn-cursor-subscription-clear">清除凭据</button>
         </div>
       </div>
@@ -1071,7 +1083,6 @@
         <div class="actions" style="justify-content:flex-start; margin-top:10px;">
           <button class="btn" type="button" id="btn-provider-test">测试连接</button>
           <button class="btn" type="button" id="btn-provider-discover">查询模型</button>
-          <button class="btn" type="button" id="btn-provider-sync-models">同步模型目录</button>
         </div>
         <pre class="inline-console" id="provider-test-output">尚未测试</pre>
       </div>
@@ -1154,7 +1165,7 @@
       </details>
       <div class="callout compact">
         <div class="callout-title">可见 Agent</div>
-        <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，会在供应商可见范围基础上进一步收窄。</div>
+        <div class="callout-body">未单独配置时继承供应商范围；在此选择后以模型范围为准，可覆盖供应商设置。</div>
         <div class="capabilities client-scope-grid" id="model-visible-clients"></div>
       </div>
       <div class="capabilities">

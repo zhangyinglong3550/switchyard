@@ -76,7 +76,11 @@ export function setKeychainSecret(account, secret, { service = DEFAULT_KEYCHAIN_
     return { ok: true, account: name, service, backend: "windows-dpapi" };
   }
   assertPromptSafeSecret(secret);
-  runner("security", ["add-generic-password", "-a", name, "-s", service, "-U", "-w"], { input: `${String(secret || "")}\n${String(secret || "")}\n` });
+  // `security add-generic-password` accepts the secret only as the argument
+  // immediately following -w; stdin is ignored and would otherwise leave an
+  // empty/invalid Keychain entry. Keep the child non-interactive and never
+  // include the secret in errors or logs.
+  runner("security", ["add-generic-password", "-a", name, "-s", service, "-U", "-w", String(secret || "")], { stdio: ["ignore", "pipe", "pipe"] });
   return { ok: true, account: name, service, backend: "macos-keychain" };
 }
 
