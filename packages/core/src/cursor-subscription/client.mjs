@@ -469,6 +469,146 @@ export function cursorAgentExecutionEvent(payload, tools = []) {
     }
     return { type: "unsupported_execution", execution: "grep" };
   }
+  // WriteFile (exec field 3): WriteArgs { path=1, file_text=2, tool_call_id=3 }
+  const write = execFields.get(3)?.[0];
+  if (write) {
+    const args = fields(write);
+    const filePath = firstText(args, 1);
+    const fileText = firstText(args, 2);
+    if (!filePath) return { type: "unsupported_execution", execution: "write" };
+    const target = selectShellTool(tools);
+    if (target) {
+      const delim = `SWITCHYARD_${crypto.randomUUID().replace(/-/g, "")}`;
+      const command = `cat > ${shellQuote(filePath)} << '${delim}'\n${fileText || ""}\n${delim}`;
+      return {
+        type: "tool_call",
+        id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,
+        name: target.name,
+        arguments: JSON.stringify(mapShellArguments(target, { command }))
+      };
+    }
+    return { type: "unsupported_execution", execution: "write" };
+  }
+  // DeleteFile (exec field 4): DeleteArgs { path=1, tool_call_id=2 }
+  const del = execFields.get(4)?.[0];
+  if (del) {
+    const args = fields(del);
+    const filePath = firstText(args, 1);
+    if (!filePath) return { type: "unsupported_execution", execution: "delete" };
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = `rm -f ${shellQuote(filePath)}`;
+      return {
+        type: "tool_call",
+        id: firstText(args, 2) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,
+        name: target.name,
+        arguments: JSON.stringify(mapShellArguments(target, { command }))
+      };
+    }
+    return { type: "unsupported_execution", execution: "delete" };
+  }
+  // ListDir (exec field 8): LsArgs { path=1, tool_call_id=3 }
+  const ls = execFields.get(8)?.[0];
+  if (ls) {
+    const args = fields(ls);
+    const dirPath = firstText(args, 1);
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = `ls -la ${shellQuote(dirPath || ".")}`;
+      return {
+        type: "tool_call",
+        id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,
+        name: target.name,
+        arguments: JSON.stringify(mapShellArguments(target, { command }))
+      };
+    }
+    return { type: "unsupported_execution", execution: "ls" };
+  }
+  // pi_* variants (fields 45-51): newer protocol versions of the same tools.
+  // Map them to the same handlers as their non-pi counterparts by re-reading
+  // from the execFields with the pi_ field number.
+  //   45=pi_read, 46=pi_bash, 47=pi_edit, 48=pi_write, 49=pi_grep, 50=pi_find, 51=pi_ls
+  const piRead = execFields.get(45)?.[0];
+  if (piRead) {
+    const args = fields(piRead);
+    const filePath = firstText(args, 1);
+    if (!filePath) return { type: "unsupported_execution", execution: "pi_read" };
+    const offset = varintValue(piRead, 4);
+    const limit = varintValue(piRead, 5);
+    const target = selectReadTool(tools);
+    const nativeArgs = target && mapReadArguments(target, { filePath, offset, limit });
+    if (target && nativeArgs) {
+      return { type: "tool_call", id: firstText(args, 2) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(nativeArgs) };
+    }
+    const shellTarget = target?.name === "exec_command" ? target : selectShellTool(tools);
+    if (shellTarget) {
+      const startLine = offset + 1;
+      const command = limit ? `sed -n '${startLine},${startLine + limit - 1}p' ${shellQuote(filePath)}` : `tail -n +${startLine} -- ${shellQuote(filePath)}`;
+      return { type: "tool_call", id: firstText(args, 2) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: shellTarget.name, arguments: JSON.stringify(mapShellArguments(shellTarget, { command })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_read" };
+  }
+  const piBash = execFields.get(46)?.[0];
+  if (piBash) {
+    const args = fields(piBash);
+    const command = firstText(args, 1);
+    if (!command) return { type: "unsupported_execution", execution: "pi_bash" };
+    const target = selectShellTool(tools);
+    if (target) {
+      return { type: "tool_call", id: firstText(args, 4) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command, workdir: firstText(args, 2), timeout: varintValue(piBash, 3) })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_bash" };
+  }
+  const piWrite = execFields.get(48)?.[0];
+  if (piWrite) {
+    const args = fields(piWrite);
+    const filePath = firstText(args, 1);
+    const fileText = firstText(args, 2);
+    if (!filePath) return { type: "unsupported_execution", execution: "pi_write" };
+    const target = selectShellTool(tools);
+    if (target) {
+      const delim = `SWITCHYARD_${crypto.randomUUID().replace(/-/g, "")}`;
+      const command = `cat > ${shellQuote(filePath)} << '${delim}'\n${fileText || ""}\n${delim}`;
+      return { type: "tool_call", id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_write" };
+  }
+  const piGrep = execFields.get(49)?.[0];
+  if (piGrep) {
+    const args = fields(piGrep);
+    const pattern = firstText(args, 1);
+    const filePath = firstText(args, 2);
+    if (!pattern) return { type: "unsupported_execution", execution: "pi_grep" };
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = `grep -n ${shellQuote(pattern)} ${shellQuote(filePath || ".")}`;
+      return { type: "tool_call", id: firstText(args, 14) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_grep" };
+  }
+  const piFind = execFields.get(50)?.[0];
+  if (piFind) {
+    const args = fields(piFind);
+    const pattern = firstText(args, 1);
+    const filePath = firstText(args, 2);
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = pattern ? `find ${shellQuote(filePath || ".")} -name ${shellQuote(pattern)}` : `find ${shellQuote(filePath || ".")}`;
+      return { type: "tool_call", id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_find" };
+  }
+  const piLs = execFields.get(51)?.[0];
+  if (piLs) {
+    const args = fields(piLs);
+    const dirPath = firstText(args, 1);
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = `ls -la ${shellQuote(dirPath || ".")}`;
+      return { type: "tool_call", id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command })) };
+    }
+    return { type: "unsupported_execution", execution: "pi_ls" };
+  }
   return { type: "unsupported_execution", execution: "cursor_builtin" };
 }
 
