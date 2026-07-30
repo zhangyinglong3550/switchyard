@@ -840,3 +840,21 @@ test("cursor subscription · cursor_builtin degraded gracefully preserves prior 
   assert.match(response.choices[0].message.content, /Here is some model output/);
   assert.match(response.choices[0].message.content, /unsupported built-in execution/);
 });
+
+test("cursor subscription · maps Cursor built-in grep request to exec_command", () => {
+  const grepArgs = Buffer.concat([
+    protoField(1, "\\.root\\[data-theme"),
+    protoField(2, "/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css"),
+    protoField(4, "count"),
+    protoField(14, "Grep_0-da001")
+  ]);
+  const exec = Buffer.concat([protoVarintField(1, 5), protoField(5, grepArgs)]);
+  assert.deepEqual(cursorAgentExecutionEvent(protoField(2, exec), ["exec_command"]), {
+    type: "tool_call",
+    id: "Grep_0-da001",
+    name: "exec_command",
+    arguments: JSON.stringify({
+      cmd: "grep -n '\\.root\\[data-theme' '/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css'"
+    })
+  });
+});

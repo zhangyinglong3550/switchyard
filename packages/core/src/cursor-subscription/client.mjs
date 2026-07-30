@@ -451,6 +451,24 @@ export function cursorAgentExecutionEvent(payload, tools = []) {
     }
     return { type: "unsupported_execution", execution: "read" };
   }
+  const grep = execFields.get(5)?.[0];
+  if (grep) {
+    const args = fields(grep);
+    const pattern = firstText(args, 1);
+    const filePath = firstText(args, 2);
+    if (!pattern) return { type: "unsupported_execution", execution: "grep" };
+    const target = selectShellTool(tools);
+    if (target) {
+      const command = `grep -n ${shellQuote(pattern)} ${shellQuote(filePath || ".")}`;
+      return {
+        type: "tool_call",
+        id: firstText(args, 14) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,
+        name: target.name,
+        arguments: JSON.stringify(mapShellArguments(target, { command }))
+      };
+    }
+    return { type: "unsupported_execution", execution: "grep" };
+  }
   return { type: "unsupported_execution", execution: "cursor_builtin" };
 }
 
