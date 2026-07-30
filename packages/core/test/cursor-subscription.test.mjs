@@ -807,3 +807,36 @@ test("cursor subscription · maps Cursor built-in shell to OpenCode bash tool", 
     })
   });
 });
+
+test("cursor subscription · unknown exec field returns cursor_builtin unsupported execution", () => {
+  // An exec payload containing only an unrecognized field (e.g. field 9,
+  // which might correspond to a new Cursor built-in like edit_file) should
+  // be reported as cursor_builtin rather than crashing the stream.
+  const unknownExec = Buffer.concat([
+    protoVarintField(1, 99),
+    protoField(9, Buffer.concat([
+      protoField(1, "/some/file/path"),
+      protoField(2, "new-content")
+    ]))
+  ]);
+  assert.deepEqual(cursorAgentExecutionEvent(protoField(2, unknownExec), ["exec_command"]), {
+    type: "unsupported_execution",
+    execution: "cursor_builtin"
+  });
+});
+
+test("cursor subscription · cursor_builtin degraded gracefully preserves prior text via collectCursorSubscriptionResponse", async () => {
+  // Simulate the degraded event sequence that http2AgentEventsOnce now
+  // yields for an unsupported execution: text already received, then a
+  // notice, then terminal. collectCursorSubscriptionResponse should return
+  // the accumulated text without throwing.
+  async function* mockEvents() {
+    yield { type: "text", text: "Here is some model output before the error." };
+    yield { type: "text", text: "\n\n[switchyard] Cursor requested an unsupported built-in execution (cursor_builtin). Ending the turn to preserve output already received." };
+    yield { type: "terminal" };
+  }
+  const response = await collectCursorSubscriptionResponse("gpt-4", mockEvents());
+  assert.equal(response.choices[0].finish_reason, "stop");
+  assert.match(response.choices[0].message.content, /Here is some model output/);
+  assert.match(response.choices[0].message.content, /unsupported built-in execution/);
+});

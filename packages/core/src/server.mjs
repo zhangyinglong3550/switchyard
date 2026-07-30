@@ -924,6 +924,8 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord) 
         model: body.model,
         idleTimeoutMs: streamIdleTimeoutMs(config, route),
         retryUpstream: streamCompatibility(config, route, "responses").retryPreludeOnEof ? dispatchNativeStream : null,
+        preludeRetryAttempts: streamCompatibility(config, route, "responses").preludeRetryAttempts,
+        preludeRetryBackoffMs: streamCompatibility(config, route, "responses").preludeRetryBackoffMs,
         onStreamSummary: (summary) => {
           recordStreamDiagnostics(requestRecord, summary, { status: upstream?.status || 0 });
         },
@@ -1315,12 +1317,14 @@ function publicStreamDiagnostics(diag, extra = {}) {
   };
 }
 
-async function pipeRawStream(upstream, res, {
+export async function pipeRawStream(upstream, res, {
   protocol = "",
   model = "",
   idleTimeoutMs,
   onError = null,
   retryUpstream = null,
+  preludeRetryAttempts = 1,
+  preludeRetryBackoffMs = [],
   onStreamSummary = null
 } = {}) {
   writeRawStreamHeaders(res, upstream);
@@ -1335,7 +1339,7 @@ async function pipeRawStream(upstream, res, {
   // 始终建 diag，以便提取流式 usage（chat/responses 均可）
   const streamDiagnostics = createStreamDiagnostics(protocol || "responses");
   let streamObserver = createSseObserver(streamDiagnostics, protocol || "responses", streamState);
-  let retried = false;
+  let preludeRetries = 0;
   let pendingPreludeChunks = [];
   let pendingPreludeBytes = 0;
   const bufferResponsesPrelude = protocol === "responses";
@@ -1398,8 +1402,7 @@ async function pipeRawStream(upstream, res, {
           return;
         }
         const retryable = shouldRetryStreamError(err) || err?.code === "SWITCHYARD_INCOMPLETE_STREAM";
-        if (!streamState.sawMeaningfulEvent && !retried && typeof retryUpstream === "function" && retryable) {
-          retried = true;
+        if (!streamState.sawMeaningfulEvent && preludeRetries < preludeRetryAttempts && typeof retryUpstream === "function" && retryable) {
           if (streamDiagnostics) {
             streamDiagnostics.retryCount += 1;
             streamDiagnostics.preludeRetryCount += 1;
@@ -1409,6 +1412,9 @@ async function pipeRawStream(upstream, res, {
           wroteUpstreamChunk = false;
           streamObserver = createSseObserver(streamDiagnostics, protocol || "responses", streamState);
           resetBufferedPrelude();
+          const retryDelayMs = resolvePreludeRetryDelay(preludeRetryBackoffMs, preludeRetries);
+          preludeRetries += 1;
+          if (retryDelayMs > 0) await delay(retryDelayMs);
           upstream = await retryUpstream(err);
           writeRawStreamHeaders(res, upstream);
           continue;
@@ -1432,6 +1438,16 @@ async function pipeRawStream(upstream, res, {
     heartbeat.stop();
     res.end();
   }
+}
+
+function resolvePreludeRetryDelay(backoffMs, attempt) {
+  if (!Array.isArray(backoffMs) || backoffMs.length === 0) return 0;
+  const value = Number(backoffMs[Math.min(Math.max(0, attempt), backoffMs.length - 1)]);
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function writeStreamError(res, err, { protocol = "", model = "" } = {}) {

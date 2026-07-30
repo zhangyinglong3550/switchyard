@@ -467,9 +467,16 @@ async function* http2AgentEventsOnce({ provider, credentials, messages, model, r
           yield { type: "terminal" };
           return;
         } else if (execution?.type === "unsupported_execution") {
-          const error = new Error(`Cursor requested unsupported execution: ${execution.execution}`);
-          error.code = "CURSOR_SUBSCRIPTION_UNSUPPORTED_EXECUTION";
-          throw error;
+          // Cursor 上游有时会下发尚未识别的内置执行类型（如 edit/grep 等）。
+          // 直接 throw 会丢弃同一轮已输出的全部文本并触发
+          // "stream disconnected before completion"。改为记录诊断、向客户端
+          // 输出一条提示，再正常结束本轮，保留已收到的模型输出。
+          diagnostics?.({ unsupportedExecution: execution.execution, frame: summarizeCursorAgentFrame(payload, flags) });
+          yield { type: "text", text: `
+
+[switchyard] Cursor requested an unsupported built-in execution (${execution.execution}). Ending the turn to preserve output already received.` };
+          yield { type: "terminal" };
+          return;
         }
         if (flags & 0x02) {
           const end = parseCursorEndStream(payload);
@@ -573,11 +580,17 @@ export async function callCursorSubscription(provider, body, {
           reasoningEffort: cursorReasoningEffort(body),
           speedTier: cursorSpeedTier(body)
         });
+        const cursorDiagnostics = (summary) => {
+          if (summary?.unsupportedExecution) {
+            console.error(`[switchyard] cursor unsupported execution: ${summary.unsupportedExecution} frame=${JSON.stringify(summary.frame)}`);
+          }
+        };
         const events = useCursorAgentCli
           ? cursorAgentCliEvents({ messages: body.messages || [], tools: body.tools || [], model: requestedModel, signal })
           : transport({
             provider, credentials, messages: body.messages || [], tools: body.tools || [], model: upstreamModel,
-            requestedModel: localSelection.ok ? localSelection.requestedModel : undefined, signal
+            requestedModel: localSelection.ok ? localSelection.requestedModel : undefined, signal,
+            diagnostics: cursorDiagnostics
           });
         runtimeStates.set(providerKey(provider), "connected");
         return {
@@ -603,11 +616,17 @@ export async function callCursorSubscription(provider, body, {
         reasoningEffort: cursorReasoningEffort(body),
         speedTier: cursorSpeedTier(body)
       });
+      const cursorDiagnostics = (summary) => {
+        if (summary?.unsupportedExecution) {
+          console.error(`[switchyard] cursor unsupported execution: ${summary.unsupportedExecution} frame=${JSON.stringify(summary.frame)}`);
+        }
+      };
       const events = useCursorAgentCli
         ? cursorAgentCliEvents({ messages: body.messages || [], tools: body.tools || [], model: requestedModel, signal })
         : transport({
           provider, credentials, messages: body.messages || [], tools: body.tools || [], model: upstreamModel,
-          requestedModel: localSelection.ok ? localSelection.requestedModel : undefined, signal
+          requestedModel: localSelection.ok ? localSelection.requestedModel : undefined, signal,
+          diagnostics: cursorDiagnostics
         });
       const response = await collectCursorSubscriptionResponse(requestedModel, events);
       return { ok: true, status: 200, payload: applyCursorToolCompatibility(response, body.tools || []) };
