@@ -25,10 +25,40 @@ function writeCursorDiagnostic(summary) {
       level: "warn",
       msg: "cursor unsupported execution",
       execution: summary.unsupportedExecution,
-      frame: summary.frame
+      frame: summary.frame,
+      execFields: summary.execFields || null
     }) + "\n";
     fs.appendFileSync(path.join(logDir(), "gateway.log"), entry);
   } catch {}
+}
+function dumpExecFields(payload) {
+  try {
+    const server = fields(payload);
+    const exec = server.get(2)?.[0];
+    if (!exec) return null;
+    const execWire = wireFields(exec);
+    const execLen = fields(exec);
+    const result = {};
+    // Capture varint fields (like field 1 = execution type indicator)
+    for (const [field, entries] of execWire) {
+      if (entries.some((e) => e.wire === 0)) {
+        result[`field_${field}_varint`] = entries.filter((e) => e.wire === 0).map((e) => e.value);
+      }
+    }
+    // Capture length-delimited fields with decoded content
+    for (const [field, values] of execLen) {
+      const decoded = values.map((v) => {
+        const text = Buffer.from(v).toString("utf8");
+        // Check if it looks like printable text
+        const printable = text.replace(/[^\x20-\x7E\n\r\t]/g, "").length;
+        return printable > text.length * 0.7 ? text : `<${v.length} bytes hex:${Buffer.from(v).toString("hex").slice(0, 100)}>`;
+      });
+      result[`field_${field}_text`] = decoded;
+    }
+    return result;
+  } catch {
+    return null;
+  }
 }
 const runtimeStates = new Map();
 const AGENT_RUN_PATH = "/agent.v1.AgentService/Run";
@@ -488,7 +518,7 @@ async function* http2AgentEventsOnce({ provider, credentials, messages, model, r
           // 直接 throw 会丢弃同一轮已输出的全部文本并触发
           // "stream disconnected before completion"。改为记录诊断、向客户端
           // 输出一条提示，再正常结束本轮，保留已收到的模型输出。
-          diagnostics?.({ unsupportedExecution: execution.execution, frame: summarizeCursorAgentFrame(payload, flags) });
+          diagnostics?.({ unsupportedExecution: execution.execution, frame: summarizeCursorAgentFrame(payload, flags), execFields: dumpExecFields(payload) });
           yield { type: "text", text: `
 
 [switchyard] Cursor requested an unsupported built-in execution (${execution.execution}). Ending the turn to preserve output already received.` };
