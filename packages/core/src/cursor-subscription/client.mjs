@@ -1,6 +1,9 @@
 import http2 from "node:http2";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
+import fs from "node:fs";
+import path from "node:path";
+import { logDir, nowIso } from "../utils.mjs";
 import { loadCursorSubscriptionCredentials, redactCursorSubscriptionError } from "./auth.mjs";
 import { getKeychainSecret } from "../keychain-store.mjs";
 import { assertCursorSubscriptionRequest, isCursorSubscriptionProvider, resolveCursorSubscriptionModel } from "./model-catalog.mjs";
@@ -13,6 +16,20 @@ import { http2CursorBidiEvents } from "./bidi-client.mjs";
 import { mapReadArguments, mapShellArguments, selectReadTool, selectShellTool, toolCatalog } from "./tool-capabilities.mjs";
 
 const lanes = new Map();
+
+function writeCursorDiagnostic(summary) {
+  if (!summary?.unsupportedExecution) return;
+  try {
+    const entry = JSON.stringify({
+      ts: nowIso(),
+      level: "warn",
+      msg: "cursor unsupported execution",
+      execution: summary.unsupportedExecution,
+      frame: summary.frame
+    }) + "\n";
+    fs.appendFileSync(path.join(logDir(), "gateway.log"), entry);
+  } catch {}
+}
 const runtimeStates = new Map();
 const AGENT_RUN_PATH = "/agent.v1.AgentService/Run";
 
@@ -580,11 +597,7 @@ export async function callCursorSubscription(provider, body, {
           reasoningEffort: cursorReasoningEffort(body),
           speedTier: cursorSpeedTier(body)
         });
-        const cursorDiagnostics = (summary) => {
-          if (summary?.unsupportedExecution) {
-            console.error(`[switchyard] cursor unsupported execution: ${summary.unsupportedExecution} frame=${JSON.stringify(summary.frame)}`);
-          }
-        };
+        const cursorDiagnostics = writeCursorDiagnostic;
         const events = useCursorAgentCli
           ? cursorAgentCliEvents({ messages: body.messages || [], tools: body.tools || [], model: requestedModel, signal })
           : transport({
@@ -616,11 +629,7 @@ export async function callCursorSubscription(provider, body, {
         reasoningEffort: cursorReasoningEffort(body),
         speedTier: cursorSpeedTier(body)
       });
-      const cursorDiagnostics = (summary) => {
-        if (summary?.unsupportedExecution) {
-          console.error(`[switchyard] cursor unsupported execution: ${summary.unsupportedExecution} frame=${JSON.stringify(summary.frame)}`);
-        }
-      };
+        const cursorDiagnostics = writeCursorDiagnostic;
       const events = useCursorAgentCli
         ? cursorAgentCliEvents({ messages: body.messages || [], tools: body.tools || [], model: requestedModel, signal })
         : transport({
