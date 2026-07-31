@@ -72,6 +72,51 @@ test("Codex mobile runtime · sends desktop-owned messages only through the shar
   assert.deepEqual(client.calls.map((call) => call.method), ["thread/resume", "turn/start"]);
 });
 
+test("Codex mobile runtime · never turn/starts on private app-server when a local rollout exists", async () => {
+  let nativeSpawns = 0;
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { write() { return true; }, end() {} };
+  child.kill = () => {};
+  const client = fakeClient({ usingProxy: false });
+  const runtime = createCodexRuntime({
+    client,
+    command: "codex",
+    scanSessions: () => [{
+      sessionId: "cli-thread",
+      cwd: "/tmp/cli",
+      filePath: "/tmp/cli-thread.jsonl",
+      title: "CLI 任务",
+      originator: "codex_cli_rs",
+      mtimeMs: 1
+    }],
+    spawnProcess() {
+      nativeSpawns += 1;
+      queueMicrotask(() => child.emit("close", 0));
+      return child;
+    }
+  });
+
+  assert.deepEqual(await runtime.sendMessage("cli-thread", { text: "手机续聊" }), { accepted: true });
+  assert.equal(nativeSpawns, 1);
+  assert.deepEqual(client.calls.map((call) => call.method), []);
+});
+
+test("Codex mobile runtime · refuses private sends when no shared proxy and no local rollout", async () => {
+  const client = fakeClient({ usingProxy: false });
+  const runtime = createCodexRuntime({
+    client,
+    scanSessions: () => []
+  });
+  await assert.rejects(
+    () => runtime.sendMessage("ghost-thread", { text: "hello" }),
+    (error) => error?.code === "CODEX_DESKTOP_SYNC_UNAVAILABLE"
+  );
+  assert.deepEqual(client.calls.map((call) => call.method), []);
+});
+
 
 test("Codex mobile runtime · turns tagged subagent notifications into a readable session title", () => {
   assert.equal(

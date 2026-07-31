@@ -4,13 +4,14 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 
-import { createAcpClient } from "../../../apps/desktop/src/mobile-control/acp-client.mjs";
+import { createAcpClient, pickAuthMethodId } from "../../../apps/desktop/src/mobile-control/acp-client.mjs";
 import { createAcpRuntime } from "../../../apps/desktop/src/mobile-control/acp-runtime.mjs";
 import { createClaudeRuntime, parseClaudeJsonl, cleanClaudeUserText } from "../../../apps/desktop/src/mobile-control/claude-runtime.mjs";
 import { parseCodexRollout, cleanCodexUserPart } from "../../../apps/desktop/src/mobile-control/codex-runtime.mjs";
-import { createGrokRuntime, parseGrokChatHistory, cleanGrokUserText } from "../../../apps/desktop/src/mobile-control/grok-runtime.mjs";
-import { createOpenCodeRuntime } from "../../../apps/desktop/src/mobile-control/opencode-runtime.mjs";
+import { createGrokRuntime, parseGrokChatHistory, cleanGrokUserText, mergeGrokLiveTail } from "../../../apps/desktop/src/mobile-control/grok-runtime.mjs";
+import { createOpenCodeRuntime, readOpenCodeDbMessages } from "../../../apps/desktop/src/mobile-control/opencode-runtime.mjs";
 import { materializeImageAttachments } from "../../../apps/desktop/src/mobile-control/temp-attachments.mjs";
 import { toolFrom } from "../../../apps/desktop/src/mobile-control/message-parts.mjs";
 
@@ -68,7 +69,10 @@ test("ACP client negotiates protocol and separates responses, notifications and 
     method: "initialize",
     params: {
       protocolVersion: 1,
-      clientCapabilities: {},
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true
+      },
       clientInfo: { name: "switchyard", title: "Switchyard", version: "2.2.34" }
     }
   });
@@ -107,6 +111,64 @@ test("ACP client negotiates protocol and separates responses, notifications and 
     result: { outcome: { outcome: "selected", optionId: "allow_once" } }
   });
   client.close();
+});
+
+test("ACP client authenticates with Grok cached_token after initialize", async () => {
+  const child = fakeChild();
+  const client = createAcpClient({
+    command: "grok",
+    spawnProcess: () => child,
+    env: {}
+  });
+  const connecting = client.connect();
+  assert.equal(JSON.parse(child.stdin.writes[0]).method, "initialize");
+  child.stdout.emit("data", `${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    result: {
+      protocolVersion: 1,
+      authMethods: [{ id: "cached_token" }, { id: "xai.api_key" }]
+    }
+  })}\n`);
+  // authenticate is requested as id 2 before connect resolves
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(child.stdin.writes[1]), {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "authenticate",
+    params: { methodId: "cached_token", _meta: { headless: true } }
+  });
+  child.stdout.emit("data", `${JSON.stringify({ jsonrpc: "2.0", id: 2, result: {} })}\n`);
+  await connecting;
+  assert.equal(pickAuthMethodId([{ id: "cached_token" }, { id: "xai.api_key" }], { XAI_API_KEY: "sk" }), "xai.api_key");
+  assert.equal(pickAuthMethodId([{ id: "cached_token" }], {}), "cached_token");
+  client.close();
+});
+
+test("ACP runtime does not republish echoed user_message_chunk to mobile subscribers", async () => {
+  const client = fakeClient();
+  const runtime = createAcpRuntime({ id: "grok", label: "Grok Build", client });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  client.emit({
+    kind: "notification",
+    method: "session/update",
+    params: {
+      sessionId: "s1",
+      update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "测试一下" } }
+    }
+  });
+  client.emit({
+    kind: "notification",
+    method: "session/update",
+    params: {
+      sessionId: "s1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "已收到" } }
+    }
+  });
+  assert.deepEqual(events.map((event) => ({ type: event.type, role: event.role, summary: event.summary })), [
+    { type: "message", role: "assistant", summary: "已收到" }
+  ]);
 });
 
 function fakeClient() {
@@ -233,10 +295,173 @@ test("ACP runtimes preserve mobile images as native image prompt blocks", async 
     }]
   });
   const call = client.calls.filter((item) => item.method === "session/prompt").at(-1);
+  assert.equal(Object.hasOwn(call.params, "messageId"), false);
   assert.deepEqual(call.params.prompt, [
     { type: "text", text: "描述图片" },
     { type: "image", data: "aW1hZ2U=", mimeType: "image/webp" }
   ]);
+});
+
+test("ACP prompt -32603 after streamed text soft-completes instead of failing", async () => {
+  let rejectPrompt;
+  const client = fakeClient();
+  const originalRequest = client.request.bind(client);
+  client.request = async (method, params) => {
+    client.calls.push({ method, params });
+    if (method === "session/prompt") {
+      return new Promise((_, reject) => { rejectPrompt = reject; });
+    }
+    return originalRequest(method, params);
+  };
+  const runtime = createAcpRuntime({ id: "grok", label: "Grok", client });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  await runtime.createSession({ cwd: "/tmp/demo" });
+  const sending = runtime.sendMessage("s-new", { text: "hi", messageId: "m1" });
+  await sending;
+  client.emit({
+    kind: "notification",
+    method: "session/update",
+    params: { sessionId: "s-new", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "你好" } } }
+  });
+  const error = new Error("Internal error");
+  error.code = -32603;
+  rejectPrompt(error);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.some((event) => event.type === "error"), false);
+  assert.ok(events.some((event) => event.type === "status" && event.summary === "completed" && event.runtimeEvent === "session/prompt:soft-completed"), JSON.stringify(events));
+  const promptCall = client.calls.filter((item) => item.method === "session/prompt").at(-1);
+  assert.equal(Object.hasOwn(promptCall.params, "messageId"), false);
+});
+
+test("Grok live ACP tail is merged when disk history missing assistant", () => {
+  const merged = mergeGrokLiveTail(
+    [{ role: "user", text: "测试一下", kind: "text" }],
+    [
+      { role: "user", text: "测试一下", kind: "user_message_chunk" },
+      { role: "assistant", text: "已收到，连接正常。", kind: "agent_message_chunk" }
+    ]
+  );
+  assert.deepEqual(merged, [
+    { role: "user", text: "测试一下", kind: "text" },
+    { role: "assistant", text: "已收到，连接正常。", kind: "text" }
+  ]);
+});
+
+test("Grok live ACP tail replaces short partial disk assistant", () => {
+  const merged = mergeGrokLiveTail(
+    [
+      { role: "user", text: "讲个故事", kind: "text" },
+      { role: "assistant", text: "好的，", kind: "text" }
+    ],
+    [
+      { role: "user", text: "讲个故事", kind: "user_message_chunk" },
+      { role: "assistant", text: "好的，从前有一座山，山上有座庙，庙里有个老和尚在讲故事。", kind: "agent_message_chunk" }
+    ]
+  );
+  assert.equal(merged.at(-1).text.includes("从前有一座山"), true);
+  assert.equal(merged.filter((item) => item.role === "assistant" && item.kind !== "thinking").length, 1);
+});
+
+test("Grok live ACP tail ignores unanchored live when disk already has assistant", () => {
+  const disk = [
+    { role: "user", text: "第一轮", kind: "text" },
+    { role: "assistant", text: "第一轮回答完整内容", kind: "text" },
+    { role: "user", text: "第二轮", kind: "text" },
+    { role: "assistant", text: "第二轮已落盘", kind: "text" }
+  ];
+  const merged = mergeGrokLiveTail(disk, [
+    { role: "assistant", text: "残留的旧 live 碎片不应拼上去", kind: "text" }
+  ]);
+  assert.deepEqual(merged, disk);
+});
+
+test("ACP coalesces thought chunks and normalizes end_turn to completed", async () => {
+  let resolvePrompt;
+  const client = fakeClient();
+  const originalRequest = client.request.bind(client);
+  client.request = async (method, params) => {
+    client.calls.push({ method, params });
+    if (method === "session/prompt") {
+      return new Promise((resolve) => { resolvePrompt = resolve; });
+    }
+    return originalRequest(method, params);
+  };
+  const runtime = createAcpRuntime({ id: "grok", label: "Grok", client });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  await runtime.createSession({ cwd: "/tmp/demo" });
+  await runtime.sendMessage("s-new", { text: "想一下" });
+  assert.equal(runtime.isBusy("s-new"), true);
+  assert.deepEqual(runtime.liveMessages("s-new").map((row) => row.role), ["user"]);
+  for (const piece of ["先", "想", "清楚"]) {
+    client.emit({
+      kind: "notification",
+      method: "session/update",
+      params: { sessionId: "s-new", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: piece } } }
+    });
+  }
+  client.emit({
+    kind: "notification",
+    method: "session/update",
+    params: { sessionId: "s-new", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "结论" } } }
+  });
+  const live = runtime.liveMessages("s-new");
+  assert.deepEqual(live.map((row) => ({ role: row.role, kind: row.kind, text: row.text })), [
+    { role: "user", kind: "text", text: "想一下" },
+    { role: "assistant", kind: "thinking", text: "先想清楚" },
+    { role: "assistant", kind: "text", text: "结论" }
+  ]);
+  resolvePrompt({ stopReason: "end_turn" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.isBusy("s-new"), false);
+  assert.ok(events.some((event) => event.type === "status" && event.summary === "completed"));
+  assert.equal(events.some((event) => event.summary === "end_turn"), false);
+});
+
+test("OpenCode reads messages from opencode.db when legacy JSON storage is empty", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-opencode-db-"));
+  const dbPath = path.join(root, "opencode.db");
+  const sql = `
+    CREATE TABLE message (
+      id text PRIMARY KEY,
+      session_id text NOT NULL,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL,
+      data text NOT NULL
+    );
+    CREATE TABLE part (
+      id text PRIMARY KEY,
+      message_id text NOT NULL,
+      session_id text NOT NULL,
+      time_created integer NOT NULL,
+      time_updated integer NOT NULL,
+      data text NOT NULL
+    );
+    INSERT INTO message VALUES ('msg_u1','ses_demo',1,1,'{"role":"user","time":{"created":1}}');
+    INSERT INTO message VALUES ('msg_a1','ses_demo',2,2,'{"role":"assistant","time":{"created":2}}');
+    INSERT INTO part VALUES ('prt_u1','msg_u1','ses_demo',1,1,'{"type":"text","text":"你好"}');
+    INSERT INTO part VALUES ('prt_a1','msg_a1','ses_demo',2,2,'{"type":"text","text":"你好，我在。"}');
+  `;
+  const { spawnSync } = await import("node:child_process");
+  const created = spawnSync("sqlite3", [dbPath], { input: sql, encoding: "utf8" });
+  assert.equal(created.status, 0, created.stderr || "sqlite3 create failed");
+
+  const rows = readOpenCodeDbMessages("ses_demo", dbPath);
+  assert.deepEqual(rows, [
+    { role: "user", text: "你好", kind: "text" },
+    { role: "assistant", text: "你好，我在。", kind: "text" }
+  ]);
+
+  const runtime = createOpenCodeRuntime({
+    client: fakeClient(),
+    storageRoot: path.join(root, "storage"),
+    dbPath
+  });
+  const detail = await runtime.readSession("ses_demo");
+  assert.equal(detail.messages.length, 2);
+  assert.equal(detail.messages[1].text, "你好，我在。");
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("ACP runtimes describe arbitrary uploaded files with a readable local path", async () => {
@@ -572,6 +797,13 @@ test("codex rollout drops system-injected blocks and keeps real user text", () =
     ["assistant", "text", "好的"]
   ]);
   assert.equal(cleanCodexUserPart("<recommended_plugins>\n- Slack\n</recommended_plugins>"), "");
+  assert.equal(cleanCodexUserPart([
+    "# AGENTS.md instructions for /tmp/demo",
+    "<INSTRUCTIONS>",
+    "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.",
+    "</INSTRUCTIONS>"
+  ].join("\n")), "");
+  assert.equal(cleanCodexUserPart("真实用户问题\n<INSTRUCTIONS>hidden</INSTRUCTIONS>"), "真实用户问题");
 });
 
 test("agent histories preserve structured tool details and collapsible reasoning content", () => {

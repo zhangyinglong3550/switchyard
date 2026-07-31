@@ -45,6 +45,7 @@ import {
   deleteKeychainSecret,
   describeKeychainSecret,
   getKeychainSecret,
+  getProviderKeychainSecret,
   hasKeychainSecret,
   keychainAccountForProvider,
   setKeychainSecret
@@ -70,6 +71,12 @@ import { previewSessionHandoffToCodex, handoffSessionToCodex } from "./session-h
 import { importProviders } from "../../../packages/core/src/importers/ccswitch.mjs";
 import { parseSub2ApiDataFiles, publicSub2ApiDataImport } from "../../../packages/core/src/importers/sub2api-data.mjs";
 import { importSub2ApiDataToCodexPool } from "../../../packages/core/src/account-pool/import-sub2api.mjs";
+import {
+  buildConfigBundle,
+  mergeConfigBundle,
+  parseConfigBundle,
+  previewConfigBundleMerge
+} from "../../../packages/core/src/config-bundle.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/model-directory-sync.mjs";
 import {
@@ -1021,6 +1028,204 @@ ipcMain.handle("config:history:list", () => listConfigHistory());
 ipcMain.handle("config:history:restore", (_e, id) => { const result = saveValidated(readConfigHistory(id), { reason: "history-restore" }); try { reloadConfig(); } catch {} syncCodexArtifacts("config-history-restore"); return result; });
 ipcMain.handle("route:preflight", (_e, payload = {}) => preflightRoute(readConfig(), payload));
 ipcMain.handle("config:raw", () => readRaw());
+
+function resolveBundleSecrets(provider) {
+  const authMode = String(provider?.authMode || provider?.providerType || "api_key");
+  if (provider?.apiKey) {
+    return { status: "included", apiKey: String(provider.apiKey), reason: "config inline apiKey" };
+  }
+  if (authMode === "account_pool" || provider?.providerType === "account_pool") {
+    const pool = loadPool(provider.id, { poolKind: provider.poolKind || "xai_oauth" });
+    if (!pool?.accounts?.length) {
+      return { status: "unavailable", reason: "账号池为空或不存在" };
+    }
+    return { status: "included", pool, reason: "account pool" };
+  }
+  if (authMode === "keychain" || provider?.keychainAccount) {
+    try {
+      const secret = getProviderKeychainSecret(provider);
+      if (!secret) return { status: "unavailable", reason: "Keychain 中无密钥" };
+      return { status: "included", apiKey: String(secret), reason: "keychain" };
+    } catch (error) {
+      return { status: "unavailable", reason: error?.message || "读取 Keychain 失败" };
+    }
+  }
+  if (authMode === "none") {
+    return { status: "included", reason: "无需认证" };
+  }
+  if (/oauth|cursor_subscription/i.test(authMode)) {
+    return {
+      status: "unavailable",
+      reason: "OAuth / 订阅登录态绑定本机，请在目标机器重新登录"
+    };
+  }
+  return { status: "unavailable", reason: `authMode=${authMode} 无可导出凭证` };
+}
+
+function applyBundleSecret(provider, entry) {
+  const authMode = String(provider?.authMode || entry?.authMode || "api_key");
+  if (entry?.pool) {
+    savePool({
+      ...entry.pool,
+      providerId: provider.id,
+      poolKind: entry.pool.poolKind || provider.poolKind || "xai_oauth"
+    });
+    return { ok: true, mode: "pool" };
+  }
+  if (entry?.apiKey) {
+    if (authMode === "keychain" || provider.keychainAccount) {
+      const account = keychainAccountForProvider(provider);
+      setKeychainSecret(account, entry.apiKey);
+      return { ok: true, mode: "keychain" };
+    }
+    provider.apiKey = entry.apiKey;
+    provider.authMode = provider.authMode || "api_key";
+    return { ok: true, mode: "inline" };
+  }
+  if (authMode === "none") return { ok: true, mode: "none" };
+  return { ok: false, error: "配置包中没有可用凭证" };
+}
+
+ipcMain.handle("config:bundle:export", async (_e, payload = {}) => {
+  const includeSecrets = Boolean(payload.includeSecrets);
+  if (includeSecrets) {
+    const confirm = await dialog.showMessageBox(mainWindow || undefined, {
+      type: "warning",
+      buttons: ["取消", "仍要导出含凭证的文件"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "导出包含凭证",
+      message: "将把 API Key / 账号池 token 写入明文 JSON。",
+      detail: "仅用于可信本机备份或当面交接。不要发到公开群、邮件或网盘。"
+    });
+    if (confirm.response !== 1) return { ok: false, canceled: true };
+  }
+  const config = readConfig();
+  const bundle = buildConfigBundle(config, {
+    providerIds: Array.isArray(payload.providerIds) ? payload.providerIds : undefined,
+    includeSecrets,
+    secretsResolver: includeSecrets ? resolveBundleSecrets : undefined
+  });
+  if (!bundle.providers.length) throw new Error("请至少选择一个供应商");
+  const stamp = new Date().toISOString().slice(0, 10);
+  const selected = await dialog.showSaveDialog(mainWindow || undefined, {
+    title: includeSecrets ? "导出 Switchyard 配置包（含凭证）" : "导出 Switchyard 配置包",
+    defaultPath: path.join(
+      app.getPath("downloads"),
+      `switchyard-config-${stamp}${includeSecrets ? "-with-secrets" : ""}.json`
+    ),
+    filters: [{ name: "Switchyard Config Bundle", extensions: ["json"] }]
+  });
+  if (selected.canceled || !selected.filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(selected.filePath, `${JSON.stringify(bundle, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: includeSecrets ? 0o600 : 0o644
+  });
+  try { if (includeSecrets) fs.chmodSync(selected.filePath, 0o600); } catch {}
+  shell.showItemInFolder(selected.filePath);
+  appendLog({
+    level: "info",
+    msg: "config bundle exported",
+    providers: bundle.providers.length,
+    models: bundle.models.length,
+    includeSecrets
+  });
+  return {
+    ok: true,
+    path: selected.filePath,
+    providers: bundle.providers.length,
+    models: bundle.models.length,
+    includeSecrets,
+    secrets: bundle.secrets.status
+  };
+});
+
+const pendingBundleImports = new Map();
+
+ipcMain.handle("config:bundle:import-preview", async () => {
+  const selection = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: "导入 Switchyard 配置包",
+    defaultPath: app.getPath("downloads"),
+    properties: ["openFile"],
+    filters: [{ name: "Switchyard Config Bundle", extensions: ["json"] }]
+  });
+  if (selection.canceled || !selection.filePaths.length) return { ok: false, canceled: true };
+  const filePath = selection.filePaths[0];
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(`无法解析配置包：${error?.message || error}`);
+  }
+  const preview = previewConfigBundleMerge(readConfig(), raw);
+  const token = randomUUID();
+  pendingBundleImports.set(token, preview.bundle);
+  if (pendingBundleImports.size > 8) {
+    const first = pendingBundleImports.keys().next().value;
+    pendingBundleImports.delete(first);
+  }
+  return {
+    ok: true,
+    token,
+    path: filePath,
+    includeSecrets: preview.includeSecrets,
+    addProviders: preview.addProviders.map((row) => ({ id: row.id, name: row.name, apiFormat: row.apiFormat, baseUrl: row.baseUrl })),
+    skipProviders: preview.skipProviders.map((row) => ({ id: row.id, name: row.name })),
+    addModels: preview.addModels.map((row) => ({ id: row.id, providerId: row.providerId, displayName: row.displayName || row.upstreamModel || row.id })),
+    skipModels: preview.skipModels.map((row) => ({ id: row.id, providerId: row.providerId })),
+    secretEntries: preview.secretEntries.map((row) => ({
+      providerId: row.providerId,
+      authMode: row.authMode,
+      hasApiKey: Boolean(row.apiKey),
+      hasPool: Boolean(row.pool)
+    }))
+  };
+});
+
+ipcMain.handle("config:bundle:import-apply", async (_e, payload = {}) => {
+  const token = String(payload.token || "");
+  const bundle = token && pendingBundleImports.has(token)
+    ? pendingBundleImports.get(token)
+    : payload.bundle;
+  if (token) pendingBundleImports.delete(token);
+  if (!bundle) throw new Error("缺少配置包内容，请重新选择文件");
+  const applySecrets = payload.applySecrets !== false && Boolean(bundle.includeSecrets);
+  if (applySecrets) {
+    const confirm = await dialog.showMessageBox(mainWindow || undefined, {
+      type: "warning",
+      buttons: ["取消", "写入凭证并合并"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "导入包含凭证",
+      message: "配置包含 API Key / 账号池 token，将写入本机。",
+      detail: "仅应导入可信来源的文件。"
+    });
+    if (confirm.response !== 1) return { ok: false, canceled: true };
+  }
+  const merged = mergeConfigBundle(readConfig(), parseConfigBundle(bundle), {
+    secretsApplier: applySecrets ? applyBundleSecret : undefined
+  });
+  const result = saveValidated(merged.config, { reason: "config-bundle-import" });
+  try { reloadConfig(); } catch {}
+  syncCodexArtifacts("config-bundle-import");
+  appendLog({
+    level: "info",
+    msg: "config bundle imported",
+    providers: merged.addProviders.length,
+    models: merged.addModels.length,
+    secrets: merged.appliedSecrets.length
+  });
+  return {
+    ok: true,
+    path: result.path,
+    addedProviders: merged.addProviders.length,
+    skippedProviders: merged.skipProviders.length,
+    addedModels: merged.addModels.length,
+    skippedModels: merged.skipModels.length,
+    appliedSecrets: merged.appliedSecrets,
+    skippedSecrets: merged.skippedSecrets
+  };
+});
 ipcMain.handle("gateway:status", () => statusFromServer());
 ipcMain.handle("gateway:start", async () => {
   const result = await startGateway();

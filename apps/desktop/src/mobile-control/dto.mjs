@@ -107,6 +107,8 @@ function projectTool(value) {
 export function projectMobileSession(row = {}, overlay = {}) {
   const state = SESSION_STATES.has(row.state) ? row.state : "completed";
   const updatedAt = row.updatedAt || row.mtime || null;
+  const directory = String(row.directory || row.cwd || "").trim().slice(0, 500);
+  const nativeId = String(row.nativeId || "").trim().slice(0, 240);
   return {
     id: String(row.id || ""),
     agent: String(row.agent || row.agentId || ""),
@@ -115,8 +117,12 @@ export function projectMobileSession(row = {}, overlay = {}) {
     updatedAt: updatedAt ? String(updatedAt) : null,
     model: cleanMobileText(overlay.model || row.model || "", 160),
     project: projectName(row.project || row.directory || row.cwd || ""),
+    // 工作区绝对路径与原生会话 ID 供手机端复制/排障；不做路径脱敏。
+    ...(directory ? { directory } : {}),
+    ...(nativeId ? { nativeId } : {}),
     pinned: Boolean(overlay.pinned),
     archived: Boolean(overlay.archived ?? row.archived),
+    autoApproveSession: Boolean(overlay.autoApproveSession),
     capabilities: projectCapabilities(row.capabilities)
   };
 }
@@ -166,6 +172,8 @@ export function projectMobileEvent(event = {}) {
     role: ["user", "assistant", "tool", "system"].includes(event.role) ? event.role : null,
     createdAt: event.createdAt ? String(event.createdAt) : null,
     summary: cleanMobileText(event.summary || "", 4000),
+    // 客户端乐观渲染用的 messageId；与 ledger 数字 id 分离，便于 SSE 去重。
+    ...(event.messageId ? { messageId: cleanMobileText(event.messageId, 240) } : {}),
     ...(event.approval && typeof event.approval === "object" ? {
       approval: {
         id: cleanMobileText(event.approval.id || "", 240),

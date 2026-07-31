@@ -234,14 +234,17 @@ test("mobile DTO only exposes allowlisted session and event fields", () => {
     updatedAt: "2026-07-23T12:00:00.000Z",
     model: "codex/gpt-5.5",
     project: "project",
+    directory: "/Users/alice/secret/project",
     pinned: true,
     archived: false,
+    autoApproveSession: false,
     capabilities: {
       sendMessage: true,
       setModel: true
     }
   });
-  assert.doesNotMatch(JSON.stringify(session), /secret|private prompt|sk-/);
+  // directory 可暴露给手机选工作区；禁止泄漏 rollout 路径 / 密钥 / 会话正文。
+  assert.doesNotMatch(JSON.stringify(session), /private\.jsonl|private prompt|sk-/);
 
   const event = projectMobileEvent({
     id: 9,
@@ -336,6 +339,21 @@ test("event ledger replays strictly after cursor without duplicates", (t) => {
     three.id,
     four.id
   ]);
+});
+
+test("event ledger defers disk writes for streaming assistant chunks", async (t) => {
+  const root = tempRoot(t);
+  const file = path.join(root, "events.jsonl");
+  const seen = [];
+  const ledger = createEventLedger({ file, now: () => NOW, flushDelayMs: 30 });
+  ledger.subscribe((event) => seen.push(event.summary));
+  ledger.append({ sessionId: "s1", type: "message", role: "assistant", summary: "a" });
+  ledger.append({ sessionId: "s1", type: "thinking", role: "assistant", summary: "t" });
+  assert.deepEqual(seen, ["a", "t"]);
+  assert.equal(fs.existsSync(file) && fs.readFileSync(file, "utf8").trim() !== "", false);
+  ledger.append({ sessionId: "s1", type: "status", summary: "completed" });
+  assert.match(fs.readFileSync(file, "utf8"), /"summary":"a"/);
+  assert.match(fs.readFileSync(file, "utf8"), /"summary":"completed"/);
 });
 
 test("mobile runtime restores user CLI paths lost by launchd", () => {

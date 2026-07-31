@@ -119,6 +119,8 @@
         </div>
         <div style="flex:1;"></div>
         <button class="btn" id="btn-provider-import">从 cc-switch 导入…</button>
+        <button class="btn" id="btn-provider-export-bundle">导出配置…</button>
+        <button class="btn" id="btn-provider-import-bundle">导入配置…</button>
         <button class="btn primary" id="btn-provider-add">+ 新增供应商</button>
       </div>
       <div class="page-scroll">
@@ -609,8 +611,12 @@
           <div class="bd">
             <dl class="kv">
               <dt>路径</dt><dd class="mono" id="settings-config-path">-</dd>
-              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件，可手动备份。</dd>
+              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件。可导出给同事导入；默认不含密钥。</dd>
             </dl>
+            <div class="actions" style="margin-top:12px;">
+              <button class="btn" type="button" id="btn-config-bundle-export">导出配置…</button>
+              <button class="btn" type="button" id="btn-config-bundle-import">导入配置…</button>
+            </div>
           </div>
         </div>
         <div class="card">
@@ -1190,6 +1196,48 @@
         <button class="btn primary" type="submit">保存</button>
       </div>
     </form>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="config-bundle-export-wrap">
+  <div class="dialog dialog-wide">
+    <h2>导出 Switchyard 配置</h2>
+    <div class="tiny muted" style="margin-bottom:10px;">选择要分享的供应商；会自动带上对应模型。默认不导出密钥。</div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-bottom:8px;">
+      <button class="btn" type="button" id="btn-bundle-export-select-all">全选</button>
+      <button class="btn" type="button" id="btn-bundle-export-select-none">全不选</button>
+    </div>
+    <div class="import-preview" id="config-bundle-export-list" style="max-height:min(46vh,420px); overflow:auto;"></div>
+    <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start; margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:8px;">
+      <input type="checkbox" id="bundle-export-include-secrets">
+      <span>
+        <strong>包含凭证（高级）</strong>
+        <div class="tiny muted">写入 API Key / 账号池 token。仅用于可信本机备份；导出会二次确认。</div>
+      </span>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" data-close="config-bundle-export-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-bundle-export-confirm">导出 JSON…</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="config-bundle-import-wrap">
+  <div class="dialog dialog-wide">
+    <h2>导入 Switchyard 配置</h2>
+    <div class="tiny muted" id="config-bundle-import-meta" style="margin-bottom:10px;">选择同事导出的配置包。</div>
+    <div class="import-preview" id="config-bundle-import-preview" style="max-height:min(50vh,460px); overflow:auto;"></div>
+    <label class="import-provider-check" id="bundle-import-secrets-row" hidden style="display:flex; gap:8px; align-items:flex-start; margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:8px;">
+      <input type="checkbox" id="bundle-import-apply-secrets" checked>
+      <span>
+        <strong>同时写入凭证</strong>
+        <div class="tiny muted">仅当配置包本身包含密钥时可用；已存在的同名供应商会跳过凭证。</div>
+      </span>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" data-close="config-bundle-import-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-bundle-import-apply">合并到配置</button>
+    </div>
   </div>
 </div>
 

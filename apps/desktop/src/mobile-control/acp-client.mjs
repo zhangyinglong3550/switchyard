@@ -3,13 +3,27 @@ import { spawn } from "node:child_process";
 
 const DEFAULT_INITIALIZE = Object.freeze({
   protocolVersion: 1,
-  clientCapabilities: {},
+  clientCapabilities: {
+    // Grok / xAI ACP 文档要求声明 fs + terminal；空对象在部分 agent 上可工作，
+    // 但 Grok 在未 authenticate 时会把后续 session 调用打成 Internal error。
+    fs: { readTextFile: true, writeTextFile: true },
+    terminal: true
+  },
   clientInfo: {
     name: "switchyard",
     title: "Switchyard",
     version: "2.2.34"
   }
 });
+
+export function pickAuthMethodId(authMethods = [], env = process.env) {
+  const rows = Array.isArray(authMethods) ? authMethods : [];
+  const ids = new Set(rows.map((item) => item?.id).filter(Boolean));
+  if (!ids.size) return "";
+  if (env?.XAI_API_KEY && ids.has("xai.api_key")) return "xai.api_key";
+  if (ids.has("cached_token")) return "cached_token";
+  return String(rows[0]?.id || "");
+}
 
 export function createAcpClient({
   command,
@@ -28,6 +42,7 @@ export function createAcpClient({
   const pending = new Map();
   const subscribers = new Set();
   const stderr = [];
+  const runtimeEnv = { ...process.env, HOME: os.homedir(), ...(env || {}) };
 
   const emit = (frame) => {
     for (const subscriber of subscribers) {
@@ -107,7 +122,7 @@ export function createAcpClient({
     connectPromise = (async () => {
       const processHandle = spawnProcess(command, args, {
         cwd: cwd || process.cwd(),
-        env: { ...process.env, HOME: os.homedir(), ...(env || {}) },
+        env: runtimeEnv,
         stdio: ["pipe", "pipe", "pipe"]
       });
       child = processHandle;
@@ -130,6 +145,12 @@ export function createAcpClient({
         emit({ kind: "lifecycle", method: "process/closed", params: { code } });
       });
       initializeResult = await request("initialize", initializeParams, 30_000);
+      // xAI / Grok 官方头less 流程：initialize → authenticate → session/*。
+      // 跳过 authenticate 时，后续 session/prompt 常返回笼统的 Internal error。
+      const methodId = pickAuthMethodId(initializeResult?.authMethods, runtimeEnv);
+      if (methodId) {
+        await request("authenticate", { methodId, _meta: { headless: true } }, 30_000);
+      }
       return initializeResult;
     })();
     return connectPromise;

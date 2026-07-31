@@ -27,16 +27,44 @@ function writeEvents(file, events) {
   try { fs.chmodSync(file, 0o600); } catch {}
 }
 
+/** 高频流式 chunk：先通知订阅者，磁盘合并写，避免每个 token 全量重写。 */
+const DEFERRED_TYPES = new Set(["message", "thinking"]);
+
 export function createEventLedger({
   file,
   now = () => Date.now(),
-  maxEvents = 10_000
+  maxEvents = 10_000,
+  flushDelayMs = 80
 } = {}) {
   if (!file) throw new Error("event ledger file 不能为空");
   const resolved = path.resolve(file);
   let events = readEvents(resolved).sort((a, b) => a.id - b.id);
   let nextId = (events.at(-1)?.id || 0) + 1;
   const subscribers = new Set();
+  let dirty = false;
+  let flushTimer = null;
+  const delay = Math.max(0, Number(flushDelayMs) || 0);
+
+  const flush = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (!dirty) return;
+    dirty = false;
+    writeEvents(resolved, events);
+  };
+
+  const scheduleFlush = () => {
+    dirty = true;
+    if (delay <= 0) {
+      flush();
+      return;
+    }
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, delay);
+    flushTimer.unref?.();
+  };
 
   const append = (input = {}) => {
     const event = projectMobileEvent({
@@ -47,7 +75,13 @@ export function createEventLedger({
     events.push(event);
     const limit = Math.max(1, Number(maxEvents) || 1);
     if (events.length > limit) events = events.slice(-limit);
-    writeEvents(resolved, events);
+    // 用户消息 / 状态 / 错误 / 审批必须立刻落盘；assistant 流式 chunk 可合并写。
+    const defer = DEFERRED_TYPES.has(event.type) && event.role !== "user";
+    if (defer) scheduleFlush();
+    else {
+      dirty = true;
+      flush();
+    }
     for (const subscriber of subscribers) {
       try { subscriber({ ...event }); } catch {}
     }
@@ -68,6 +102,7 @@ export function createEventLedger({
     file: resolved,
     append,
     list,
+    flush,
     subscribe(handler) {
       if (typeof handler !== "function") throw new TypeError("event subscriber 必须是函数");
       subscribers.add(handler);

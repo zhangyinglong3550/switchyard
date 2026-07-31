@@ -82,6 +82,49 @@ function grokSessionRows() {
   }));
 }
 
+function assistantPlainText(messages = []) {
+  return messages
+    .filter((message) => message?.role === "assistant" && message.kind !== "thinking" && !message.tool)
+    .map((message) => String(message.text || ""))
+    .join("");
+}
+
+function projectLiveTail(live = []) {
+  const liveLastUser = [...live].map((message, index) => [message, index]).filter(([message]) => message.role === "user").at(-1)?.[1] ?? -1;
+  return live.slice(liveLastUser + 1)
+    .filter((message) => message.role === "assistant" || message.kind === "thinking" || message.kind === "tool" || message.tool)
+    .map((message) => ({
+      role: message.role || "assistant",
+      text: String(message.text || ""),
+      kind: message.kind === "thinking" ? "thinking" : message.tool || message.kind === "tool" ? "tool" : "text",
+      ...(message.tool ? { tool: message.tool } : {})
+    }))
+    .filter((message) => message.text || message.tool);
+}
+
+function mergeGrokLiveTail(diskMessages = [], liveMessages = []) {
+  const disk = Array.isArray(diskMessages) ? diskMessages : [];
+  const live = Array.isArray(liveMessages) ? liveMessages : [];
+  if (!live.length) return disk;
+  const lastUser = [...disk].map((message, index) => [message, index]).filter(([message]) => message.role === "user").at(-1)?.[1] ?? -1;
+  const diskTail = disk.slice(lastUser + 1);
+  const diskAssistant = assistantPlainText(diskTail);
+  const liveHasUser = live.some((message) => message.role === "user");
+  const liveTail = projectLiveTail(live);
+  if (!liveTail.length) return disk;
+  // 无用户锚点时，live Map 可能残留多轮碎片；仅在磁盘本轮尚无助手正文时补上。
+  if (!liveHasUser && diskAssistant) return disk;
+  const liveAssistant = assistantPlainText(liveTail);
+  // 磁盘还没有本轮助手正文：直接拼上 live。
+  if (!diskAssistant) return disk.concat(liveTail);
+  // Grok 偶发只落盘很短的半截回答；若 live 明显更长，用 live 替换本轮助手尾。
+  if (liveAssistant.length > diskAssistant.length + 16) {
+    const kept = diskTail.filter((message) => !(message.role === "assistant" && message.kind !== "thinking" && !message.tool));
+    return disk.slice(0, lastUser + 1).concat(kept, liveTail);
+  }
+  return disk;
+}
+
 export function createGrokRuntime({ client, overlay, command, env } = {}) {
   const acp = client || createAcpClient({
     command: command || process.env.SWITCHYARD_GROK_BINARY || "grok",
@@ -109,19 +152,28 @@ export function createGrokRuntime({ client, overlay, command, env } = {}) {
       const local = localGrokMessages(sid);
       if (!local) return runtime.readSession(sid);
       const cwd = local.row.cwd || "";
+      // Grok 在 session/prompt -32603 时经常不落盘 assistant；把 ACP 内存里的
+      // 本轮流式内容拼回去，避免手机 openSession 刷新后回答消失。
+      const messages = mergeGrokLiveTail(local.messages, runtime.liveMessages?.(sid) || []);
+      const busy = Boolean(runtime.isBusy?.(sid));
       return {
         id: sid,
         agentId: "grok",
         name: local.row.title || local.row.preview || sid,
-        state: "completed",
+        state: busy ? "running" : "completed",
         updatedAt: local.row.mtimeMs ? new Date(local.row.mtimeMs).toISOString() : null,
         model: "",
         directory: cwd,
         project: cwd ? path.basename(cwd) : "",
         archived: false,
         capabilities: { ...runtime.capabilities },
-        messages: local.messages
+        messages
       };
+    },
+    isBusy(sessionId) {
+      return Boolean(runtime.isBusy?.(sessionId));
     }
   };
 }
+
+export { mergeGrokLiveTail };

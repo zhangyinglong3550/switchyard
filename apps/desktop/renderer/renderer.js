@@ -3445,6 +3445,165 @@ document.getElementById("import-dialog-wrap").querySelector("[data-close]").addE
   document.getElementById("import-dialog-wrap").classList.remove("open");
 });
 
+/* ---- Switchyard config bundle export / import ---- */
+let bundleExportSelection = new Set();
+let bundleImportPreview = null;
+
+function modelCountForProvider(providerId) {
+  return (state.config?.models || []).filter((model) => model.providerId === providerId).length;
+}
+
+function renderBundleExportList() {
+  const host = document.getElementById("config-bundle-export-list");
+  if (!host) return;
+  const providers = state.config?.providers || [];
+  host.innerHTML = providers.map((provider) => `
+    <label class="import-provider" style="display:block; margin-bottom:8px;">
+      <div class="import-provider-head">
+        <span class="import-provider-check">
+          <input type="checkbox" data-bundle-export-provider="${escapeHtml(provider.id)}" ${bundleExportSelection.has(provider.id) ? "checked" : ""}>
+          <span class="import-provider-title">${escapeHtml(provider.name || provider.id)}</span>
+        </span>
+        <span class="chip">${escapeHtml(PROTOCOL_LABEL[provider.apiFormat] || provider.apiFormat || "")}</span>
+      </div>
+      <dl class="import-provider-grid">
+        <dt>标识</dt><dd class="mono">${escapeHtml(provider.id)}</dd>
+        <dt>地址</dt><dd class="mono">${escapeHtml(provider.baseUrl || "-")}</dd>
+        <dt>模型</dt><dd>${modelCountForProvider(provider.id)} 个</dd>
+        <dt>认证</dt><dd class="mono">${escapeHtml(provider.authMode || "api_key")}</dd>
+      </dl>
+    </label>
+  `).join("") || '<div class="empty-state">还没有供应商可导出</div>';
+  host.querySelectorAll("[data-bundle-export-provider]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const id = event.currentTarget.dataset.bundleExportProvider;
+      if (event.currentTarget.checked) bundleExportSelection.add(id);
+      else bundleExportSelection.delete(id);
+    });
+  });
+}
+
+function openBundleExportDialog() {
+  bundleExportSelection = new Set((state.config?.providers || []).map((provider) => provider.id));
+  const secrets = document.getElementById("bundle-export-include-secrets");
+  if (secrets) secrets.checked = false;
+  renderBundleExportList();
+  document.getElementById("config-bundle-export-wrap")?.classList.add("open");
+}
+
+function renderBundleImportPreview(preview) {
+  const host = document.getElementById("config-bundle-import-preview");
+  const meta = document.getElementById("config-bundle-import-meta");
+  const secretsRow = document.getElementById("bundle-import-secrets-row");
+  const applySecrets = document.getElementById("bundle-import-apply-secrets");
+  if (!host || !preview) return;
+  if (meta) {
+    meta.textContent = `${preview.path || ""} · ${preview.includeSecrets ? "含凭证" : "不含凭证"} · 新增 ${preview.addProviders?.length || 0} 供应商 / ${preview.addModels?.length || 0} 模型`;
+  }
+  if (secretsRow) {
+    const show = Boolean(preview.includeSecrets && preview.secretEntries?.length);
+    secretsRow.hidden = !show;
+    secretsRow.style.display = show ? "flex" : "none";
+    if (applySecrets) applySecrets.checked = show;
+  }
+  const addProviders = (preview.addProviders || []).map((row) => `
+    <div class="import-provider">
+      <div class="import-provider-head">
+        <span class="import-provider-title">${escapeHtml(row.name || row.id)}</span>
+        <span class="chip">新增</span>
+      </div>
+      <dl class="import-provider-grid">
+        <dt>标识</dt><dd class="mono">${escapeHtml(row.id)}</dd>
+        <dt>地址</dt><dd class="mono">${escapeHtml(row.baseUrl || "-")}</dd>
+      </dl>
+    </div>
+  `).join("");
+  const skipProviders = (preview.skipProviders || []).map((row) => `
+    <div class="tiny muted">跳过已有供应商：${escapeHtml(row.name || row.id)} <span class="mono">(${escapeHtml(row.id)})</span></div>
+  `).join("");
+  const models = (preview.addModels || []).slice(0, 40).map((row) => `
+    <div class="tiny mono">${escapeHtml(row.displayName || row.id)} ← ${escapeHtml(row.providerId)}</div>
+  `).join("");
+  host.innerHTML = `
+    <div class="import-summary">
+      <div class="metric"><div class="metric-value">${escapeHtml(preview.addProviders?.length || 0)}</div><div class="metric-label">将新增供应商</div></div>
+      <div class="metric"><div class="metric-value">${escapeHtml(preview.skipProviders?.length || 0)}</div><div class="metric-label">跳过供应商</div></div>
+      <div class="metric"><div class="metric-value">${escapeHtml(preview.addModels?.length || 0)}</div><div class="metric-label">将新增模型</div></div>
+      <div class="metric"><div class="metric-value">${escapeHtml(preview.secretEntries?.length || 0)}</div><div class="metric-label">可写凭证</div></div>
+    </div>
+    ${addProviders || '<div class="empty-state">没有可新增的供应商（可能都已存在）</div>'}
+    ${skipProviders}
+    ${models ? `<div style="margin-top:10px;"><strong>新增模型</strong>${models}${(preview.addModels?.length || 0) > 40 ? `<div class="tiny muted">…其余 ${(preview.addModels.length - 40)} 个</div>` : ""}</div>` : ""}
+  `;
+}
+
+async function openBundleImportDialog() {
+  try {
+    const preview = await invoke("config:bundle:import-preview");
+    if (!preview?.ok) return;
+    bundleImportPreview = preview;
+    renderBundleImportPreview(preview);
+    document.getElementById("config-bundle-import-wrap")?.classList.add("open");
+  } catch (error) {
+    toast(`导入预览失败：${error.message}`, "error");
+  }
+}
+
+document.querySelectorAll("#btn-config-bundle-export, #btn-provider-export-bundle").forEach((button) => {
+  button?.addEventListener("click", openBundleExportDialog);
+});
+document.querySelectorAll("#btn-config-bundle-import, #btn-provider-import-bundle").forEach((button) => {
+  button?.addEventListener("click", openBundleImportDialog);
+});
+document.getElementById("btn-bundle-export-select-all")?.addEventListener("click", () => {
+  bundleExportSelection = new Set((state.config?.providers || []).map((provider) => provider.id));
+  renderBundleExportList();
+});
+document.getElementById("btn-bundle-export-select-none")?.addEventListener("click", () => {
+  bundleExportSelection = new Set();
+  renderBundleExportList();
+});
+document.getElementById("btn-bundle-export-confirm")?.addEventListener("click", async () => {
+  if (!bundleExportSelection.size) {
+    toast("请至少选择一个供应商", "error");
+    return;
+  }
+  try {
+    const result = await invoke("config:bundle:export", {
+      providerIds: [...bundleExportSelection],
+      includeSecrets: Boolean(document.getElementById("bundle-export-include-secrets")?.checked)
+    });
+    if (!result?.ok) return;
+    document.getElementById("config-bundle-export-wrap")?.classList.remove("open");
+    toast(`已导出 ${result.providers} 供应商 / ${result.models} 模型${result.includeSecrets ? "（含凭证）" : ""}`);
+  } catch (error) {
+    toast(`导出失败：${error.message}`, "error");
+  }
+});
+document.getElementById("btn-bundle-import-apply")?.addEventListener("click", async () => {
+  if (!bundleImportPreview?.token) {
+    toast("请重新选择配置包", "error");
+    return;
+  }
+  if (!(bundleImportPreview.addProviders?.length || bundleImportPreview.addModels?.length)) {
+    toast("没有可合并的新增项");
+    return;
+  }
+  try {
+    const result = await invoke("config:bundle:import-apply", {
+      token: bundleImportPreview.token,
+      applySecrets: Boolean(document.getElementById("bundle-import-apply-secrets")?.checked)
+    });
+    if (!result?.ok) return;
+    document.getElementById("config-bundle-import-wrap")?.classList.remove("open");
+    bundleImportPreview = null;
+    await refreshAll();
+    toast(`已合并：+${result.addedProviders} 供应商 / +${result.addedModels} 模型${result.appliedSecrets?.length ? `，写入 ${result.appliedSecrets.length} 组凭证` : ""}`);
+  } catch (error) {
+    toast(`合并失败：${error.message}`, "error");
+  }
+});
+
 /* ---- Sub2API Data Backup Import ---- */
 let sub2apiDataImportResult = null;
 function resetSub2ApiDataImportPanel() {

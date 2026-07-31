@@ -6,6 +6,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Environment;
@@ -57,7 +59,9 @@ public final class MainActivity extends Activity {
   private LinearLayout pairingRecoveryBar;
   private ValueCallback<Uri[]> fileChooserCallback;
   private static final String APPROVAL_CHANNEL_ID = "approvals";
+  private static final String STATUS_CHANNEL_ID = "task_status";
   private static final int REQ_NOTIFICATIONS = 7201;
+  private String pendingShareText = "";
   private final Handler approvalHandler = new Handler(Looper.getMainLooper());
   private boolean isForeground = true;
   private boolean approvalLoopRunning = false;
@@ -73,7 +77,7 @@ public final class MainActivity extends Activity {
     super.onCreate(state);
     tokenStore = new SecureTokenStore(this);
     configureWebView();
-    createApprovalChannel();
+    createNotificationChannels();
     if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
       requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQ_NOTIFICATIONS);
     }
@@ -92,11 +96,11 @@ public final class MainActivity extends Activity {
     webView.setBackgroundColor(Color.rgb(247, 244, 239));
     webView.getSettings().setJavaScriptEnabled(true);
     webView.getSettings().setDomStorageEnabled(true);
-    // The mobile UI is served by the paired desktop. Never reuse an older
-    // WebView HTTP cache after upgrading the Android shell, otherwise a new
-    // launcher icon can misleadingly coexist with an old session interface.
-    webView.getSettings().setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
-    webView.clearCache(true);
+    // The paired desktop serves the mobile UI with cache-control: no-store, so
+    // the WebView HTTP cache never holds stale copies; asset freshness is owned
+    // by the Service Worker's versioned cache. Clearing the WebView cache on
+    // every launch only slowed startup, so the cache mode stays at the default.
+    webView.getSettings().setCacheMode(android.webkit.WebSettings.LOAD_DEFAULT);
     webView.getSettings().setAllowFileAccess(false);
     // Attachments selected through Android's Storage Access Framework are
     // content:// URIs. WebView needs content access to turn the selected URI
@@ -159,7 +163,10 @@ public final class MainActivity extends Activity {
         return openExternalUrl(url);
       }
       @Override public void onPageFinished(WebView view, String url) {
-        if (isTrusted(Uri.parse(url))) injectSecureStorage();
+        if (isTrusted(Uri.parse(url))) {
+          injectSecureStorage();
+          deliverPendingShare();
+        }
       }
     });
     webContainer = new LinearLayout(this);
@@ -248,6 +255,14 @@ public final class MainActivity extends Activity {
   }
 
   private void handleIntent(Intent intent) {
+    if (intent != null && Intent.ACTION_SEND.equals(intent.getAction())) {
+      CharSequence shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+      if (shared != null && shared.length() > 0) pendingShareText = shared.toString().trim();
+      String rememberedShare = tokenStore.getBaseUrl();
+      if (!rememberedShare.isEmpty()) loadTrusted(rememberedShare);
+      else showPairingEntry();
+      return;
+    }
     String pairingUrl = pairingUrl(intent == null ? null : intent.getData());
     if (pairingUrl != null) {
       loadPairingUrl(pairingUrl);
@@ -256,6 +271,21 @@ public final class MainActivity extends Activity {
     String remembered = tokenStore.getBaseUrl();
     if (!remembered.isEmpty()) loadTrusted(remembered);
     else showPairingEntry();
+  }
+
+  private void deliverPendingShare() {
+    if (pendingShareText == null || pendingShareText.isEmpty() || webView == null) return;
+    String payload = pendingShareText;
+    pendingShareText = "";
+    String escaped = payload
+      .replace("\\", "\\\\")
+      .replace("\"", "\\\"")
+      .replace("\n", "\\n")
+      .replace("\r", "");
+    webView.evaluateJavascript(
+      "(function(){try{if(window.__switchyardShareIn)window.__switchyardShareIn({text:\"" + escaped + "\"});}catch(e){}})();",
+      null
+    );
   }
 
   private String pairingUrl(Uri data) {
@@ -409,12 +439,51 @@ public final class MainActivity extends Activity {
     super.onDestroy();
   }
 
-  private void createApprovalChannel() {
+  private void createNotificationChannels() {
     if (Build.VERSION.SDK_INT < 26) return;
-    NotificationChannel channel = new NotificationChannel(APPROVAL_CHANNEL_ID, "待审批操作", NotificationManager.IMPORTANCE_DEFAULT);
-    channel.setDescription("Agent 等待你授权时提醒");
     NotificationManager manager = getSystemService(NotificationManager.class);
-    if (manager != null) manager.createNotificationChannel(channel);
+    if (manager == null) return;
+    NotificationChannel approvals = new NotificationChannel(APPROVAL_CHANNEL_ID, "待审批操作", NotificationManager.IMPORTANCE_DEFAULT);
+    approvals.setDescription("Agent 等待你授权时提醒");
+    manager.createNotificationChannel(approvals);
+    NotificationChannel status = new NotificationChannel(STATUS_CHANNEL_ID, "任务状态", NotificationManager.IMPORTANCE_DEFAULT);
+    status.setDescription("任务完成、失败等状态提醒");
+    manager.createNotificationChannel(status);
+  }
+
+  private void showStatusNotification(String title, String body) {
+    if (isForeground) return;
+    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return;
+    Intent launch = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+    PendingIntent content = PendingIntent.getActivity(this, 1, launch, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    NotificationManager manager = getSystemService(NotificationManager.class);
+    if (manager == null) return;
+    android.app.Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+      ? new android.app.Notification.Builder(this, STATUS_CHANNEL_ID)
+      : new android.app.Notification.Builder(this);
+    builder.setSmallIcon(android.R.drawable.stat_notify_more)
+      .setContentTitle(title == null || title.isEmpty() ? "Switchyard" : title)
+      .setContentText(body == null ? "" : body)
+      .setContentIntent(content)
+      .setAutoCancel(true);
+    manager.notify((int) (System.currentTimeMillis() & 0x0fffffff), builder.build());
+  }
+
+  private void sharePlainText(String title, String text) {
+    Intent intent = new Intent(Intent.ACTION_SEND);
+    intent.setType("text/plain");
+    intent.putExtra(Intent.EXTRA_SUBJECT, title == null ? "Switchyard" : title);
+    intent.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+    startActivity(Intent.createChooser(intent, "分享"));
+  }
+
+  private void copyPlainText(String text) {
+    ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+    if (clipboard == null) {
+      Toast.makeText(this, "无法访问剪贴板", Toast.LENGTH_SHORT).show();
+      return;
+    }
+    clipboard.setPrimaryClip(ClipData.newPlainText("Switchyard", text == null ? "" : text));
   }
 
   private void startApprovalLoop() {
@@ -508,8 +577,19 @@ public final class MainActivity extends Activity {
   }
 
   @Override public void onBackPressed() {
-    if (webView != null && webView.canGoBack()) webView.goBack();
-    else super.onBackPressed();
+    if (webView == null) {
+      super.onBackPressed();
+      return;
+    }
+    // 优先交给前端：关闭浮层 / 详情返回会话列表；未处理时再走 WebView 历史或退出。
+    webView.evaluateJavascript(
+      "(function(){try{return window.SwitchyardHandleBack&&window.SwitchyardHandleBack()?'1':'0';}catch(e){return '0';}})()",
+      value -> runOnUiThread(() -> {
+        if ("\"1\"".equals(value) || "1".equals(value)) return;
+        if (webView.canGoBack()) webView.goBack();
+        else MainActivity.super.onBackPressed();
+      })
+    );
   }
 
   private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density); }
@@ -531,6 +611,19 @@ public final class MainActivity extends Activity {
     @JavascriptInterface public void editPairingLink() { runOnUiThread(() -> beginPairingEdit()); }
     @JavascriptInterface public void downloadAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, false); }
     @JavascriptInterface public void openAsset(String id, String name, String mimeType) { fetchAsset(id, name, mimeType, true); }
-    @JavascriptInterface public void openExternalUrl(String url) { runOnUiThread(() -> openExternalUrl(url)); }
+    // 必须显式限定到外层 Activity：同名方法在内部类里会解析成自身，造成无限
+    // 递归 → StackOverflowError → 点链接即闪退。
+    @JavascriptInterface public void openExternalUrl(String url) {
+      runOnUiThread(() -> MainActivity.this.openExternalUrl(url));
+    }
+    @JavascriptInterface public void shareText(String title, String text) {
+      runOnUiThread(() -> MainActivity.this.sharePlainText(title, text));
+    }
+    @JavascriptInterface public void copyText(String text) {
+      runOnUiThread(() -> MainActivity.this.copyPlainText(text));
+    }
+    @JavascriptInterface public void showNotification(String title, String body) {
+      runOnUiThread(() -> MainActivity.this.showStatusNotification(title, body));
+    }
   }
 }

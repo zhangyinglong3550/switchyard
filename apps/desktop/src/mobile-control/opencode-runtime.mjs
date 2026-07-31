@@ -1,13 +1,15 @@
-import { spawn as spawnChild } from "node:child_process";
+import { spawn as spawnChild, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 import { createAcpClient } from "./acp-client.mjs";
 import { toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
 
 const STORAGE_ROOT = path.join(os.homedir(), ".local", "share", "opencode", "storage");
+const DEFAULT_DB_PATH = path.join(os.homedir(), ".local", "share", "opencode", "opencode.db");
 
 function openCodeCapabilityConfig() {
   try {
@@ -87,7 +89,114 @@ function splitThinkingText(value) {
   return parts.filter((part) => part.text);
 }
 
-function localOpenCodeMessages(sessionId, storageRoot = STORAGE_ROOT) {
+function projectOpenCodeParts(message, parts = []) {
+  const rows = [];
+  const role = message?.role === "user" ? "user" : "assistant";
+  for (const part of parts) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "text" && String(part.text || "").trim()) {
+      for (const split of splitThinkingText(part.text)) {
+        rows.push({
+          role: split.kind === "thinking" ? "assistant" : role,
+          text: split.text,
+          kind: split.kind
+        });
+      }
+    } else if (part.type === "reasoning" && String(part.text || "").trim()) {
+      rows.push({ role: "assistant", text: String(part.text), kind: "thinking" });
+    } else if (part.type === "tool") {
+      const tool = toolFrom(part);
+      rows.push(toolMessage(tool, tool.title || tool.name));
+    }
+  }
+  return rows;
+}
+
+function loadBetterSqlite() {
+  try {
+    return createRequire(import.meta.url)("better-sqlite3");
+  } catch {
+    return null;
+  }
+}
+
+function queryOpenCodeDbViaCli(dbPath, sessionId) {
+  const run = (sql) => {
+    const result = spawnSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+    if (result.status !== 0) throw new Error(result.stderr || "sqlite3 failed");
+    const text = String(result.stdout || "").trim();
+    return text ? JSON.parse(text) : [];
+  };
+  const sid = String(sessionId).replace(/'/g, "''");
+  return {
+    messages: run(`SELECT id, data, time_created AS created FROM message WHERE session_id='${sid}' ORDER BY time_created ASC, id ASC;`),
+    parts: run(`SELECT message_id AS messageId, data, time_created AS created, id FROM part WHERE session_id='${sid}' ORDER BY time_created ASC, id ASC;`)
+  };
+}
+
+function queryOpenCodeDb(dbPath, sessionId) {
+  const BetterSqlite = loadBetterSqlite();
+  if (BetterSqlite) {
+    try {
+      const db = new BetterSqlite(dbPath, { readonly: true, fileMustExist: true });
+      try {
+        const messages = db.prepare(`
+          SELECT id, data, time_created AS created
+          FROM message
+          WHERE session_id = ?
+          ORDER BY time_created ASC, id ASC
+        `).all(String(sessionId));
+        const parts = db.prepare(`
+          SELECT message_id AS messageId, data, time_created AS created, id
+          FROM part
+          WHERE session_id = ?
+          ORDER BY time_created ASC, id ASC
+        `).all(String(sessionId));
+        return { messages, parts };
+      } finally {
+        db.close();
+      }
+    } catch {
+      // Electron ABI 与当前 Node 不一致时回退 CLI。
+    }
+  }
+  return queryOpenCodeDbViaCli(dbPath, sessionId);
+}
+
+/** OpenCode 1.18+ 把消息落到 opencode.db；旧版仍用 storage/message JSON。 */
+export function readOpenCodeDbMessages(sessionId, dbPath = DEFAULT_DB_PATH) {
+  if (!sessionId || !fs.existsSync(dbPath)) return null;
+  let rows;
+  try { rows = queryOpenCodeDb(dbPath, sessionId); }
+  catch { return null; }
+  const messages = Array.isArray(rows?.messages) ? rows.messages : [];
+  const parts = Array.isArray(rows?.parts) ? rows.parts : [];
+  if (!messages.length) return [];
+  const partsByMessage = new Map();
+  for (const row of parts) {
+    let data = row.data;
+    if (typeof data === "string") {
+      try { data = JSON.parse(data); } catch { continue; }
+    }
+    if (!data || typeof data !== "object") continue;
+    const key = String(row.messageId || row.message_id || "");
+    if (!key) continue;
+    if (!partsByMessage.has(key)) partsByMessage.set(key, []);
+    partsByMessage.get(key).push(data);
+  }
+  const projected = [];
+  for (const row of messages) {
+    let data = row.data;
+    if (typeof data === "string") {
+      try { data = JSON.parse(data); } catch { continue; }
+    }
+    if (!data || typeof data !== "object") continue;
+    projected.push(...projectOpenCodeParts(data, partsByMessage.get(String(row.id)) || []));
+  }
+  return projected.slice(-500);
+}
+
+function localOpenCodeMessagesFromJson(sessionId, storageRoot = STORAGE_ROOT) {
   const messageRoot = path.join(storageRoot, "message", String(sessionId));
   const partRoot = path.join(storageRoot, "part");
   if (!fs.existsSync(messageRoot)) return [];
@@ -101,25 +210,16 @@ function localOpenCodeMessages(sessionId, storageRoot = STORAGE_ROOT) {
     let partFiles = [];
     try { partFiles = fs.readdirSync(partsDir).filter((name) => name.endsWith(".json")); } catch { continue; }
     const parts = partFiles.map((name) => safeJson(path.join(partsDir, name))).filter(Boolean)
-      .sort((a, b) => Number(a.time?.start || 0) - Number(b.time?.start || 0));
-    for (const part of parts) {
-      if (part.type === "text" && String(part.text || "").trim()) {
-        for (const split of splitThinkingText(part.text)) {
-          rows.push({
-            role: split.kind === "thinking" ? "assistant" : message.role === "user" ? "user" : "assistant",
-            text: split.text,
-            kind: split.kind
-          });
-        }
-      } else if (part.type === "reasoning" && String(part.text || "").trim()) {
-        rows.push({ role: "assistant", text: String(part.text), kind: "thinking" });
-      } else if (part.type === "tool") {
-        const tool = toolFrom(part);
-        rows.push(toolMessage(tool, tool.title || tool.name));
-      }
-    }
+      .sort((a, b) => Number(a.time?.start || a.time?.created || 0) - Number(b.time?.start || b.time?.created || 0));
+    rows.push(...projectOpenCodeParts(message, parts));
   }
   return rows.slice(-500);
+}
+
+function localOpenCodeMessages(sessionId, storageRoot = STORAGE_ROOT, dbPath = DEFAULT_DB_PATH) {
+  const fromDb = readOpenCodeDbMessages(sessionId, dbPath);
+  if (Array.isArray(fromDb) && fromDb.length) return fromDb;
+  return localOpenCodeMessagesFromJson(sessionId, storageRoot);
 }
 
 function normalizeSession(row, capabilities) {
@@ -176,7 +276,7 @@ function runJson(binary, args, { cwd, env, spawnProcess }) {
  * Use its native `opencode run --session` transport for restore/continuation,
  * while retaining ACP only for synchronous session allocation and forking.
  */
-export function createOpenCodeRuntime({ client, overlay, command, env, spawnProcess = spawnChild, storageRoot = STORAGE_ROOT } = {}) {
+export function createOpenCodeRuntime({ client, overlay, command, env, spawnProcess = spawnChild, storageRoot = STORAGE_ROOT, dbPath = DEFAULT_DB_PATH } = {}) {
   const binary = command || process.env.SWITCHYARD_OPENCODE_BINARY || "opencode";
   const runtimeEnv = () => {
     const capabilityConfig = openCodeCapabilityConfig();
@@ -298,12 +398,20 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       id: sid, agentId: "opencode", name: sid, state: "completed", updatedAt: null,
       model: "", directory: "", project: "", archived: false, capabilities: { ...capabilities }
     };
-    const messages = localOpenCodeMessages(sid, storageRoot);
+    // 新建会话的公开 id 是 mobile-opencode-*，真实落盘 id 是 ses_*。
+    const nativeId = nativeSessionIds.get(sid) || sid;
+    let messages = localOpenCodeMessages(nativeId, storageRoot, dbPath);
+    if (!messages.length && nativeId !== sid) messages = localOpenCodeMessages(sid, storageRoot, dbPath);
     // Recent OpenCode releases may persist completed turns asynchronously.
     // Keep a lightweight in-memory tail so the phone immediately reflects a
     // successfully finished native `run --session` turn.
-    const ephemeral = runtimeMessages.get(sid) || [];
-    return { ...session, messages: [...messages, ...ephemeral].slice(-500) };
+    const ephemeral = [
+      ...(runtimeMessages.get(sid) || []),
+      ...(nativeId !== sid ? (runtimeMessages.get(nativeId) || []) : [])
+    ];
+    // 磁盘已有完整历史时不再叠内存尾，避免重开出现重复气泡。
+    const merged = messages.length ? messages : ephemeral;
+    return { ...session, messages: merged.slice(-500) };
   };
 
   const createSession = async ({ cwd, model } = {}) => {

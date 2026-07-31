@@ -26,7 +26,7 @@ test("mobile approval permits a non-dangerous one-shot command outside the legac
   assert.equal(result.mobileAllowed, true);
   assert.equal(result.requiresDesktop, false);
   assert.equal(result.summary, "一次性执行请求");
-  assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(result.actions, ["allow_once", "allow_session", "deny_once"]);
 });
 
 test("mobile approval permits one-shot privileged and destructive commands", () => {
@@ -39,7 +39,7 @@ test("mobile approval permits one-shot privileged and destructive commands", () 
     const result = classifyMobileApproval({ command, options });
     assert.equal(result.mobileAllowed, true, command);
     assert.equal(result.requiresDesktop, false, command);
-    assert.deepEqual(result.actions, ["allow_once", "deny_once"], command);
+    assert.deepEqual(result.actions, ["allow_once", "allow_session", "deny_once"], command);
   }
 });
 
@@ -50,13 +50,13 @@ test("mobile approval permits every Codex app-server approval type", () => {
   });
   assert.equal(result.mobileAllowed, true);
   assert.equal(result.requiresDesktop, false);
-  assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(result.actions, ["allow_once", "allow_session", "deny_once"]);
 });
 
 test("mobile approval never offers permanent allow", () => {
   const result = classifyMobileApproval({ command: "npm test", options });
   assert.equal(result.permanentOptionId, null);
-  assert.deepEqual(result.actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(result.actions, ["allow_once", "allow_session", "deny_once"]);
 });
 
 test("mobile approval redacts credentials in the displayed detail", () => {

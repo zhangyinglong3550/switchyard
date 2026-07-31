@@ -45,8 +45,32 @@ test("Android launcher uses the checked-in desktop Switchyard icon", () => {
   }
 });
 
-test("Android WebView bypasses stale mobile UI caches after app updates", () => {
+test("Android WebView never serves stale mobile UI after app updates", () => {
   const activity = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
-  assert.match(activity, /setCacheMode\(android\.webkit\.WebSettings\.LOAD_NO_CACHE\)/);
-  assert.match(activity, /clearCache\(true\)/);
+  const server = fs.readFileSync(path.join(repositoryRoot, "apps/desktop/src/mobile-control/server.mjs"), "utf8");
+  const worker = fs.readFileSync(path.join(repositoryRoot, "apps/mobile/sw.js"), "utf8");
+  // Freshness is owned by two layers: the desktop serves the UI with
+  // cache-control: no-store (the WebView HTTP cache cannot go stale at any
+  // cache mode), and the Service Worker versions its own cache. Clearing the
+  // WebView cache on every launch only slowed startup.
+  assert.match(server, /"cache-control": "no-store"/);
+  assert.match(worker, /skipWaiting\(\)/);
+  assert.match(worker, /clients\.claim\(\)/);
+  assert.doesNotMatch(activity, /LOAD_NO_CACHE/);
+  assert.doesNotMatch(activity, /clearCache\(true\)/);
+});
+
+test("Android shell resizes the WebView when the keyboard opens", () => {
+  const manifest = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/src/main/AndroidManifest.xml"), "utf8");
+  assert.match(manifest, /android:windowSoftInputMode="adjustResize"/);
+});
+
+test("Android native bridge opens external links without recursive self-call", () => {
+  const activity = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
+  const manifest = fs.readFileSync(path.join(repositoryRoot, "apps/android/app/src/main/AndroidManifest.xml"), "utf8");
+  // 同名桥方法若写 runOnUiThread(() -> openExternalUrl(url))，会解析成自身递归闪退。
+  assert.match(activity, /MainActivity\.this\.openExternalUrl\(url\)/);
+  assert.doesNotMatch(activity, /@JavascriptInterface public void openExternalUrl\(String url\) \{\s*runOnUiThread\(\(\) -> openExternalUrl\(url\)\);/);
+  assert.match(manifest, /android\.intent\.action\.VIEW/);
+  assert.match(manifest, /android:scheme="https"/);
 });

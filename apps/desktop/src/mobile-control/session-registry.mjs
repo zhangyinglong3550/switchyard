@@ -197,6 +197,22 @@ export function createSessionRegistry({
       const mobileSessionId = encodeMobileSessionId(runtime.id, event.sessionId);
       if (event.type === "approval" && event.requestId !== undefined) {
         const policy = classifyMobileApproval(event.request || {});
+        const overlay = store.getOverlay(mobileSessionId) || {};
+        // 会话内自动允许：只在本机 Switchyard overlay 生效，不向 Agent 申请永久授权。
+        if (policy.mobileAllowed && overlay.autoApproveSession) {
+          if (policy.protocol === "codex") {
+            runtime.respond?.(event.requestId, { decision: "accept" });
+          } else if (policy.allowOptionId) {
+            runtime.respond?.(event.requestId, { outcome: { outcome: "selected", optionId: policy.allowOptionId } });
+          }
+          detailCache.delete(mobileSessionId);
+          ledger.append({
+            sessionId: mobileSessionId,
+            type: "approval",
+            summary: "会话内已自动允许"
+          });
+          return;
+        }
         const id = `approval_${randomUUID()}`;
         pendingApprovals.set(id, {
           id,
@@ -251,12 +267,12 @@ export function createSessionRegistry({
         })
       }));
       const terminalState = String(event.summary || "").toLowerCase();
-      const ended = ["completed", "failed", "cancelled", "canceled", "incomplete"].includes(terminalState) || event.type === "error";
+      const ended = ["completed", "failed", "cancelled", "canceled", "incomplete", "end_turn", "stop", "max_tokens", "length"].includes(terminalState) || event.type === "error";
       if (ended) {
         activeSessions.delete(mobileSessionId);
         detailCache.delete(mobileSessionId);
         sessionsCache.clear();
-        if (terminalState === "completed") void dispatchNext(mobileSessionId);
+        if (["completed", "end_turn", "stop", "max_tokens", "length"].includes(terminalState)) void dispatchNext(mobileSessionId);
       }
     });
   }
@@ -474,6 +490,8 @@ export function createSessionRegistry({
         ...detail,
         id: mobileSessionId,
         agentId: runtime.id,
+        nativeId,
+        directory: workspaceRoot || detail.directory || detail.cwd || "",
         model: store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id) || detail.model,
         capabilities: detail.capabilities || runtime.capabilities
       }, store.getOverlay(mobileSessionId)),
@@ -764,7 +782,7 @@ export function createSessionRegistry({
       const remembered = store.rememberMobileMessage({ sessionId: mobileSessionId, messageId: item.messageId, text: item.text, attachments: item.attachments || [] });
       detailCache.delete(mobileSessionId);
       if (!remembered.duplicate) {
-        ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
+        ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, messageId: item.messageId, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
       }
       ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
       void Promise.resolve().then(() => runtime.sendMessage(nativeId, {
@@ -777,7 +795,13 @@ export function createSessionRegistry({
         if (error?.code === "CODEX_DESKTOP_SYNC_UNAVAILABLE") {
           store.prependQueueItem?.({ sessionId: mobileSessionId, ...item });
           setQueuePaused(mobileSessionId, true);
-          ledger.append({ sessionId: mobileSessionId, type: "status", summary: "桌面 Codex 暂未提供共享连接，消息已保留；重新打开桌面会话后可在手机继续发送" });
+          // 用户气泡已乐观写入手机账本，但原生 turn 未开始——明确标成未送达，避免以为桌面已收到。
+          ledger.append({
+            sessionId: mobileSessionId,
+            type: "status",
+            summary: "未送达桌面 Codex：共享连接不可用，消息已退回待发送队列。请先在桌面打开该会话，再点「继续发送」。"
+          });
+          ledger.append({ sessionId: mobileSessionId, type: "status", summary: "queued" });
           return;
         }
         ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
@@ -864,6 +888,11 @@ export function createSessionRegistry({
     if (action === "archive") { if (typeof runtime.archive === "function") await runtime.archive(nativeId); store.patchOverlay(mobileSessionId, { archived: true }); sessionsCache.clear(); detailCache.delete(mobileSessionId); return { ok: true }; }
     if (action === "unarchive") { if (typeof runtime.unarchive === "function") await runtime.unarchive(nativeId); store.patchOverlay(mobileSessionId, { archived: false }); sessionsCache.clear(); detailCache.delete(mobileSessionId); return { ok: true }; }
     if (action === "pin") { store.patchOverlay(mobileSessionId, { pinned: Boolean(payload.pinned) }); return { ok: true }; }
+    if (action === "autoApprove") {
+      store.patchOverlay(mobileSessionId, { autoApproveSession: Boolean(payload.enabled) });
+      detailCache.delete(mobileSessionId);
+      return { ok: true, autoApproveSession: Boolean(payload.enabled) };
+    }
     if (action === "cancel" && typeof runtime.cancel === "function") {
       const clearQueue = payload.clearQueue !== false;
       await runtime.cancel(nativeId);
@@ -944,8 +973,13 @@ export function createSessionRegistry({
   const resolveApproval = async (approvalId, decision) => {
     const approval = pendingApprovals.get(String(approvalId || ""));
     if (!approval || !approval.mobileAllowed) throw new Error("审批不存在或当前 Agent 未提供可执行的审批选项");
+    const allowLike = decision === "allow_once" || decision === "allow_session";
+    if (decision === "allow_session") {
+      store.patchOverlay(approval.sessionId, { autoApproveSession: true });
+      detailCache.delete(approval.sessionId);
+    }
     if (approval.protocol === "codex") {
-      const codexDecision = decision === "allow_once"
+      const codexDecision = allowLike
         ? "accept"
         : decision === "deny_once"
           ? "decline"
@@ -953,7 +987,7 @@ export function createSessionRegistry({
       if (!codexDecision) throw new Error("审批决定无效");
       approval.runtime.respond?.(approval.requestId, { decision: codexDecision });
     } else {
-      const optionId = decision === "allow_once"
+      const optionId = allowLike
         ? approval.allowOptionId
         : decision === "deny_once"
           ? approval.rejectOptionId
@@ -964,10 +998,15 @@ export function createSessionRegistry({
       });
     }
     pendingApprovals.delete(approval.id);
+    const summary = decision === "allow_session"
+      ? "手机端已允许，并开启本会话自动审批"
+      : decision === "allow_once"
+        ? "手机端已允许一次"
+        : "手机端已拒绝一次";
     ledger.append({
       sessionId: approval.sessionId,
       type: "approval",
-      summary: decision === "allow_once" ? "手机端已允许一次" : "手机端已拒绝一次"
+      summary
     });
     return { ok: true };
   };

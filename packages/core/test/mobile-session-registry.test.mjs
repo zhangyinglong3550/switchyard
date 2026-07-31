@@ -167,7 +167,9 @@ test("registry lists projected sessions and only returns enabled client-visible 
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].agent, "codex");
   assert.equal(sessions[0].project, "demo");
-  assert.doesNotMatch(JSON.stringify(sessions[0]), /Users/);
+  // 工作区路径会原样下发供手机复制；其余字段仍应避免泄漏本机绝对路径。
+  assert.equal(sessions[0].directory, "/Users/a/code/demo");
+  assert.doesNotMatch(JSON.stringify({ ...sessions[0], directory: "" }), /Users/);
 
   const models = registry.availableModels("codex");
   assert.deepEqual(models, [{
@@ -328,7 +330,10 @@ test("registry converts tool file paths into safe clickable file references", as
 
   const detail = await registry.readSession(encodeMobileSessionId("codex", "native-1"));
   assert.equal(detail.messages[0].tool.files[0].name, "app.js");
-  assert.doesNotMatch(JSON.stringify(detail), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(detail.directory, root);
+  assert.equal(detail.nativeId, "native-1");
+  // 工具附件路径应走 asset id，不应把本机绝对路径泄漏进消息内容。
+  assert.doesNotMatch(JSON.stringify({ ...detail, directory: "" }), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(registry.resolveAsset(detail.messages[0].tool.files[0].id).path, file);
 });
 
@@ -474,7 +479,7 @@ test("registry exposes one-shot ACP approvals to mobile", async (t) => {
   });
   const approvals = registry.listApprovals();
   assert.equal(approvals.length, 1);
-  assert.deepEqual(approvals[0].actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(approvals[0].actions, ["allow_once", "allow_session", "deny_once"]);
   assert.equal(approvals[0].detail.label, "将执行的命令");
   assert.equal(approvals[0].detail.content, "git status --short");
   assert.doesNotMatch(JSON.stringify(approvals[0]), /allow_always/);
@@ -511,9 +516,9 @@ test("registry exposes every Codex approval for one-shot mobile resolution", asy
 
   const approvals = registry.listApprovals();
   assert.equal(approvals.length, 2);
-  assert.deepEqual(approvals[0].actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(approvals[0].actions, ["allow_once", "allow_session", "deny_once"]);
   assert.equal(approvals[0].requiresDesktop, false);
-  assert.deepEqual(approvals[1].actions, ["allow_once", "deny_once"]);
+  assert.deepEqual(approvals[1].actions, ["allow_once", "allow_session", "deny_once"]);
   assert.equal(approvals[1].requiresDesktop, false);
 
   await registry.resolveApproval(approvals[1].id, "allow_once");

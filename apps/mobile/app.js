@@ -1,10 +1,9 @@
-import { notificationStateLabel, parseStructuredNotification } from "./structured-notification.mjs?v=68";
+import { notificationStateLabel, splitStructuredContent } from "./structured-notification.mjs?v=82";
 
 const $ = (selector) => document.querySelector(selector);
 const TOKEN_KEY = "switchyard_mobile_token";
 const CURSOR_KEY = "switchyard_mobile_event_cursor";
 const PREFERENCES_KEY = "switchyard_mobile_preferences";
-const GROUP_STATE_KEY = "switchyard_mobile_group_states";
 const PINNED_PROJECTS_KEY = "switchyard_mobile_pinned_projects";
 function hasNativeTokenStore() {
   try { return typeof window.SwitchyardNative?.getToken === "function"; } catch { return false; }
@@ -38,6 +37,19 @@ function persistToken(value) {
 }
 let token = hasNativeTokenStore() ? nativeToken() : (localStorage.getItem(TOKEN_KEY) || "");
 let eventCursor = Number(localStorage.getItem(CURSOR_KEY) || 0);
+let cursorPersistTimer = null;
+function schedulePersistEventCursor() {
+  // 流式事件高频到达，而 localStorage 是同步 IO；防抖落盘避免阻塞主线程。
+  if (cursorPersistTimer) return;
+  cursorPersistTimer = setTimeout(() => {
+    cursorPersistTimer = null;
+    try { localStorage.setItem(CURSOR_KEY, String(eventCursor)); } catch {}
+  }, 400);
+}
+function flushEventCursor() {
+  if (cursorPersistTimer) { clearTimeout(cursorPersistTimer); cursorPersistTimer = null; }
+  try { localStorage.setItem(CURSOR_KEY, String(eventCursor)); } catch {}
+}
 let current = null;
 let agents = [];
 let sessions = [];
@@ -61,17 +73,17 @@ let pullRefreshDistance = 0;
 function localStringSet(key) {
   try { return new Set(JSON.parse(localStorage.getItem(key) || "[]").filter((value) => typeof value === "string")); } catch { return new Set(); }
 }
-function localGroupStates() {
-  try { const value = JSON.parse(localStorage.getItem(GROUP_STATE_KEY) || "{}"); return value && typeof value === "object" ? value : {}; } catch { return {}; }
-}
-let groupStates = localGroupStates();
+// 工作区展开状态只保存在本次浏览内存中；每次进入会话列表都从折叠开始。
+try { localStorage.removeItem("switchyard_mobile_group_states"); } catch {}
+let groupStates = {};
 const pinnedProjects = localStringSet(PINNED_PROJECTS_KEY);
-function isGroupCollapsed(name) { return groupStates[name] === true; }
-function setGroupCollapsed(name, collapsed) { groupStates[name] = Boolean(collapsed); localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupStates)); }
+function isGroupCollapsed(name) { return groupStates[name] !== false; }
+function setGroupCollapsed(name, collapsed) { groupStates[name] = Boolean(collapsed); }
+function resetGroupExpandState() { groupStates = {}; }
 function setProjectPinned(name, pinned) { if (pinned) pinnedProjects.add(name); else pinnedProjects.delete(name); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
 function renameProjectPreferences(oldName, newName) {
   if (oldName === newName) return;
-  if (Object.hasOwn(groupStates, oldName)) { groupStates[newName] = groupStates[oldName]; delete groupStates[oldName]; localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupStates)); }
+  if (Object.hasOwn(groupStates, oldName)) { groupStates[newName] = groupStates[oldName]; delete groupStates[oldName]; }
   if (pinnedProjects.delete(oldName)) { pinnedProjects.add(newName); localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...pinnedProjects])); }
 }
 let eventLoopStopped = false;
@@ -98,9 +110,27 @@ const DENSITY_KEY = "switchyard_mobile_density";
 const DENSITY_ORDER = ["comfortable", "compact"];
 let unseenMessageCount = 0;
 let activeApprovalId = "";
-const THEME_ORDER = ["system", "light", "dark"];
-function currentTheme() { const value = localStorage.getItem(THEME_KEY) || "system"; return THEME_ORDER.includes(value) ? value : "system"; }
-function themeLabel(theme = currentTheme()) { return ({ system: "跟随系统", light: "浅色", dark: "深色" })[theme]; }
+const THEME_ALIASES = { light: "paper", dark: "ink" };
+const THEME_DEFS = {
+  system: { label: "跟随系统", hint: "自动适配", scheme: null, meta: null, swatch: { bg: "linear-gradient(135deg,#f7f4ef 50%,#1b1915 50%)", card: "transparent", accent: "#c2622f" } },
+  paper: { label: "暖纸", hint: "米黄浅色", scheme: "light", meta: "#f7f4ef", swatch: { bg: "#f7f4ef", card: "#ffffff", accent: "#c2622f" } },
+  slate: { label: "青石", hint: "冷灰浅色", scheme: "light", meta: "#f3f5f8", swatch: { bg: "#f3f5f8", card: "#ffffff", accent: "#3d6f99" } },
+  matcha: { label: "抹茶", hint: "柔和绿色", scheme: "light", meta: "#f2f5ef", swatch: { bg: "#f2f5ef", card: "#ffffff", accent: "#4f7a4a" } },
+  ink: { label: "墨夜", hint: "暖纸深色", scheme: "dark", meta: "#1b1915", swatch: { bg: "#1b1915", card: "#26231d", accent: "#d98a55" } },
+  midnight: { label: "午夜", hint: "冷蓝深色", scheme: "dark", meta: "#121820", swatch: { bg: "#121820", card: "#1a2230", accent: "#5b9fd4" } },
+};
+const THEME_ORDER = Object.keys(THEME_DEFS);
+function normalizeTheme(value) {
+  const raw = THEME_ALIASES[value] || value;
+  return THEME_ORDER.includes(raw) ? raw : "system";
+}
+function currentTheme() { return normalizeTheme(localStorage.getItem(THEME_KEY) || "system"); }
+function themeLabel(theme = currentTheme()) { return THEME_DEFS[theme]?.label || "跟随系统"; }
+function resolvedThemeId(theme = currentTheme()) {
+  if (theme !== "system") return theme;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "ink" : "paper";
+}
+function themeScheme(themeId = resolvedThemeId()) { return THEME_DEFS[themeId]?.scheme || "light"; }
 function currentDensity() { const value = localStorage.getItem(DENSITY_KEY) || "comfortable"; return DENSITY_ORDER.includes(value) ? value : "comfortable"; }
 function densityLabel(value = currentDensity()) { return value === "compact" ? "紧凑" : "舒适"; }
 function applyDensity() {
@@ -108,15 +138,37 @@ function applyDensity() {
   const label = $("#density-label"); if (label) label.textContent = densityLabel();
 }
 function applyTheme() {
-  const theme = currentTheme();
-  const resolved = theme === "system"
-    ? (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-    : theme;
+  const preference = currentTheme();
+  const resolved = resolvedThemeId(preference);
+  const scheme = themeScheme(resolved);
   document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = resolved;
+  document.documentElement.dataset.scheme = scheme;
+  document.documentElement.style.colorScheme = scheme;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = resolved === "dark" ? "#1b1915" : "#f7f4ef";
-  const label = $("#theme-label"); if (label) label.textContent = themeLabel();
+  if (meta) meta.content = THEME_DEFS[resolved]?.meta || (scheme === "dark" ? "#1b1915" : "#f7f4ef");
+  const label = $("#theme-label"); if (label) label.textContent = themeLabel(preference);
+  renderThemeSheet();
+}
+function hideThemeSheet() { setSheetVisible("#theme-sheet", false); }
+function showThemeSheet() { renderThemeSheet(); setSheetVisible("#theme-sheet", true); }
+function renderThemeSheet() {
+  const grid = $("#theme-grid"); if (!grid) return;
+  const selected = currentTheme();
+  grid.innerHTML = THEME_ORDER.map((id) => {
+    const def = THEME_DEFS[id];
+    const swatch = def.swatch || {};
+    return `<button type="button" class="theme-option${id === selected ? " selected" : ""}" data-theme-choice="${id}" aria-pressed="${id === selected}">
+      <span class="theme-swatch" style="--swatch-bg:${swatch.bg};--swatch-card:${swatch.card};--swatch-accent:${swatch.accent}"><span></span><i></i></span>
+      <strong>${escapeHtml(def.label)}</strong><small>${escapeHtml(def.hint || "")}</small>
+    </button>`;
+  }).join("");
+}
+function selectTheme(theme) {
+  const next = normalizeTheme(theme);
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme();
+  hideThemeSheet();
+  toast(`外观已切换为${themeLabel(next)}`);
 }
 window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (currentTheme() === "system") applyTheme(); });
 function lastTaskPrefs() { try { return JSON.parse(localStorage.getItem(LAST_TASK_KEY) || "{}") || {}; } catch { return {}; } }
@@ -147,6 +199,242 @@ function setConnectionStatus(text, ok = true) {
   }
 }
 function toast(message) { const el = $("#toast"); el.textContent = message; el.classList.add("toast-show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("toast-show"), 2900); }
+
+let pendingQuote = "";
+let messageActionTarget = null;
+
+function nativeCopyText(text) {
+  try {
+    if (typeof window.SwitchyardNative?.copyText === "function") {
+      window.SwitchyardNative.copyText(String(text || ""));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function copyText(value, success = "已复制") {
+  const text = String(value || "");
+  if (!text) { toast("没有可复制的内容"); return false; }
+  // Android WebView 优先走原生剪贴板，避免 clipboard API 权限/焦点导致静默失败。
+  if (nativeCopyText(text)) { toast(success); return true; }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      toast(success);
+      return true;
+    }
+  } catch {}
+  try {
+    const area = document.createElement("textarea");
+    area.value = text; area.setAttribute("readonly", ""); area.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.appendChild(area); area.focus(); area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    if (ok) { toast(success); return true; }
+  } catch {}
+  toast("复制失败");
+  return false;
+}
+
+function nativeShareText(title, text) {
+  try {
+    if (typeof window.SwitchyardNative?.shareText === "function") {
+      window.SwitchyardNative.shareText(String(title || "Switchyard"), String(text || ""));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function nativeNotify(title, body) {
+  try {
+    if (document.hidden && typeof window.SwitchyardNative?.showNotification === "function") {
+      window.SwitchyardNative.showNotification(String(title || "Switchyard"), String(body || ""));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function shareOrCopyText(title, text, success = "已复制到剪贴板") {
+  const body = String(text || "");
+  if (!body.trim()) { toast("没有可分享的内容"); return false; }
+  if (nativeShareText(title, body)) { toast("已打开系统分享"); return true; }
+  if (navigator.share) {
+    try { await navigator.share({ title: String(title || "Switchyard"), text: body }); return true; } catch {}
+  }
+  return copyText(body, success);
+}
+
+function sessionCapability(name) {
+  return Boolean(current?.capabilities?.[name]);
+}
+
+function decodeNativeSessionId(mobileId = current?.id) {
+  if (current?.nativeId) return String(current.nativeId);
+  const raw = String(mobileId || "");
+  if (!raw.startsWith("ms_")) return "";
+  try {
+    const b64 = raw.slice(3).replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4 || 4)) % 4);
+    const parsed = JSON.parse(atob(padded));
+    return String(parsed.nativeId || "");
+  } catch { return ""; }
+}
+
+function renderSessionMenu() {
+  const menu = $("#session-menu");
+  if (!menu || !current) return;
+  const caps = current.capabilities || {};
+  const archived = Boolean(archivedView || current.archived);
+  const running = ["running", "queued", "waiting_for_approval", "waiting_for_input", "waiting_for_desktop_approval"].includes(current.state);
+  // 仅展示确定可用的操作。压缩上下文已放到输入框旁「对话设置」里。
+  const rows = [
+    `<button data-action="refresh" type="button">刷新当前对话</button>`,
+    `<button id="session-pin-action" data-action="pin" type="button">${current.pinned ? "取消置顶" : "置顶会话"}</button>`,
+    `<button data-action="rename" type="button">重命名</button>`,
+    archived
+      ? `<button data-action="unarchive" type="button">取消归档</button>`
+      : `<button data-action="archive" type="button">归档会话</button>`,
+    `<button data-action="copy-session-id" type="button">复制会话 ID</button>`,
+    decodeNativeSessionId() ? `<button data-action="copy-native-id" type="button">复制原生会话 ID</button>` : "",
+    current.directory ? `<button data-action="copy-directory" type="button">复制工作区路径</button>` : "",
+    `<button data-action="export-markdown" type="button">导出 Markdown</button>`,
+    caps.fork === true ? `<button data-action="fork" type="button">分叉会话</button>` : "",
+    current.autoApproveSession ? `<button data-action="autoApprove-off" type="button">关闭自动审批</button>` : "",
+    running && caps.cancel === true ? `<button data-action="cancel" type="button">停止会话</button>` : "",
+    `<button data-action="delete" class="danger-text" type="button">删除会话</button>`
+  ].filter(Boolean);
+  menu.innerHTML = rows.join("");
+}
+
+function messagesToMarkdown(rows = current?.messages || []) {
+  const title = current?.title || "会话";
+  const meta = [
+    `# ${title}`,
+    "",
+    `- Agent: ${agentLabel(current?.agent || "")}`,
+    current?.model ? `- Model: ${current.model}` : "",
+    current?.directory ? `- CWD: ${current.directory}` : "",
+    current?.id ? `- Session: ${current.id}` : "",
+    decodeNativeSessionId() ? `- Native: ${decodeNativeSessionId()}` : "",
+    "",
+    "---",
+    ""
+  ].filter(Boolean).join("\n");
+  const body = rows.map((message) => {
+    if (isToolMessage(message)) {
+      const tool = message.tool || {};
+      return `### 工具 · ${tool.title || tool.name || "tool"}\n\n\`\`\`\n${tool.command || tool.output || tool.arguments || ""}\n\`\`\`\n`;
+    }
+    if (message.kind === "thinking") return `<details><summary>思考摘要</summary>\n\n${message.text || ""}\n\n</details>\n`;
+    const role = message.role === "user" ? "用户" : "助手";
+    return `### ${role}\n\n${message.text || ""}\n`;
+  }).join("\n");
+  return `${meta}\n${body}`.trim() + "\n";
+}
+
+function setQuote(text) {
+  pendingQuote = String(text || "").trim();
+  const bar = $("#quote-bar");
+  const preview = $("#quote-preview");
+  if (!bar || !preview) return;
+  if (!pendingQuote) { bar.hidden = true; preview.textContent = ""; return; }
+  preview.textContent = pendingQuote.replace(/\s+/g, " ").slice(0, 120);
+  bar.hidden = false;
+}
+
+function withQuotePrefix(text) {
+  if (!pendingQuote) return text;
+  const quoted = pendingQuote.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
+  const next = `${quoted}\n\n${text || ""}`.trim();
+  setQuote("");
+  return next;
+}
+
+function hideMessageActionSheet() {
+  const sheet = $("#message-action-sheet");
+  if (!sheet) return;
+  sheet.hidden = true; sheet.style.display = "none"; sheet.setAttribute("aria-hidden", "true");
+  messageActionTarget = null;
+}
+
+function showMessageActionSheet(target) {
+  messageActionTarget = target;
+  const text = String(target?.text || "");
+  const preview = $("#message-action-preview");
+  if (preview) preview.textContent = firstLine(text).slice(0, 80) || "消息操作";
+  const actions = [
+    { id: "copy", label: "复制全文", hint: "纯文本" },
+    { id: "copy-md", label: "复制 Markdown", hint: "保留标题与代码围栏" },
+    { id: "quote", label: "引用回复", hint: "填入输入框引用块" }
+  ];
+  if (target?.role === "user") actions.push({ id: "edit-rerun", label: "编辑并重跑", hint: "分叉后发送修改内容" });
+  if (target?.role === "assistant") actions.push({ id: "share", label: "分享这条回复", hint: "系统分享或复制" });
+  $("#message-action-list").innerHTML = actions.map((item) => `<button type="button" data-message-action="${item.id}"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.hint)}</small></button>`).join("");
+  const sheet = $("#message-action-sheet");
+  sheet.hidden = false; sheet.style.display = ""; sheet.setAttribute("aria-hidden", "false");
+}
+
+function bindMessageLongPress() {
+  let timer = null; let startX = 0; let startY = 0; let node = null;
+  const clear = () => { clearTimeout(timer); timer = null; node = null; };
+  document.addEventListener("touchstart", (event) => {
+    const target = event.target.closest(".me[data-raw], .ai[data-raw], .turn-final[data-raw], .me .msg-body, .ai .msg-body");
+    if (!target || event.target.closest("a,button,pre,code,.tool,.execution-card,.think,.structured-notification")) return;
+    const bubble = target.closest(".me, .ai, .turn-final") || target;
+    const text = bubble.dataset.raw || bubble.querySelector(".msg-body")?.innerText || bubble.innerText || "";
+    if (!String(text).trim()) return;
+    node = bubble; startX = event.touches[0].clientX; startY = event.touches[0].clientY;
+    timer = setTimeout(() => {
+      const role = bubble.classList.contains("me") ? "user" : "assistant";
+      showMessageActionSheet({ role, text: String(text).trim() });
+      clear();
+    }, 420);
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (!timer || !node) return;
+    if (Math.abs(event.touches[0].clientX - startX) > 12 || Math.abs(event.touches[0].clientY - startY) > 12) clear();
+  }, { passive: true });
+  document.addEventListener("touchend", clear, { passive: true });
+  document.addEventListener("touchcancel", clear, { passive: true });
+}
+
+async function forkAndRerun(text) {
+  if (!current || !sessionCapability("fork")) {
+    // 无分叉能力时，直接把修改后的内容作为后续消息发送。
+    setQuote("");
+    $("#message").value = text;
+    autogrowTextarea($("#message"));
+    await submitComposerMessage("");
+    return;
+  }
+  const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/fork`, { method: "POST", body: "{}" });
+  const sessionId = result.sessionId || result.id;
+  if (!sessionId) throw new Error("分叉失败");
+  await openSession(sessionId);
+  $("#message").value = text;
+  autogrowTextarea($("#message"));
+  await submitComposerMessage("");
+  toast("已分叉并重跑");
+}
+
+function applySharedLaunchPayload(payload = {}) {
+  const text = String(payload.text || payload.title || "").trim();
+  if (!text && !payload.url) return;
+  page("new");
+  const prompt = $("#prompt");
+  if (prompt) {
+    prompt.value = [text, payload.url].filter(Boolean).join("\n\n");
+    autogrowTextarea(prompt, 260);
+  }
+  toast("已从系统分享填入任务");
+}
+
+window.__switchyardShareIn = (payload) => {
+  try { applySharedLaunchPayload(typeof payload === "string" ? JSON.parse(payload) : payload); } catch {}
+};
 
 // Android System WebView can lag behind Chrome and may not expose crypto.randomUUID().
 // A client message id is only used for local optimistic rendering/idempotency, so use
@@ -286,6 +574,8 @@ function page(name) {
   hideStopSessionSheet();
   hideMessageModeSheet();
   hideConversationBehaviorSheet();
+  hideThemeSheet();
+  hideMessageActionSheet();
   hideSessionDeleteSheet();
   closeInputSheet(null);
   if (name !== "sessions") { sessionSelectionMode = false; selectedSessionIds.clear(); }
@@ -295,6 +585,8 @@ function page(name) {
   // The list and settings pages share the document scroller with the chat.
   // Resetting it here prevents a just-opened list from inheriting the old
   // conversation's bottom scroll position.
+  if (name === "sessions") resetGroupExpandState();
+  if (name === "sessions") resetGroupExpandState();
   if (name !== "detail") window.scrollTo(0, 0);
 }
 
@@ -692,7 +984,7 @@ function renderApprovalSheet() {
   const session = allSessions.find((item) => item.id === approval.sessionId);
   const title = session?.title || approval.title || "待审批操作";
   const detail = approval.detail?.content ? `<section class="approval-detail"><span>${escapeHtml(approval.detail.label || "请求内容")}</span><pre>${escapeHtml(approval.detail.content)}</pre></section>` : "";
-  host.innerHTML = `<section class="approval-sheet-copy"><span class="approval-kicker">需要你的确认</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</p>${detail}</section><div class="approval-sheet-actions"><button type="button" data-approval="${escapeHtml(approval.id)}" data-decision="deny_once">拒绝</button><button type="button" class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once">允许一次</button></div>`;
+  host.innerHTML = `<section class="approval-sheet-copy"><span class="approval-kicker">需要你的确认</span><strong>${escapeHtml(title)}</strong><p>${escapeHtml(approval.summary || "Agent 正在等待你的决定")}</p>${detail}</section><div class="approval-sheet-actions approval-sheet-actions-triple"><button type="button" data-approval="${escapeHtml(approval.id)}" data-decision="deny_once">拒绝</button><button type="button" data-approval="${escapeHtml(approval.id)}" data-decision="allow_once">允许一次</button><button type="button" class="allow" data-approval="${escapeHtml(approval.id)}" data-decision="allow_session">允许本会话</button></div>`;
 }
 function showApprovalSheet(id) { activeApprovalId = id; renderApprovalSheet(); setSheetVisible("#approval-sheet", true); }
 function hideApprovalSheet() { activeApprovalId = ""; setSheetVisible("#approval-sheet", false); }
@@ -783,6 +1075,16 @@ async function browseWorkspace(path = "") {
 }
 
 function safeUrl(url) { try { const parsed = new URL(url); return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : ""; } catch { return ""; } }
+// 终端/命令输出常带 ANSI 颜色与控制序列，直接显示会变成一长串乱码，渲染前统一剥离。
+const ANSI_ESCAPE_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-2A-Z]|[>=#]|[@-Z\\-_])/g;
+function stripAnsi(value) { return String(value ?? "").replace(ANSI_ESCAPE_RE, ""); }
+// 流式中途或服务端 20000 字截断都会产生未闭合围栏，未闭合时其后所有内容会退化成
+// 一大段原文。渲染副本上归一化非标围栏（4+ 反引号、~~~）并补齐闭合，不改原文。
+function healMarkdownFences(source) {
+  const normalized = String(source).replace(/^(`{4,}|~{3,})/gm, "```");
+  const fences = (normalized.match(/```/g) || []).length;
+  return fences % 2 === 1 ? `${normalized}\n\`\`\`` : normalized;
+}
 function inlineMarkdown(value) {
   let text = escapeHtml(value);
   text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -829,7 +1131,7 @@ function renderRichText(value) {
   const cacheKey = String(value || "");
   const cachedHtml = richTextCache.get(cacheKey);
   if (cachedHtml !== undefined) return cachedHtml;
-  const source = cacheKey.replace(/\r/g, ""); const chunks = source.split(/```([^\n]*)\n?([\s\S]*?)```/g); const output = [];
+  const source = healMarkdownFences(stripAnsi(cacheKey).replace(/\r/g, "")); const chunks = source.split(/```([^\n]*)\n?([\s\S]*?)```/g); const output = [];
   for (let i = 0; i < chunks.length; i += 3) {
     const prose = stripInternalUiDirectives(chunks[i] || "");
     const lines = prose.split("\n"); let list = []; let ordered = false;
@@ -873,10 +1175,39 @@ function renderRichText(value) {
   richTextCache.set(cacheKey, html);
   return html;
 }
+function safeStreamBoundary(source) {
+  // 最后一个不在围栏代码块内的空行边界；在 ``` 内部切断会破坏 Markdown 渲染。
+  let index = source.length;
+  while (index > 0) {
+    index = source.lastIndexOf("\n\n", index - 1);
+    if (index <= 0) return 0;
+    const fences = (source.slice(0, index).match(/```/g) || []).length;
+    if (fences % 2 === 0) return index + 2;
+  }
+  return 0;
+}
 function renderStreamingRichText(node, selector) {
   const body = node?.querySelector(selector);
   if (!body || !node.dataset.raw) return;
-  body.innerHTML = renderRichText(node.dataset.raw);
+  // 流式期间按空行边界增量渲染：已完成段落只追加渲染一次，仅尾部块随
+  // delta 重解析，避免整条消息反复全量渲染（O(n²)）。终态由 finalize 整渲染。
+  const source = node.dataset.raw;
+  const boundary = safeStreamBoundary(source);
+  let stable = body.querySelector(":scope > .stream-stable");
+  let tail = body.querySelector(":scope > .stream-tail");
+  if (!stable || !tail) {
+    body.innerHTML = '<div class="stream-stable"></div><div class="stream-tail"></div>';
+    stable = body.firstElementChild;
+    tail = body.lastElementChild;
+    node.dataset.streamRendered = "0";
+  }
+  const rendered = Number(node.dataset.streamRendered || 0);
+  if (boundary > rendered) {
+    stable.insertAdjacentHTML("beforeend", renderRichText(source.slice(rendered, boundary)));
+    node.dataset.streamRendered = String(boundary);
+  }
+  tail.innerHTML = renderRichText(source.slice(Number(node.dataset.streamRendered || 0)));
+  tail.classList.add("streaming");
 }
 function scheduleStreamingRichText(node, selector) {
   if (streamingRenderTimers.has(node)) return;
@@ -889,7 +1220,10 @@ function finalizeStreamingNode(node, selector) {
   const pending = streamingRenderTimers.get(node);
   if (pending) clearTimeout(pending);
   streamingRenderTimers.delete(node);
-  renderStreamingRichText(node, selector);
+  const body = node?.querySelector(selector);
+  if (!body || !node.dataset.raw) return;
+  delete node.dataset.streamRendered;
+  body.innerHTML = renderRichText(node.dataset.raw);
 }
 function messageKey(message, index = 0) { return message.id || `${message.role || "assistant"}:${message.kind || "message"}:${index}`; }
 function firstLine(value) { return String(value || "").split(/\n/).map((line) => line.trim()).filter(Boolean)[0] || ""; }
@@ -955,13 +1289,25 @@ async function fetchAssetObjectUrl(assetId) {
   assetObjectUrls.set(assetId, promise);
   return promise;
 }
+async function hydrateImage(image) {
+  const id = image.dataset.assetImage;
+  if (!id) return;
+  try { image.src = await fetchAssetObjectUrl(id); } catch { image.closest(".message-attachment")?.classList.add("asset-error"); }
+}
+// 图片附件进入视口附近才下载；长会话不再进入即全量拉取。
+const assetImageObserver = typeof IntersectionObserver === "function"
+  ? new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      assetImageObserver.unobserve(entry.target);
+      void hydrateImage(entry.target);
+    }
+  }, { rootMargin: "320px" })
+  : null;
 async function hydrateAttachmentPreviews(root = document) {
   const images = [...root.querySelectorAll("img[data-asset-image]:not([src])")];
-  await Promise.all(images.map(async (image) => {
-    const id = image.dataset.assetImage;
-    if (!id) return;
-    try { image.src = await fetchAssetObjectUrl(id); } catch { image.closest(".message-attachment")?.classList.add("asset-error"); }
-  }));
+  if (!assetImageObserver) { await Promise.all(images.map(hydrateImage)); return; }
+  for (const image of images) assetImageObserver.observe(image);
 }
 async function openAttachmentViewer(asset) {
   const viewer = $("#attachment-viewer"); const content = $("#attachment-viewer-content");
@@ -1103,6 +1449,17 @@ function executionState(plan, tools = []) {
   if (plan.some((item) => planItemState(item.status) === "doing")) return "running";
   return plan.length && plan.every((item) => planItemState(item.status) === "done") ? "completed" : "idle";
 }
+function executionProgressRing(current, total, state) {
+  const step = Math.max(1, Number(current) || 1);
+  const count = Math.max(1, Number(total) || 1);
+  if (state === "failed") return `<span class="execution-icon failed" aria-hidden="true">!</span>`;
+  if (state === "completed") return `<span class="execution-icon completed" aria-hidden="true">✓</span>`;
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
+  const ratio = Math.min(1, Math.max(0, step / count));
+  const dash = `${(ratio * circumference).toFixed(2)} ${circumference.toFixed(2)}`;
+  return `<span class="execution-ring" aria-hidden="true"><svg viewBox="0 0 24 24"><circle class="track" cx="12" cy="12" r="${radius}"></circle><circle class="prog" cx="12" cy="12" r="${radius}" stroke-dasharray="${dash}" transform="rotate(-90 12 12)"></circle></svg><b>${step}</b></span>`;
+}
 function renderExecutionCard(message, tools = [], key = "") {
   const plan = parsePlanArguments(message?.tool);
   if (!plan) return renderToolItem(message, key);
@@ -1119,7 +1476,8 @@ function renderExecutionCard(message, tools = [], key = "") {
   }).join("");
   const rawPlan = encodeURIComponent(String(message?.tool?.arguments || ""));
   const label = state === "failed" ? "执行遇到问题" : state === "completed" ? "计划已完成" : "正在执行";
-  return `<details class="execution-card ${state}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}" data-plan-raw="${escapeHtml(rawPlan)}"${state === "running" ? " open" : ""}><summary><span class="execution-icon">${state === "failed" ? "!" : state === "completed" ? "✓" : "○"}</span><span class="execution-copy"><b>${escapeHtml(label)}</b><strong>${escapeHtml(progress.current?.step || "正在准备下一步")}</strong><small>${escapeHtml(activity)}</small></span><span class="execution-progress">${progress.currentIndex + 1}/${plan.length}<i>⌄</i></span></summary>${changes ? `<div class="execution-stats"><span>第 ${progress.currentIndex + 1} / ${plan.length} 步</span><b>${escapeHtml(changes)}</b></div>` : ""}<div class="execution-plan">${items}</div></details>`;
+  const stepLabel = `${progress.currentIndex + 1}/${plan.length}`;
+  return `<details class="execution-card ${state}" data-message-key="${escapeHtml(key)}" data-tool-id="${escapeHtml(message?.tool?.id || "")}" data-plan-raw="${escapeHtml(rawPlan)}"${state === "running" ? " open" : ""}><summary>${executionProgressRing(progress.currentIndex + 1, plan.length, state)}<span class="execution-copy"><b>${escapeHtml(label)}</b><strong>${escapeHtml(progress.current?.step || "正在准备下一步")}</strong><small>${escapeHtml(activity)}</small></span><span class="execution-progress">${escapeHtml(stepLabel)}<i>⌄</i></span></summary>${changes ? `<div class="execution-stats"><span>第 ${progress.currentIndex + 1} / ${plan.length} 步</span><b>${escapeHtml(changes)}</b></div>` : `<div class="execution-stats"><span>第 ${progress.currentIndex + 1} / ${plan.length} 步</span><b>${escapeHtml(progress.current?.step || "准备中")}</b></div>`}<div class="execution-plan">${items}</div></details>`;
 }
 function renderPlanCard(message, key) {
   return renderExecutionCard(message, [], key);
@@ -1187,13 +1545,13 @@ function toolRowSubtitle(tool, activity) {
   if (status === "running" || status === "pending") return "正在执行…";
   if (status === "waiting_for_approval") return "等待你的授权";
   if (status === "cancelled") return "已取消";
-  if (status === "failed") return firstLine(tool.error).slice(0, 90) || "执行失败";
+  if (status === "failed") return firstLine(stripAnsi(tool.error)).slice(0, 90) || "执行失败";
   const files = Array.isArray(tool.files) ? tool.files : [];
   const pathOf = (file) => file?.path || file?.name || "";
   if (activity === "edit" && files.length) return pathOf(files[0]) ? String(pathOf(files[0])).split("/").pop() : "已修改";
   if (activity === "read" && files.length > 1) return `${files.length} 个文件`;
   if (activity === "read" && files.length === 1) return String(pathOf(files[0])).split("/").pop() || "已读取";
-  const outputLine = firstLine(tool.output).slice(0, 90);
+  const outputLine = firstLine(stripAnsi(tool.output)).slice(0, 90);
   return outputLine || "已完成";
 }
 
@@ -1202,9 +1560,9 @@ function renderToolDetail(message, activity, patch) {
   const assetFiles = (Array.isArray(tool.files) ? tool.files : []).filter((file) => file?.id);
   const filesHtml = assetFiles.length ? renderToolFiles(assetFiles) : "";
   if (activity === "command") {
-    const command = String(tool.command || "").trim();
-    const output = String(tool.output || "").trim();
-    const error = String(tool.error || "").trim();
+    const command = stripAnsi(tool.command).trim();
+    const output = stripAnsi(tool.output).trim();
+    const error = stripAnsi(tool.error).trim();
     if (!command && !output && !error) return '<div class="pv"><pre>Agent 未提供命令或输出详情</pre></div>';
     const duration = formatDuration(tool.durationMs);
     const exit = Number.isFinite(Number(tool.exitCode)) ? `退出码 ${tool.exitCode}` : "";
@@ -1219,7 +1577,7 @@ ${text.slice(-500)}` : text;
   if (activity === "edit" && patch) return renderDiffCard(patch) + filesHtml;
   const blocks = [];
   const head = activity === "read" ? "读取内容" : activity === "search" ? "搜索结果" : activity === "edit" ? "修改内容" : "详情";
-  const text = String(tool.output || "").trim() || String(tool.error || "").trim() || String(tool.arguments || "").trim() || String(tool.command || "").trim();
+  const text = stripAnsi(tool.output).trim() || stripAnsi(tool.error).trim() || String(tool.arguments || "").trim() || stripAnsi(tool.command).trim();
   if (text) blocks.push(`<div class="pv"><div class="pv-head">${escapeHtml(head)}</div><pre>${escapeHtml(text.slice(0, 5000))}</pre></div>`);
   blocks.push(filesHtml);
   return blocks.join("") || '<div class="pv"><pre>Agent 未提供命令或参数详情</pre></div>';
@@ -1294,21 +1652,54 @@ function renderMessage(message, extraClass = "", index = 0) {
     return `<div class="ai ${extraClass}"><div class="msg-body">${escapeHtml(String(message?.text || "（此条消息无法渲染）")).slice(0, 2000)}</div></div>`;
   }
 }
+function agentContextDetailsHtml(context, key) {
+  const preview = firstLine(String(context.text || "").replace(/^#\s+\S+\.md\s+instructions\s+for\s+/i, "")).slice(0, 120);
+  return `<details class="agent-context think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(context.text)}"><summary><i></i><b>${escapeHtml(context.label || "系统上下文")}</b><span class="preview">${escapeHtml(preview || context.tag || "注入内容")}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(context.text)}</div></details>`;
+}
+function structuredNotificationDetailsHtml(notification, key) {
+  const state = notificationStateLabel(notification.state);
+  const stateClass = String(notification.state || "notice").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "notice";
+  const subPath = String(notification.agentPath || "").trim();
+  const subAction = subPath
+    ? `<div class="structured-notification-actions"><button type="button" data-copy-value="${encodeURIComponent(subPath)}">复制子任务 ID</button><small>子任务 · ${escapeHtml(subPath.slice(0, 18))}</small></div>`
+    : "";
+  return `<details class="structured-notification ${escapeHtml(stateClass)}${subPath ? " has-subagent" : ""}" data-message-key="${escapeHtml(key)}"><summary><span class="structured-notification-icon">${state === "失败" ? "!" : state === "已完成" ? "✓" : "◎"}</span><span class="structured-notification-copy"><b>${escapeHtml(notification.label)}</b><strong>${escapeHtml(state)}</strong><small>${escapeHtml(firstLine(notification.text)).slice(0, 120)}</small></span><span class="structured-notification-fold">⌄</span></summary><div class="structured-notification-body">${renderRichText(notification.text)}${subAction}</div></details>`;
+}
+function renderAssistantSegments(segments, key) {
+  return segments.map((segment) => {
+    if (segment.type === "notification") return structuredNotificationDetailsHtml(segment, key);
+    if (segment.type === "context") return agentContextDetailsHtml(segment, key);
+    return renderRichText(segment.text);
+  }).join("");
+}
 function renderMessageInner(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
   if (isToolMessage(message)) return renderToolGroup([message], index);
-  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
-  const notification = parseStructuredNotification(text);
-  if (notification) {
-    const state = notificationStateLabel(notification.state);
-    const stateClass = String(notification.state || "notice").replace(/[^a-z0-9_-]/gi, "").toLowerCase() || "notice";
-    return `<details class="structured-notification ${escapeHtml(stateClass)}" data-message-key="${escapeHtml(key)}"><summary><span class="structured-notification-icon">${state === "失败" ? "!" : state === "已完成" ? "✓" : "◎"}</span><span class="structured-notification-copy"><b>${escapeHtml(notification.label)}</b><strong>${escapeHtml(state)}</strong><small>${escapeHtml(firstLine(notification.text)).slice(0, 120)}</small></span><span class="structured-notification-fold">⌄</span></summary><div class="structured-notification-body">${renderRichText(notification.text)}</div></details>`;
+  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
+  const segments = splitStructuredContent(text);
+  const hasStructured = segments.some((segment) => segment.type === "notification" || segment.type === "context");
+  if (hasStructured) {
+    // 整条是通知/上下文时保持单卡；混排时逐段渲染，避免标签原文糊在正文里。
+    if (segments.length === 1 && segments[0].type === "notification") return structuredNotificationDetailsHtml(segments[0], key);
+    if (segments.length === 1 && segments[0].type === "context") return agentContextDetailsHtml(segments[0], key);
+    const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
+    return `<div class="ai structured-mixed ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderAssistantSegments(segments, key)}</div>${renderMessageAttachments(message.attachments)}</div>`;
   }
   const who = `${escapeHtml(agentLabel(current?.agent || ""))}${current?.model ? ` · ${escapeHtml(current.model)}` : ""}`;
   return `<div class="ai ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}><div class="who">${who}</div><div class="msg-body">${renderRichText(text)}</div>${renderMessageAttachments(message.attachments)}</div>`;
 }
-function messageFingerprint(rows = []) { return rows.map((message) => `${message.role || ""}|${message.kind || ""}|${message.text || ""}|${JSON.stringify(message.tool || null)}|${JSON.stringify(message.attachments || null)}|${JSON.stringify(message.delivery || null)}`).join("\u001f"); }
+function messageFingerprint(rows = []) {
+  // 轻量指纹：长度 + 尾部采样代替全文序列化。流式追加、工具状态/输出变化都能
+  // 被捕获，成本从 O(全文) 降到 O(条数)；历史消息"同长度且同结尾"的改写可忽略。
+  let signature = `${rows.length}`;
+  for (const message of rows) {
+    const tool = message?.tool || {};
+    const text = String(message?.text || "");
+    signature += `|${message?.role || ""},${message?.kind || ""},${text.length},${text.slice(-32)},${tool.id || ""},${tool.status || ""},${String(tool.output || "").length},${String(tool.arguments || "").length},${(message?.attachments || []).length},${message?.delivery?.id || ""}`;
+  }
+  return signature;
+}
 function goalStatusLabel(status) { return ({ in_progress: "进行中", complete: "已完成", blocked: "需要处理" })[status] || "进行中"; }
 function goalStepClass(status) {
   const value = String(status || "").toLowerCase();
@@ -1413,6 +1804,8 @@ function renderMessages(rows = [], { hasMore = false, total = rows.length } = {}
   buildConversationTurns(rows).forEach((turn) => html.push(renderConversationTurn(turn)));
   let rendered = html.join("");
   if (!rendered.trim()) rendered = '<div class="empty">这个会话还没有消息。</div>';
+  // 旧节点即将销毁，先解除懒加载观察，避免 IntersectionObserver 持有死节点。
+  assetImageObserver?.disconnect();
   $("#messages").innerHTML = rendered;
   for (const key of openKeys) {
     const node = $("#messages").querySelector(`[data-message-key="${CSS.escape(key)}"]`);
@@ -1515,6 +1908,11 @@ function applySessionDetail(detail, { activate = true, instant = false, anchor =
 }
 async function fetchSessionDetail(id, { messageLimit = INITIAL_MESSAGE_LIMIT } = {}) {
   const detail = await api(`/mobile/v1/sessions/${encodeURIComponent(id)}?messages=${encodeURIComponent(messageLimit)}`, { timeoutMs: 45_000 });
+  const incoming = Array.isArray(detail?.messages) ? detail.messages : [];
+  const cached = sessionDetailCache.get(id);
+  const cachedMessages = Array.isArray(cached?.detail?.messages) ? cached.detail.messages : [];
+  // OpenCode/Grok 偶发空详情；不要用空结果覆盖本地已有非空缓存。
+  if (!incoming.length && cachedMessages.length) return cached.detail;
   cacheSessionDetail(detail);
   return detail;
 }
@@ -1545,6 +1943,12 @@ async function openSession(id, { activate = true, messageLimit = INITIAL_MESSAGE
     throw error;
   }
   if (seq !== openSessionSeq) return;
+  const incoming = Array.isArray(detail?.messages) ? detail.messages : [];
+  const shown = Array.isArray(current?.messages) && current.id === id ? current.messages : [];
+  if (!incoming.length && shown.length) {
+    // 服务端空详情时保留当前已渲染内容，避免「过一会点进去什么都没了」。
+    return;
+  }
   applySessionDetail(detail, { activate, instant: true, anchor });
   syncLiveExecutionTimer();
   // Approval data is independent: never delay the first message paint on it.
@@ -1562,7 +1966,6 @@ async function loadEarlierMessages() {
 
 async function openModelSheet() {
   if (!current) return;
-  const sheet = $("#model-sheet");
   const list = $("#session-model-list");
   // Open first so a slow model query never leaves the user wondering whether
   // the tap was accepted; the list itself has its own scroll container.
@@ -1654,8 +2057,20 @@ function appendEvent(event) {
   if (event.type === "message" && event.summary) {
     const role = event.role || "assistant";
     if (role === "user") {
-      const existing = host.querySelector(`[data-message-id="${CSS.escape(String(event.id || ""))}"]`);
-      if (!existing) host.insertAdjacentHTML("beforeend", renderConversationTurn({ id: event.id || `live-${Date.now()}`, request: { id: event.id, role, text: event.summary, attachments: event.attachments || [] }, entries: [] }));
+      // 乐观插入用客户端 messageId；SSE 账本 id 是数字游标。优先按 messageId 去重，
+      // 否则同一条文案会短暂出现两条，直到后续 openSession 全量刷新才合并。
+      const clientId = String(event.messageId || "").trim();
+      const existing = clientId
+        ? host.querySelector(`[data-message-id="${CSS.escape(clientId)}"]`)
+        : null;
+      const duplicateByText = !existing && event.summary
+        ? [...host.querySelectorAll(".turn-request .me")].find((node) => node.querySelector(".msg-body")?.textContent === event.summary)
+        : null;
+      if (existing || duplicateByText) {
+        if (duplicateByText && clientId) duplicateByText.dataset.messageId = clientId;
+      } else {
+        host.insertAdjacentHTML("beforeend", renderConversationTurn({ id: clientId || event.id || `live-${Date.now()}`, request: { id: clientId || event.id, role, text: event.summary, attachments: event.attachments || [] }, entries: [] }));
+      }
     } else {
       const turn = liveTurn(); let result = turn.querySelector(":scope > .turn-result");
       let last = result?.querySelector(".ai:last-child");
@@ -1734,13 +2149,21 @@ function scheduleFinalReconcile(event) {
   const terminal = new Set(["completed", "failed", "cancelled", "canceled", "incomplete", "end_turn", "stop", "max_tokens", "length"]);
   const queueChanged = /排队|下一条|停止.*会话|清空.*排队|保留.*排队|编辑.*排队|取消.*排队/.test(status);
   if (event?.type !== "status" || (!terminal.has(status) && !queueChanged)) return;
+  if (terminal.has(status)) {
+    const title = current?.title || "任务状态";
+    if (status === "completed" || status === "end_turn") nativeNotify(title, "任务已完成");
+    else if (status === "failed") nativeNotify(title, "任务失败，请查看会话");
+  }
   if (!current || !isDetailVisible()) return;
   if (terminal.has(status)) finalizeStreamingMessages();
+  // Grok 等 runtime 在 -32603 后磁盘常不落 assistant；failed 时全量刷新会把
+  // 刚流式出来的回答冲掉。完成态再对账即可。
+  if (status === "failed") return;
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => openSession(current.id, { activate: false }).catch(() => {}), queueChanged ? 150 : 900);
 }
 async function handleEvent(event) {
-  if (event.id > eventCursor) { eventCursor = event.id; localStorage.setItem(CURSOR_KEY, String(eventCursor)); }
+  if (event.id > eventCursor) { eventCursor = event.id; schedulePersistEventCursor(); }
   if (event.type === "approval") {
     // Approval events may arrive while a detail response is cached. Await the
     // refresh so the fixed current-session card is rendered before the user sees a failure state.
@@ -1752,6 +2175,9 @@ async function handleEvent(event) {
       $("#chat-state-dot").className = current.state;
       setConnectionStatus(stateLabel(current.state));
       toast("有操作等待你的授权");
+      nativeNotify(current?.title || "待审批", event.summary || "有操作等待你的授权");
+    } else {
+      nativeNotify("待审批", event.summary || "有操作等待你的授权");
     }
   }
   appendEvent(event);
@@ -1935,7 +2361,25 @@ document.addEventListener("click", async (event) => {
     if (event.target.closest("#session-selection-delete")) { requestSessionDeletion([...selectedSessionIds]); return; }
     if (event.target.closest("#close-session-delete-sheet") || event.target.closest("#cancel-session-delete") || event.target === $("#session-delete-sheet")) { hideSessionDeleteSheet(); return; }
     if (event.target.closest("#confirm-session-delete")) { await confirmSessionDeletion(); return; }
-    if (event.target.closest("#more")) { const menu = $("#session-menu"); menu.hidden = !menu.hidden; const pinAction = $("#session-pin-action"); if (pinAction) pinAction.textContent = current?.pinned ? "取消置顶会话" : "置顶会话"; return; }
+    if (event.target.closest("#more")) { renderSessionMenu(); const menu = $("#session-menu"); menu.hidden = !menu.hidden; return; }
+    if (event.target.closest("#clear-quote")) { setQuote(""); return; }
+    if (event.target.closest("#close-message-action-sheet") || event.target === $("#message-action-sheet")) { hideMessageActionSheet(); return; }
+    const messageAction = event.target.closest("[data-message-action]");
+    if (messageAction && messageActionTarget) {
+      const text = String(messageActionTarget.text || "");
+      const actionId = messageAction.dataset.messageAction;
+      hideMessageActionSheet();
+      if (actionId === "copy") { await copyText(text, "已复制消息"); return; }
+      if (actionId === "copy-md") { await copyText(messageActionTarget.role === "user" ? text : text, "已复制 Markdown"); return; }
+      if (actionId === "quote") { setQuote(text); $("#message")?.focus(); toast("已加入引用"); return; }
+      if (actionId === "share") { await shareOrCopyText(current?.title || "助手回复", text); return; }
+      if (actionId === "edit-rerun") {
+        const edited = await showInputSheet({ title: "编辑并重跑", description: sessionCapability("fork") ? "将分叉会话后发送修改内容" : "将作为后续消息发送", value: text });
+        if (edited == null) return;
+        await forkAndRerun(String(edited).trim() || text);
+        return;
+      }
+    }
     if (event.target.closest("#open-model-sheet") || event.target.closest("#retry-model-sheet")) return openModelSheet();
     if (event.target.closest("#close-model-sheet") || event.target === $("#model-sheet")) { hideModelSheet(); return; }
     if (event.target.closest("#save-session-settings") && current) {
@@ -1953,7 +2397,8 @@ document.addEventListener("click", async (event) => {
     const approval = event.target.closest("[data-approval]"); if (approval) {
       await api(`/mobile/v1/approvals/${encodeURIComponent(approval.dataset.approval)}/resolve`, { method: "POST", body: JSON.stringify({ decision: approval.dataset.decision }) });
       hideApprovalSheet(); await loadApprovals(); if (current) await openSession(current.id, { activate: false });
-      toast(approval.dataset.decision === "allow_once" ? "已允许一次，正在继续执行" : "已拒绝本次操作"); return;
+      const decision = approval.dataset.decision;
+      toast(decision === "allow_session" ? "已允许，本会话后续将自动审批" : decision === "allow_once" ? "已允许一次，正在继续执行" : "已拒绝本次操作"); return;
     }
     const nativeOpen = event.target.closest("#attachment-viewer-open");
     if (nativeOpen && runNativeAssetAction("openAsset", { id: nativeOpen.dataset.assetId, name: nativeOpen.dataset.assetName, mimeType: nativeOpen.dataset.assetMime })) { toast("正在打开文件…"); return; }
@@ -1969,6 +2414,9 @@ document.addEventListener("click", async (event) => {
     if (event.target.closest("#conversation-behavior") || event.target.closest("#close-conversation-behavior-sheet") || event.target === $("#conversation-behavior-sheet")) { event.target.closest("#conversation-behavior") ? showConversationBehaviorSheet() : hideConversationBehaviorSheet(); return; }
     const behaviorMode = event.target.closest("[data-conversation-send-mode]");
     if (behaviorMode) { const result = await saveConversationSendMode(behaviorMode.dataset.conversationSendMode); hideConversationBehaviorSheet(); toast(result.synced ? `已设为${conversationSendModeLabel()}` : `已设为${conversationSendModeLabel()}（待桌面端升级后同步）`); return; }
+    if (event.target.closest("#close-theme-sheet") || event.target === $("#theme-sheet")) { hideThemeSheet(); return; }
+    const themeChoice = event.target.closest("[data-theme-choice]");
+    if (themeChoice) { selectTheme(themeChoice.dataset.themeChoice); return; }
     if (event.target.closest("#close-message-mode-sheet") || event.target === $("#message-mode-sheet") || event.target.closest('[data-message-mode="dismiss"]')) { hideMessageModeSheet(); return; }
     const messageMode = event.target.closest("[data-message-mode]");
     if (messageMode) { hideMessageModeSheet(); await submitComposerMessage(messageMode.dataset.messageMode); return; }
@@ -1983,13 +2431,54 @@ document.addEventListener("click", async (event) => {
       return;
     }
     const action = event.target.dataset.action; if (!action || !current) return;
+    $("#session-menu").hidden = true;
     if (action === "cancel") { showStopSessionSheet(); return; }
-    if (action === "pin") { const pinned = !current.pinned; $("#session-menu").hidden = true; await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }); current.pinned = pinned; await loadSessions(); toast(pinned ? "已置顶会话" : "已取消置顶会话"); return; }
-    if (action === "refresh") { $("#session-menu").hidden = true; return refreshMobileData(); }
-    if (action === "delete") { $("#session-menu").hidden = true; requestSessionDeletion([current.id]); return; }
-    let body = {}; if (action === "rename") { const title = await showInputSheet({ title: "重命名会话", value: current.title }); body.title = title?.trim() || current.title; }
-    const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/${action}`, { method: "POST", body: JSON.stringify(body) });
-    if (action === "archive") { current = null; page("sessions"); toast("已归档"); return loadSessions(); } await openSession(current.id);
+    if (action === "pin") { const pinned = !current.pinned; await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }); current.pinned = pinned; await loadSessions(); toast(pinned ? "已置顶会话" : "已取消置顶会话"); return; }
+    if (action === "refresh") { return refreshMobileData(); }
+    if (action === "delete") { requestSessionDeletion([current.id]); return; }
+    if (action === "copy-session-id") { await copyText(current.id, "已复制会话 ID"); return; }
+    if (action === "copy-native-id") { await copyText(decodeNativeSessionId(), "已复制原生会话 ID"); return; }
+    if (action === "copy-directory") {
+      if (!current.directory) { toast("当前会话没有工作区路径"); return; }
+      await copyText(current.directory, "已复制工作区路径");
+      return;
+    }
+    if (action === "export-markdown") {
+      const markdown = messagesToMarkdown();
+      if (!markdown.trim()) { toast("没有可导出的内容"); return; }
+      await shareOrCopyText(`${current.title || "会话"}.md`, markdown, "Markdown 已复制到剪贴板");
+      return;
+    }
+    if (action === "autoApprove-off") {
+      await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/autoApprove`, { method: "POST", body: JSON.stringify({ enabled: false }) });
+      current.autoApproveSession = false;
+      toast("已关闭会话内自动审批");
+      return;
+    }
+    if (action === "fork") {
+      if (!sessionCapability("fork")) { toast("当前 Agent 不支持分叉"); return; }
+      const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/fork`, { method: "POST", body: "{}" });
+      const sessionId = result.sessionId || result.id;
+      if (!sessionId) throw new Error("分叉失败");
+      await openSession(sessionId);
+      toast("已分叉会话");
+      return;
+    }
+    if (action === "rename") {
+      const title = await showInputSheet({ title: "重命名会话", value: current.title });
+      if (title == null) return;
+      await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/rename`, { method: "POST", body: JSON.stringify({ title: title.trim() || current.title }) });
+      await openSession(current.id, { activate: false });
+      toast("已重命名");
+      return;
+    }
+    if (action === "archive" || action === "unarchive") {
+      await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/${action}`, { method: "POST", body: "{}" });
+      current = null;
+      page("sessions");
+      toast(action === "archive" ? "已归档" : "已取消归档");
+      return loadSessions();
+    }
   } catch (error) { toast(error.message); }
 });
 
@@ -2001,8 +2490,13 @@ setupPullToRefresh();
 $("#show-archive").addEventListener("click", async () => { archivedView = !archivedView; sessionSelectionMode = false; selectedSessionIds.clear(); sessionDisplayLimit = SESSION_PAGE_SIZE; $("#show-archive").textContent = archivedView ? "最近" : "归档"; await loadSessions().catch((error) => toast(error.message)); });
 $("#search").addEventListener("input", renderSessionList);
 $("#session-switcher-search").addEventListener("input", renderSessionSwitcher);
+function autogrowTextarea(textarea, maxHeight = 112) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+}
 for (const input of [$("#message"), $("#prompt")]) {
-  input.addEventListener("input", () => { updateCommandPicker(input); if (input.id === "message") updateComposerQueueState(); });
+  input.addEventListener("input", () => { autogrowTextarea(input, input.id === "prompt" ? 260 : 112); updateCommandPicker(input); if (input.id === "message") updateComposerQueueState(); });
   input.addEventListener("click", () => updateCommandPicker(input));
   input.addEventListener("keydown", commandPickerKeydown);
   input.addEventListener("blur", () => setTimeout(() => { if (!$("#command-picker").matches(":hover")) hideCommandPicker(); }, 120));
@@ -2011,11 +2505,69 @@ for (const input of [$("#message"), $("#prompt")]) {
 // inserted the command or Skill into the textarea.
 $("#command-picker").addEventListener("pointerdown", (event) => event.preventDefault());
 window.addEventListener("resize", () => { if (commandPickerState) positionCommandPicker(commandPickerState.input); });
+function activePageName() { return document.querySelector(".page.active")?.dataset.page || "sessions"; }
+function isOverlayOpen(selector) {
+  const node = $(selector);
+  return Boolean(node && !node.hidden && node.style.display !== "none");
+}
+function closeTopOverlay() {
+  if (!$("#attachment-viewer")?.hidden) { closeAttachmentViewer(); return true; }
+  if (isOverlayOpen("#message-action-sheet")) { hideMessageActionSheet(); return true; }
+  if (isOverlayOpen("#theme-sheet")) { hideThemeSheet(); return true; }
+  if (isOverlayOpen("#input-sheet")) { closeInputSheet(null); return true; }
+  if (isOverlayOpen("#approval-sheet")) { setSheetVisible("#approval-sheet", false); return true; }
+  if (isOverlayOpen("#stop-session-sheet")) { hideStopSessionSheet(); return true; }
+  if (isOverlayOpen("#message-mode-sheet")) { hideMessageModeSheet(); return true; }
+  if (isOverlayOpen("#conversation-behavior-sheet")) { hideConversationBehaviorSheet(); return true; }
+  if (isOverlayOpen("#session-delete-sheet")) { hideSessionDeleteSheet(); return true; }
+  if (isOverlayOpen("#model-sheet")) { hideModelSheet(); return true; }
+  if (isOverlayOpen("#workspace-sheet")) { workspaceSheet(false); return true; }
+  if (isOverlayOpen("#session-switcher")) { closeSessionSwitcher(); return true; }
+  if (!$("#session-menu")?.hidden) { $("#session-menu").hidden = true; return true; }
+  return false;
+}
+async function goToSessions() {
+  current = null;
+  page("sessions");
+  await loadSessions();
+}
+/** 供 Android 系统返回键 / 侧滑返回调用；已处理返回 true。 */
+window.SwitchyardHandleBack = () => {
+  if (closeTopOverlay()) return true;
+  const name = activePageName();
+  if (name === "detail" || name === "new" || name === "settings") {
+    void goToSessions();
+    return true;
+  }
+  return false;
+};
+function bindEdgeSwipeBack() {
+  let startX = 0; let startY = 0; let tracking = false;
+  const edge = 28;
+  document.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) { tracking = false; return; }
+    const touch = event.touches[0];
+    tracking = touch.clientX <= edge + (window.visualViewport?.offsetLeft || 0);
+    startX = touch.clientX; startY = touch.clientY;
+  }, { passive: true });
+  document.addEventListener("touchend", (event) => {
+    if (!tracking) return;
+    tracking = false;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - startX;
+    const dy = Math.abs(touch.clientY - startY);
+    // 从左缘向右滑：返回上一级（关闭浮层或退出详情/新建/设置）。
+    if (dx >= 72 && dy < 56) window.SwitchyardHandleBack();
+  }, { passive: true });
+  document.addEventListener("touchcancel", () => { tracking = false; }, { passive: true });
+}
+bindEdgeSwipeBack();
 window.addEventListener("popstate", () => {
   if (!$("#attachment-viewer").hidden) closeAttachmentViewer({ fromHistory: true });
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { eventLoopStopped = true; return; }
+  if (document.hidden) { flushEventCursor(); eventLoopStopped = true; return; }
   if (!token || eventLoopRevoked || !eventLoopStopped) return;
   eventLoopStopped = false;
   connectEvents();
@@ -2026,7 +2578,7 @@ document.addEventListener("visibilitychange", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#attachment-viewer").hidden) { event.preventDefault(); closeAttachmentViewer(); }
 });
-$("#back").addEventListener("click", async () => { current = null; page("sessions"); await loadSessions(); });
+$("#back").addEventListener("click", async () => { await goToSessions(); });
 function renderComposerAttachments(items, preview, target = "active") {
   preview.hidden = !items.length;
   preview.innerHTML = items.map((file, index) => `<div class="attachment-chip">${file.kind === "image" ? `<img src="${escapeHtml(file.preview)}" alt="">` : `<span>${escapeHtml(attachmentIcon(file))}</span>`}<strong>${escapeHtml(file.name)}</strong><button type="button" data-remove-attachment="${index}" data-attachment-target="${target}" aria-label="移除附件">×</button></div>`).join("");
@@ -2057,19 +2609,21 @@ $("#new-session").addEventListener("submit", async (event) => {
     const sent = newAttachments;
     const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: promptText, attachments: sent.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: createClientMessageId() }) });
     rememberLastTask();
-    newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview)); await openSession(result.sessionId);
+    newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; autogrowTextarea($("#prompt"), 260); sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview)); await openSession(result.sessionId);
   } catch (error) { toast(error.message); } finally { submit.disabled = false; }
 });
 async function submitComposerMessage(deliveryMode = "") {
-  const input = $("#message"); const text = input.value.trim(); if ((!text && !activeAttachments.length) || !current) return;
-  const id = createClientMessageId(); const sentAttachments = activeAttachments; input.value = ""; activeAttachments = []; renderAttachments(); $("#send").disabled = true;
+  const input = $("#message"); const rawText = input.value.trim();
+  if ((!rawText && !pendingQuote && !activeAttachments.length) || !current) return;
+  const text = withQuotePrefix(rawText);
+  const id = createClientMessageId(); const sentAttachments = activeAttachments; input.value = ""; autogrowTextarea(input); activeAttachments = []; renderAttachments(); $("#send").disabled = true;
   $("#messages").insertAdjacentHTML("beforeend", renderConversationTurn({ id: `live-${id}`, request: { id, role: "user", text, attachments: sentAttachments }, entries: [] })); setConnectionStatus("正在发送"); scrollMessages();
   try {
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id, ...(deliveryMode ? { deliveryMode } : {}) }) });
     if (result.queued) { toast(result.deliveryMode === "guide" ? "已添加引导，当前步骤结束后优先执行" : "已加入排队指令"); await openSession(current.id, { activate: false }); }
     else setConnectionStatus("正在生成");
     input.blur();
-  } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = text; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
+  } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = rawText; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
   finally { $("#send").disabled = false; updateComposerQueueState(); }
 }
 $("#composer").addEventListener("submit", async (event) => {
@@ -2079,12 +2633,7 @@ $("#composer").addEventListener("submit", async (event) => {
   if (isSessionRunning() && preferences.conversationSendMode === "ask") { showMessageModeSheet(); return; }
   await submitComposerMessage(isSessionRunning() ? preferences.conversationSendMode : "");
 });
-$("#theme-toggle").addEventListener("click", () => {
-  const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme()) + 1) % THEME_ORDER.length];
-  localStorage.setItem(THEME_KEY, next);
-  applyTheme();
-  toast(`外观已切换为${themeLabel(next)}`);
-});
+$("#theme-toggle").addEventListener("click", () => { showThemeSheet(); });
 $("#density-toggle").addEventListener("click", () => {
   const next = DENSITY_ORDER[(DENSITY_ORDER.indexOf(currentDensity()) + 1) % DENSITY_ORDER.length];
   localStorage.setItem(DENSITY_KEY, next); applyDensity(); toast(`已切换为${densityLabel(next)}密度`);
@@ -2133,10 +2682,38 @@ function bindSwipe() {
 }
 
 window.addEventListener("scroll", () => { if (shouldFollowConversation() && unseenMessageCount) { unseenMessageCount = 0; renderNewMessageIndicator(); } }, { passive: true });
+function setupViewportCompensation() {
+  // Android 壳降级掉昂贵的背景模糊合成（CSS 按 data-shell 覆盖）。
+  if (hasNativeTokenStore()) document.documentElement.dataset.shell = "android";
+  const viewport = window.visualViewport;
+  if (viewport) {
+    let lastInset = 0;
+    const update = () => {
+      // iOS 不支持 interactive-widget=resizes-content：键盘弹出时 layout
+      // viewport 不变，用 visualViewport 差值把 composer/tabbar 抬到键盘上方。
+      // Chrome 已启用 resizes-content 时 innerHeight 同步收缩，差值自然为 0。
+      const inset = Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+      if (Math.abs(inset - lastInset) < 2) return;
+      lastInset = inset;
+      document.documentElement.style.setProperty("--keyboard-inset", `${inset}px`);
+      if (inset > 0 && isDetailVisible()) scrollMessages({ force: true, instant: true });
+    };
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+  }
+  // 新消息指示器等浮层锚定 composer 实际高度，避免附件预览时互相遮挡。
+  const composer = $("#composer");
+  if (composer && typeof ResizeObserver === "function") {
+    new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect?.height;
+      if (height) document.documentElement.style.setProperty("--composer-height", `${Math.round(height)}px`);
+    }).observe(composer);
+  }
+}
 applyTheme(); applyDensity();
 async function boot() {
   try {
-    hideModelSheet(); bindSwipe(); await pair();
+    hideModelSheet(); bindSwipe(); bindMessageLongPress(); setupViewportCompensation(); await pair();
     if (!token) { setConnectionStatus("等待配对", false); return; }
     // Sessions are the landing screen. Do not make their first paint wait for
     // workspaces, models, preferences, or the approval inbox.

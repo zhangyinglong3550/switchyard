@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { notificationStateLabel, parseStructuredNotification } from "../../../apps/mobile/structured-notification.mjs";
+import { isAgentContextTag, notificationStateLabel, parseStructuredNotification, splitStructuredContent, stripAgentContext } from "../../../apps/mobile/structured-notification.mjs";
 
 test("mobile PWA contains chat, create, approval and settings surfaces without provider secrets", () => {
   const root = path.resolve("apps/mobile");
@@ -151,12 +151,69 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function stripInternalUiDirectives/);
   assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
   assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
-  assert.match(html, /app\.js\?v=68/);
-  assert.match(html, /styles\.css\?v=68/);
+  assert.match(html, /app\.js\?v=81/);
+  assert.match(html, /styles\.css\?v=81/);
+  assert.match(js, /status === "failed"\) return/);
+  assert.match(js, /event\.messageId/);
+  assert.match(js, /duplicateByText/);
+  assert.match(fs.readFileSync(path.join(root, "..", "desktop", "src", "mobile-control", "dto.mjs"), "utf8"), /messageId: cleanMobileText\(event\.messageId/);
+  assert.match(fs.readFileSync(path.join(root, "..", "desktop", "src", "mobile-control", "session-registry.mjs"), "utf8"), /messageId: item\.messageId/);
+  assert.match(js, /function stripAnsi/);
+  assert.match(js, /function healMarkdownFences/);
+  assert.match(js, /healMarkdownFences\(stripAnsi\(cacheKey\)/);
+  assert.match(css, /\.stream-tail\.streaming::after/);
+  assert.match(css, /@keyframes cursor-blink/);
+  assert.match(html, /interactive-widget=resizes-content/);
+  assert.match(js, /schedulePersistEventCursor/);
+  assert.match(js, /flushEventCursor/);
+  assert.match(js, /function safeStreamBoundary/);
+  assert.match(js, /IntersectionObserver/);
+  assert.match(js, /function autogrowTextarea/);
+  assert.match(js, /setupViewportCompensation/);
+  assert.match(js, /--keyboard-inset/);
+  assert.match(css, /env\(safe-area-inset-top\)/);
+  // 根元素禁止 overscroll-behavior：Android WebView 对根滚动容器的 contain 处理
+  // 有缺陷，会吞掉整页触摸滚动；只允许内层滚动容器各自 contain。
+  assert.doesNotMatch(css, /html,body\{[^}]*overscroll-behavior/);
+  assert.match(css, /\.model-list\{[^}]*overscroll-behavior:contain/);
+  assert.match(css, /data-shell="android"/);
   assert.match(js, /function renderExecutionCard/);
-  assert.match(js, /parseStructuredNotification/);
+  assert.match(js, /function executionProgressRing/);
+  assert.match(js, /function agentContextDetailsHtml/);
+  assert.match(js, /function renderSessionMenu/);
+  assert.match(js, /function bindMessageLongPress/);
+  assert.doesNotMatch(js, /function toggleVoiceInput/);
+  assert.match(js, /function forkAndRerun/);
+  assert.match(js, /allow_session/);
+  assert.match(js, /data-action="unarchive"/);
+  assert.match(js, /caps\.fork === true/);
+  assert.match(js, /nativeCopyText/);
+  assert.match(js, /function resetGroupExpandState/);
+  assert.doesNotMatch(js, /share-summary/);
+  assert.doesNotMatch(js, /compactCurrentSession/);
+  assert.doesNotMatch(html, /id="turn-rail"/);
+  assert.doesNotMatch(js, /function renderTurnRail/);
+  assert.match(js, /export-markdown/);
+  assert.match(js, /copy-session-id/);
+  assert.match(js, /splitStructuredContent/);
   assert.match(js, /class="structured-notification/);
+  assert.match(js, /class="agent-context/);
   assert.match(css, /\.structured-notification\{/);
+  assert.match(css, /\.execution-ring/);
+  assert.match(css, /\.quote-bar\{/);
+  assert.match(css, /\.quote-bar\[hidden\]\{display:none!important\}/);
+  assert.match(js, /SwitchyardHandleBack/);
+  assert.match(js, /bindEdgeSwipeBack/);
+  assert.doesNotMatch(html, /id="voice-control"/);
+  assert.match(html, /id="message-action-sheet"/);
+  {
+    const androidSource = fs.readFileSync(path.resolve("apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
+    const androidManifest = fs.readFileSync(path.resolve("apps/android/app/src/main/AndroidManifest.xml"), "utf8");
+    assert.match(androidSource, /shareText\(/);
+    assert.match(androidSource, /copyText\(/);
+    assert.match(androidSource, /showNotification\(/);
+    assert.match(androidManifest, /android\.intent\.action\.SEND/);
+  }
   assert.match(css, /\.composer \.runtime-shortcut\{[^}]*display:flex/);
   assert.match(js, /function patchStats/);
   assert.match(js, /function refreshLiveExecutionCard/);
@@ -184,8 +241,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(html, /id="stop-session-sheet"/);
   assert.match(html, /id="stop-session-name"/);
   assert.match(js, /function renderStopSessionSheet/);
-  assert.match(js, /GROUP_STATE_KEY/);
-  assert.match(js, /PINNED_PROJECTS_KEY/);
+  assert.match(js, /resetGroupExpandState/);
+    assert.match(js, /PINNED_PROJECTS_KEY/);
   assert.match(js, /data-open-active-sessions/);
   assert.match(js, /approval\.detail\?\.content/);
   assert.match(css, /\.approval-detail\{/);
@@ -256,11 +313,17 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /THEME_KEY/);
   assert.match(js, /function applyTheme/);
   assert.match(html, /id="theme-toggle"/);
-  assert.match(css, /:root\[data-theme="dark"\]\{/);
+  assert.match(html, /id="theme-sheet"/);
+  assert.match(js, /THEME_DEFS/);
+  assert.match(js, /data-theme-choice/);
+  assert.match(css, /:root\[data-theme="ink"\]\{/);
+  assert.match(css, /:root\[data-theme="midnight"\]\{/);
+  assert.match(css, /:root\[data-scheme="dark"\]/);
+  assert.match(css, /\.theme-grid\{/);
   assert.match(js, /nativeOpenExternalUrlAvailable/);
   assert.match(js, /openConversationLink/);
   assert.match(js, /\.msg-body a\[href\]/);
-  assert.doesNotMatch(js, /SwitchyardVoice|startVoiceInput/);
+  assert.doesNotMatch(js, /function toggleVoiceInput/);
   assert.doesNotMatch(html, /id="voice-control"/);
   assert.match(js, /\/mobile\/v1\/sessions\/search\?q=/);
   assert.match(js, /function renderContentHits/);
@@ -288,7 +351,8 @@ test("mobile structured notifications use one generic tagged-JSON adapter", () =
     tag: "subagent_notification",
     label: "子任务通知",
     state: "completed",
-    text: "已完成 **只读审查**"
+    text: "已完成 **只读审查**",
+    agentPath: "019fac"
   });
   assert.equal(notificationStateLabel(subagent.state), "已完成");
   assert.deepEqual(
@@ -296,4 +360,59 @@ test("mobile structured notifications use one generic tagged-JSON adapter", () =
     { tag: "workflow_notice", label: "Workflow Notice", state: "running", text: "正在同步任务" }
   );
   assert.equal(parseStructuredNotification("<strong>普通 Markdown</strong>"), null);
+  // 闭合标签容错：部分运行时会在 JSON 后补 </tag>。
+  assert.deepEqual(
+    parseStructuredNotification('<subagent_notification> {"message":"收尾汇报"} </subagent_notification>'),
+    { tag: "subagent_notification", label: "子任务通知", state: "", text: "收尾汇报" }
+  );
+});
+
+test("mobile structured notifications embedded in prose are extracted as segments", () => {
+  const mixed = '前置说明\n<subagent_notification> {"status":{"completed":"嵌套 {json} 也要正确"}} </subagent_notification>\n后续正文';
+  const segments = splitStructuredContent(mixed);
+  assert.deepEqual(segments, [
+    { type: "text", text: "前置说明\n" },
+    { type: "notification", tag: "subagent_notification", label: "子任务通知", state: "completed", text: "嵌套 {json} 也要正确" },
+    { type: "text", text: "\n后续正文" }
+  ]);
+  // 标签后不是 JSON、或 JSON 没有可展示文本时保持原文，不产生卡片。
+  assert.deepEqual(splitStructuredContent("<strong>普通 Markdown</strong>"), [{ type: "text", text: "<strong>普通 Markdown</strong>" }]);
+  assert.deepEqual(splitStructuredContent('<notice> {"foo":1}'), [{ type: "text", text: '<notice> {"foo":1}' }]);
+  // 普通文本不受影响的快速路径。
+  assert.deepEqual(splitStructuredContent("hello"), [{ type: "text", text: "hello" }]);
+});
+
+test("mobile collapses agent context envelopes without enumerating tag names", () => {
+  assert.equal(isAgentContextTag("INSTRUCTIONS"), true);
+  assert.equal(isAgentContextTag("SYSTEM_REMINDER"), true);
+  assert.equal(isAgentContextTag("user_instructions"), true);
+  assert.equal(isAgentContextTag("strong"), false);
+  assert.equal(isAgentContextTag("thinking"), false);
+
+  const mixed = [
+    "这部分目前确实还没完成。",
+    "",
+    "# AGENTS.md instructions for /Users/demo/project",
+    "<INSTRUCTIONS>",
+    "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.",
+    "## 角色定位",
+    "你是长期执行型 Codex 合作者。",
+    "</INSTRUCTIONS>",
+    "",
+    "然后继续正文。"
+  ].join("\n");
+  const segments = splitStructuredContent(mixed);
+  assert.equal(segments[0].type, "text");
+  assert.match(segments[0].text, /这部分目前确实还没完成/);
+  assert.equal(segments[1].type, "context");
+  assert.equal(segments[1].tag, "INSTRUCTIONS");
+  assert.equal(segments[1].label, "系统指令");
+  assert.match(segments[1].text, /AGENTS\.md instructions for/);
+  assert.match(segments[1].text, /长期执行型/);
+  assert.equal(segments[2].type, "text");
+  assert.match(segments[2].text, /然后继续正文/);
+  assert.equal(stripAgentContext(mixed), "这部分目前确实还没完成。\n\n然后继续正文。");
+  // 未知大写信封也应收起；标签后 JSON 仍走通知卡。
+  assert.equal(splitStructuredContent("<FOO_BAR>meta noise</FOO_BAR>")[0].type, "context");
+  assert.equal(splitStructuredContent('<subagent_notification> {"message":"ok"}')[0].type, "notification");
 });

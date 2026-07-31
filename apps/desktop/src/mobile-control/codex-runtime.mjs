@@ -6,6 +6,7 @@ import { scanCodexSessions } from "./local-session-scan.mjs";
 import { mergeTool, reasoningText, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
 import { materializeImageAttachments } from "./temp-attachments.mjs";
 import { applyGoalTool, deriveGoalFromMessages } from "./goal-state.mjs";
+import { stripAgentContext } from "../../../mobile/structured-notification.mjs";
 
 const CAPABILITIES = Object.freeze({
   sendMessage: true,
@@ -192,7 +193,9 @@ export function cleanCodexUserPart(value) {
   const text = String(value || "");
   if (!text.trim()) return "";
   if (CODEX_INJECTION_RE.test(text)) return "";
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
+  // 非枚举：按信封形态剥掉 AGENTS.md / <INSTRUCTIONS> 等注入，剩余正文才进用户气泡。
+  const withoutReminder = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ");
+  return stripAgentContext(withoutReminder);
 }
 
 export function parseCodexRollout(lines, { limit = 500 } = {}) {
@@ -471,10 +474,22 @@ export function createCodexRuntime({
   const nativeSession = (sessionId) => scanSessions({ limit: 1000 })
     .find((row) => row.sessionId === String(sessionId));
   const readNativeFallback = (sessionId) => nativeSession(sessionId);
-  const isDesktopOwned = (session) => String(session?.originator || "").trim().toLowerCase() === "codex desktop";
+  const originatorOf = (session) => String(session?.originator || "").trim().toLowerCase();
+  const isDesktopOwned = (session) => {
+    const originator = originatorOf(session);
+    return originator === "codex desktop" || originator === "codex_desktop" || originator === "chatgpt";
+  };
   const desktopUnavailable = (error) => new Error(
     `Codex Desktop 会话暂时不可连接：${error?.message || String(error)}`
   );
+  const syncUnavailableError = () => {
+    const error = new Error(
+      "当前 Codex Desktop 没有提供可用的共享会话连接。消息已保留在手机待发送队列，避免只写入本地而桌面看不到。请在桌面 Codex 中重新打开该会话后，在手机点“继续发送”。"
+    );
+    error.code = "CODEX_DESKTOP_SYNC_UNAVAILABLE";
+    error.retryable = true;
+    return error;
+  };
   const requireDesktopSync = async () => {
     // If the mobile service started while Codex Desktop was not ready, it may
     // be connected to a private app-server. Retry the shared daemon on each
@@ -485,12 +500,14 @@ export function createCodexRuntime({
       try { await client.reconnect(); } catch {}
       if (client.usingProxy !== false) return true;
     }
-    const error = new Error(
-      "当前 Codex Desktop 没有提供可用的共享会话连接。消息已保留在手机待发送队列，避免只写入本地而桌面看不到。请在桌面 Codex 中重新打开该会话后，在手机点“继续发送”。"
-    );
-    error.code = "CODEX_DESKTOP_SYNC_UNAVAILABLE";
-    error.retryable = true;
-    throw error;
+    throw syncUnavailableError();
+  };
+  const ensureSharedProxy = async () => {
+    if (client.usingProxy !== false) return true;
+    if (typeof client.reconnect === "function") {
+      try { await client.reconnect(); } catch {}
+    }
+    return client.usingProxy !== false;
   };
   const resumeDesktopThread = async (sessionId) => {
     const resume = async () => {
@@ -702,6 +719,13 @@ export function createCodexRuntime({
       : null).filter(Boolean);
   };
 
+  const startSharedTurn = async (sid, turnParams) => {
+    const result = await client.request("turn/start", turnParams, 60_000);
+    const turnId = String(result?.turn?.id || result?.id || "");
+    if (turnId) activeTurns.set(sid, turnId);
+    return { accepted: true, turnId };
+  };
+
   const sendMessage = async (sessionId, { text, attachments = [] } = {}) => {
     const sid = String(sessionId);
     const attachmentText = attachments.filter((attachment) => attachment.kind !== "image")
@@ -723,21 +747,48 @@ export function createCodexRuntime({
       ...(sandboxPolicy(permission) ? { sandboxPolicy: sandboxPolicy(permission) } : {})
     };
     const local = readNativeFallback(sid);
+    const missingThreadError = (error) => /thread not found|unknown thread|session not found/i.test(String(error?.message || error));
+    const nativeFallback = (error) => {
+      if (local && (attachments.some((attachment) => attachment.kind === "image") || missingThreadError(error))) {
+        return sendNativeMessage(sid, local, { text, attachments });
+      }
+      throw error;
+    };
+
     if (isDesktopOwned(local)) {
       // Never resume or start a Desktop-owned thread through the private
       // fallback app-server: that would make the phone's turn invisible to
       // Codex Desktop. Establish the shared transport first.
       await requireDesktopSync();
       await resumeDesktopThread(sid);
-      const result = await client.request("turn/start", turnParams, 60_000);
-      const turnId = String(result?.turn?.id || result?.id || "");
-      if (turnId) activeTurns.set(sid, turnId);
-      return { accepted: true, turnId };
+      return startSharedTurn(sid, turnParams);
     }
+
+    // Explicit shared proxy: phone turns land in the Desktop-watched process.
+    if (client.usingProxy === true) {
+      try {
+        return await startSharedTurn(sid, turnParams);
+      } catch (error) {
+        return nativeFallback(error);
+      }
+    }
+
+    // Explicit private fallback: never turn/start into a void Desktop can't see.
+    // Reconnect once; still private → durable CLI resume, or refuse.
+    if (client.usingProxy === false) {
+      if (await ensureSharedProxy()) {
+        try {
+          return await startSharedTurn(sid, turnParams);
+        } catch (error) {
+          return nativeFallback(error);
+        }
+      }
+      if (local) return sendNativeMessage(sid, local, { text, attachments });
+      throw syncUnavailableError();
+    }
+
+    // usingProxy unset（测试/旧注入）：保留 probe → native / turn/start 兼容行为。
     if (local) {
-      // CLI-owned rollouts may not be registered in this app-server process.
-      // Probe app-server first, then resume the exact CLI rollout only when
-      // the app-server does not know it.
       try {
         const probe = await client.request("thread/read", { threadId: sid, includeTurns: false }, 15_000);
         if (!probe?.thread?.id && !probe?.id) return sendNativeMessage(sid, local, { text, attachments });
@@ -745,26 +796,10 @@ export function createCodexRuntime({
         return sendNativeMessage(sid, local, { text, attachments });
       }
     }
-    // Keep the same native thread owner as Codex desktop. Some Codex builds
-    // can read an old desktop thread through app-server but reject image input
-    // on that historical thread. In that case use the native resume path,
-    // which supports --image and preserves the original thread id.
     try {
-      const result = await client.request("turn/start", turnParams, 60_000);
-      const turnId = String(result?.turn?.id || result?.id || "");
-      if (turnId) activeTurns.set(sid, turnId);
-      return { accepted: true, turnId };
+      return await startSharedTurn(sid, turnParams);
     } catch (error) {
-      // A Switchyard/CLI rollout is durable on disk and can be resumed by the
-      // native CLI even when the currently connected app-server does not own
-      // that thread (for example after Desktop or its proxy restarted). Keep
-      // the strict Desktop-owned branch above, but never strand a locally
-      // owned Switchyard thread behind an app-server-only "thread not found".
-      const missingThread = /thread not found|unknown thread|session not found/i.test(String(error?.message || error));
-      if (local && (attachments.some((attachment) => attachment.kind === "image") || missingThread)) {
-        return sendNativeMessage(sid, local, { text, attachments });
-      }
-      throw error;
+      return nativeFallback(error);
     }
   };
 

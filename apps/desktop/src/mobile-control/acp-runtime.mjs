@@ -114,6 +114,15 @@ function normalizeSession(row, capabilities) {
   };
 }
 
+/** ACP 完成态常回 end_turn；手机 UI 只认 completed 等标准状态。 */
+function normalizeStopReason(value) {
+  const reason = String(value || "completed").trim().toLowerCase();
+  if (!reason || ["end_turn", "stop", "max_tokens", "length", "completed", "end"].includes(reason)) {
+    return "completed";
+  }
+  return String(value || "completed");
+}
+
 export function createAcpRuntime({
   id,
   label,
@@ -135,6 +144,7 @@ export function createAcpRuntime({
   const sessions = new Map();
   const messages = new Map();
   const pendingPrompts = new Map();
+  const streamedDuringPrompt = new Set();
   const loadedSessions = new Set();
   let dynamicCommands = [];
 
@@ -146,12 +156,31 @@ export function createAcpRuntime({
         return;
       }
       const event = updateEvent(frame);
+      // 发送中的 user 回声：live 已有锚点、手机账本也已投影，跳过。
+      // session/load 回放不在 pendingPrompts 内，仍需写入 live 供 readSession。
+      if (event.runtimeEvent === "user_message_chunk") {
+        if (!pendingPrompts.has(event.sessionId) && event.summary) {
+          const rows = messages.get(event.sessionId) || [];
+          const previous = rows.at(-1);
+          if (previous && previous.role === "user" && previous.kind === "text") previous.text += event.summary;
+          else rows.push({ role: "user", text: event.summary, kind: "text" });
+          messages.set(event.sessionId, rows.slice(-500));
+        }
+        return;
+      }
       if (["message", "thinking"].includes(event.type) && event.summary) {
         const rows = messages.get(event.sessionId) || [];
         const previous = rows.at(-1);
-        if (previous && previous.role === event.role && previous.kind === event.runtimeEvent) previous.text += event.summary;
-        else rows.push({ role: event.role, text: event.summary, kind: event.type === "thinking" ? "thinking" : event.runtimeEvent });
+        // 存盘 kind 用 thinking/text 语义；比较必须与写入一致，否则每个 thought chunk 都会新建一行。
+        const nextKind = event.type === "thinking"
+          ? "thinking"
+          : event.role === "assistant" ? "text" : (event.runtimeEvent || "text");
+        if (previous && previous.role === event.role && previous.kind === nextKind) previous.text += event.summary;
+        else rows.push({ role: event.role, text: event.summary, kind: nextKind });
         messages.set(event.sessionId, rows.slice(-500));
+        if (event.type === "message" && event.role === "assistant" && pendingPrompts.has(event.sessionId)) {
+          streamedDuringPrompt.add(event.sessionId);
+        }
       } else if (event.type === "tool" && event.tool) {
         const rows = messages.get(event.sessionId) || [];
         const previous = event.tool.id ? rows.findLast((row) => row.kind === "tool" && row.tool?.id === event.tool.id) : null;
@@ -265,26 +294,38 @@ export function createAcpRuntime({
     // ACP agents keep resume state in their process. A mobile request can arrive
     // after the service restarted, so reload the shared CLI session before prompt.
     if (!loadedSessions.has(sid)) await loadSession(sid);
+    // messageId 只用于 Switchyard 端幂等；不要传给 session/prompt。
+    // Grok 对未知字段会在流式结束后回 -32603 Internal error，导致手机先看到回答再报错。
+    void messageId;
+    // 发送时写入 user 锚点，供 mergeGrokLiveTail / liveMessages 截取「本轮」；
+    // Agent 回声的 user_message_chunk 仍不向手机账本转发。
+    const promptText = String(text || "").trim();
+    if (promptText) {
+      const rows = messages.get(sid) || [];
+      rows.push({ role: "user", text: promptText, kind: "text" });
+      messages.set(sid, rows.slice(-500));
+    }
     const prompt = client.request("session/prompt", {
       sessionId: sid,
-      ...(messageId ? { messageId: String(messageId) } : {}),
       prompt: [
         ...(() => {
           const files = attachments.filter((attachment) => attachment.kind !== "image")
             .map((attachment) => `\n\n<attachment name="${attachment.name}">\n${attachment.text || `本地文件路径：${attachment.path || "不可用"}`}\n</attachment>`).join("");
-          const promptText = `${String(text || "")}${files}`;
-          return promptText ? [{ type: "text", text: promptText }] : [];
+          const body = `${String(text || "")}${files}`;
+          return body ? [{ type: "text", text: body }] : [];
         })(),
         ...attachments.filter((attachment) => attachment.kind === "image").map((attachment) => ({ type: "image", data: attachment.data, mimeType: attachment.mimeType }))
       ]
     }, 24 * 60 * 60 * 1000);
     pendingPrompts.set(sid, prompt);
+    streamedDuringPrompt.delete(sid);
     prompt.then((result) => {
       pendingPrompts.delete(sid);
+      streamedDuringPrompt.delete(sid);
       const event = {
         sessionId: sid,
         type: "status",
-        summary: String(result?.stopReason || "completed"),
+        summary: normalizeStopReason(result?.stopReason),
         runtimeEvent: "session/prompt:completed"
       };
       for (const listener of subscribers) {
@@ -292,14 +333,44 @@ export function createAcpRuntime({
       }
     }).catch((error) => {
       pendingPrompts.delete(sid);
-      const event = {
+      const hadStream = streamedDuringPrompt.delete(sid);
+      // Grok 常见：正文已通过 agent_message_chunk 推完，收尾 RPC 仍回 -32603 /
+      // Internal error。若已有流式内容，按完成处理，避免手机刷盘把回答冲掉。
+      const errorCode = Number(error?.code);
+      const errorMessage = String(error?.message || error || "");
+      const softComplete = hadStream && (errorCode === -32603 || /internal\s*error/i.test(errorMessage));
+      if (softComplete) {
+        const event = {
+          sessionId: sid,
+          type: "status",
+          summary: "completed",
+          runtimeEvent: "session/prompt:soft-completed"
+        };
+        for (const listener of subscribers) {
+          try { listener(event); } catch {}
+        }
+        return;
+      }
+      const detail = error?.data && typeof error.data === "object"
+        ? JSON.stringify(error.data).slice(0, 400)
+        : "";
+      const codeLabel = Number.isFinite(Number(error?.code)) ? `（${error.code}）` : "";
+      const summary = `${error?.message || String(error)}${codeLabel}${detail ? ` ${detail}` : ""}`.trim();
+      const failed = {
         sessionId: sid,
         type: "error",
-        summary: error?.message || String(error),
+        summary,
         runtimeEvent: "session/prompt:failed"
       };
+      const status = {
+        sessionId: sid,
+        type: "status",
+        summary: "failed",
+        runtimeEvent: "session/prompt:failed-status"
+      };
       for (const listener of subscribers) {
-        try { listener(event); } catch {}
+        try { listener(failed); } catch {}
+        try { listener(status); } catch {}
       }
     });
     await Promise.resolve();
@@ -355,6 +426,12 @@ export function createAcpRuntime({
     },
     listSessions,
     readSession,
+    liveMessages(sessionId) {
+      return (messages.get(String(sessionId)) || []).map((message) => ({ ...message, ...(message.tool ? { tool: { ...message.tool } } : {}) }));
+    },
+    isBusy(sessionId) {
+      return pendingPrompts.has(String(sessionId));
+    },
     createSession,
     sendMessage,
     setModel,

@@ -86,6 +86,7 @@ export function classifyMobileApproval(input = {}) {
     allowOptionId: acpAllowed ? String(allow.optionId) : null,
     rejectOptionId: reject?.optionId ? String(reject.optionId) : null,
     permanentOptionId: null,
-    actions: mobileAllowed ? ["allow_once", "deny_once"] : []
+    // allow_session：本会话后续同类审批自动允许（Switchyard overlay，非永久授权给 Agent）。
+    actions: mobileAllowed ? ["allow_once", "allow_session", "deny_once"] : []
   };
 }

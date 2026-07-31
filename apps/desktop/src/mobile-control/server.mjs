@@ -303,7 +303,7 @@ export function createMobileControlServer({
           permissionMode: body.permissionMode
         }, device.id));
       }
-      const allowed = new Set(["cancel", "rename", "archive", "unarchive", "fork", "compact", "pin"]);
+      const allowed = new Set(["cancel", "rename", "archive", "unarchive", "fork", "compact", "pin", "autoApprove"]);
       if (!allowed.has(action)) return json(res, 404, { error: "not_found" });
       return json(res, 200, await registry.perform(sessionId, action, body, device.id));
     } catch (error) {
