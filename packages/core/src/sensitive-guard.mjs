@@ -45,6 +45,39 @@ function luhnOk(digits) {
   return sum % 10 === 0;
 }
 
+/** 排除时间戳/日期号等易过 Luhn 的假银行卡。 */
+function looksLikeTimestampId(text, digits) {
+  const raw = String(text || "").trim();
+  // 20260731-195349 / 2026-07-31 19:53:49 / 20260731195349
+  if (/^\d{8}[-_\s]?\d{6}$/.test(raw)) return true;
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(raw)) return true;
+  if (/^(19|20)\d{6}\d{6}$/.test(digits) && digits.length === 14) return true;
+  // 以合理年月日开头的紧凑日期（YYYYMMDD…）
+  if (/^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/.test(digits)) {
+    // 14 位日期时分秒、或更长但以日期开头且总长偏短的追踪号
+    if (digits.length <= 16) return true;
+  }
+  return false;
+}
+
+function looksLikeBankCard(match) {
+  const text = String(match || "").trim();
+  if (!/^[\d -]+$/.test(text)) return false;
+  const digits = text.replace(/\D/g, "");
+  if (digits.length < 15 || digits.length > 19) return false;
+  if (!luhnOk(digits)) return false;
+  if (looksLikeTimestampId(text, digits)) return false;
+  if (!/[ -]/.test(text)) return false;
+  // 拒绝 20260731-195349 这类「8位日期-6位时分秒」。
+  if (/^\d{8}[ -]\d{6}$/.test(text)) return false;
+  const parts = text.split(/[ -]+/).filter(Boolean);
+  // 常见卡号分组：至少 3 组，每组 1–4 位，且至少一组是 4 位。
+  if (parts.length < 3) return false;
+  if (parts.some((part) => !/^\d{1,4}$/.test(part))) return false;
+  if (!parts.some((part) => part.length === 4)) return false;
+  return true;
+}
+
 function cnIdChecksumOk(id) {
   const s = String(id || "").toUpperCase();
   if (!/^\d{17}[\dX]$/.test(s)) return false;
@@ -130,6 +163,19 @@ function makeReplaceRule({ id, type, label, regex, validate }) {
   };
 }
 
+/** 内置规则清单（供设置页开关；默认全部开启）。 */
+export const BUILTIN_SENSITIVE_RULE_OPTIONS = Object.freeze([
+  { id: "cn_id_card", label: "身份证号" },
+  { id: "cn_mobile", label: "手机号" },
+  { id: "bank_card", label: "银行卡号" },
+  { id: "email", label: "邮箱" },
+  { id: "openai_sk", label: "API Key (sk-)" },
+  { id: "aws_akia", label: "云访问密钥 (AKIA)" },
+  { id: "bearer_token", label: "Bearer Token" },
+  { id: "jwt", label: "JWT" },
+  { id: "private_ipv4", label: "内网 IP" }
+]);
+
 /** @type {Array<{ id: string, type: string, label: string, test: Function }>} */
 export const BUILTIN_SENSITIVE_RULES = [
   makeReplaceRule({
@@ -153,14 +199,7 @@ export const BUILTIN_SENSITIVE_RULES = [
     label: "银行卡号",
     // 两侧不能贴字母：避免打码 msg_/resp_ 等十六进制 ID 中间的数字段。
     regex: /(?<![A-Za-z0-9])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9])/g,
-    validate: (match) => {
-      if (!/^[\d -]+$/.test(match)) return false;
-      const digits = match.replace(/\D/g, "");
-      if (!luhnOk(digits)) return false;
-      // 纯连续数字易与协议 ID / 订单号撞车：默认要求分隔符。
-      if (/[ -]/.test(match)) return digits.length >= 13 && digits.length <= 19;
-      return false;
-    }
+    validate: (match) => looksLikeBankCard(match)
   }),
   makeReplaceRule({
     id: "email",
@@ -274,10 +313,19 @@ export function normalizeSensitiveGuardConfig(input = {}) {
     })
     .filter(Boolean)
     .slice(0, 50);
+  const builtinRules = {};
+  for (const rule of BUILTIN_SENSITIVE_RULE_OPTIONS) {
+    if (input?.builtinRules && Object.prototype.hasOwnProperty.call(input.builtinRules, rule.id)) {
+      builtinRules[rule.id] = input.builtinRules[rule.id] !== false;
+    } else {
+      builtinRules[rule.id] = true;
+    }
+  }
   return {
     enabled,
     mode,
     clients,
+    builtinRules,
     keywords,
     patterns,
     // 默认记录完整命中原文到本机审计日志（高敏感，文件权限 0600）。
@@ -289,11 +337,12 @@ export function normalizeSensitiveGuardConfig(input = {}) {
 
 export function buildSensitiveRules(config = {}) {
   const guard = normalizeSensitiveGuardConfig(config);
+  const enabledBuiltin = BUILTIN_SENSITIVE_RULES.filter((rule) => guard.builtinRules?.[rule.id] !== false);
   const custom = [
     ...guard.keywords.map((keyword, index) => compileKeywordRule(keyword, index)).filter(Boolean),
     ...guard.patterns.map((row, index) => compilePatternRule(row, index)).filter(Boolean)
   ];
-  return [...BUILTIN_SENSITIVE_RULES, ...custom];
+  return [...enabledBuiltin, ...custom];
 }
 
 export function isClientSensitiveGuardEnabled(config, clientId) {

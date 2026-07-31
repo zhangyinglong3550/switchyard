@@ -85,7 +85,8 @@ import {
   allowSensitiveBypass,
   clearSensitiveBypass,
   listSensitiveBypasses,
-  SENSITIVE_GUARD_CLIENTS
+  SENSITIVE_GUARD_CLIENTS,
+  BUILTIN_SENSITIVE_RULE_OPTIONS
 } from "../../../packages/core/src/sensitive-guard.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/model-directory-sync.mjs";
@@ -1058,6 +1059,9 @@ ipcMain.handle("sensitive-guard:set", (_e, payload = {}) => {
       ? (String(payload.mode).toLowerCase() === "block" ? "block" : "redact")
       : current.mode,
     clients: payload.clients !== undefined ? { ...current.clients, ...payload.clients } : current.clients,
+    builtinRules: payload.builtinRules !== undefined
+      ? { ...current.builtinRules, ...payload.builtinRules }
+      : current.builtinRules,
     keywords: payload.keywords !== undefined ? payload.keywords : current.keywords,
     patterns: payload.patterns !== undefined ? payload.patterns : current.patterns,
     auditRetainOriginal: payload.auditRetainOriginal !== undefined
@@ -1073,12 +1077,19 @@ ipcMain.handle("sensitive-guard:set", (_e, payload = {}) => {
   };
   const result = saveValidated(next, { reason: "sensitive-guard" });
   try { reloadConfig(); } catch {}
-  return { ok: true, path: result.path, sensitiveGuard: next.sensitiveGuard, clients: SENSITIVE_GUARD_CLIENTS };
+  return {
+    ok: true,
+    path: result.path,
+    sensitiveGuard: next.sensitiveGuard,
+    clients: SENSITIVE_GUARD_CLIENTS,
+    builtinRules: BUILTIN_SENSITIVE_RULE_OPTIONS
+  };
 });
 ipcMain.handle("sensitive-guard:get", () => ({
   ok: true,
   sensitiveGuard: normalizeSensitiveGuardConfig(readConfig()?.sensitiveGuard || {}),
-  clients: SENSITIVE_GUARD_CLIENTS
+  clients: SENSITIVE_GUARD_CLIENTS,
+  builtinRules: BUILTIN_SENSITIVE_RULE_OPTIONS
 }));
 ipcMain.handle("sensitive-guard:preview", (_e, payload = {}) => {
   const guard = normalizeSensitiveGuardConfig(

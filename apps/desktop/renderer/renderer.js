@@ -1455,6 +1455,16 @@ function sensitiveAuditActionLabel(action) {
   return action || "-";
 }
 
+/** 审计时间按本机时区显示（存储仍为 UTC ISO）。 */
+function formatSensitiveAuditTime(iso) {
+  const raw = String(iso || "").trim();
+  if (!raw) return "-";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw.replace("T", " ").slice(0, 19);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 function formatSensitiveOriginals(row) {
   const items = Array.isArray(row.originals) && row.originals.length
     ? row.originals
@@ -1498,7 +1508,7 @@ async function refreshSensitiveAudit() {
   }
   tbody.innerHTML = rows.length
     ? rows.map((row) => `<tr>
-        <td class="mono tiny">${escapeHtml((row.at || "").replace("T", " ").slice(0, 19))}</td>
+        <td class="mono tiny">${escapeHtml(formatSensitiveAuditTime(row.at))}</td>
         <td>${escapeHtml(row.clientId || "-")}</td>
         <td class="mono tiny">${escapeHtml(row.modelId || "-")}</td>
         <td>${escapeHtml(sensitiveAuditActionLabel(row.action))}</td>
@@ -1679,6 +1689,18 @@ const SENSITIVE_GUARD_CLIENT_LABELS = {
   "claude-app": "Claude App"
 };
 
+const SENSITIVE_BUILTIN_RULE_OPTIONS = [
+  { id: "cn_id_card", label: "身份证号" },
+  { id: "cn_mobile", label: "手机号" },
+  { id: "bank_card", label: "银行卡号" },
+  { id: "email", label: "邮箱" },
+  { id: "openai_sk", label: "API Key (sk-)" },
+  { id: "aws_akia", label: "云访问密钥" },
+  { id: "bearer_token", label: "Bearer Token" },
+  { id: "jwt", label: "JWT" },
+  { id: "private_ipv4", label: "内网 IP" }
+];
+
 function splitListField(value) {
   return String(value || "")
     .split(/[\n,，;；]+/)
@@ -1691,6 +1713,10 @@ function collectSensitiveGuardForm() {
   document.querySelectorAll("#sensitive-guard-clients input[data-client]")?.forEach((input) => {
     clients[input.dataset.client] = Boolean(input.checked);
   });
+  const builtinRules = {};
+  document.querySelectorAll("#sensitive-guard-builtin-rules input[data-rule]")?.forEach((input) => {
+    builtinRules[input.dataset.rule] = Boolean(input.checked);
+  });
   let patterns = [];
   const patternsRaw = document.getElementById("sensitive-guard-patterns")?.value?.trim() || "";
   if (patternsRaw) {
@@ -1702,6 +1728,7 @@ function collectSensitiveGuardForm() {
     enabled: Boolean(document.getElementById("sensitive-guard-enabled")?.checked),
     auditRetainOriginal: Boolean(document.getElementById("sensitive-guard-audit-original")?.checked),
     clients,
+    builtinRules,
     keywords: splitListField(document.getElementById("sensitive-guard-keywords")?.value || ""),
     patterns,
     whitelist: {
@@ -2166,6 +2193,17 @@ function renderSensitiveGuardSettings() {
       return `<label class="import-provider-check" style="display:flex; gap:6px; align-items:center;">
         <input type="checkbox" data-client="${id}" ${checked ? "checked" : ""}>
         <span>${label}</span>
+      </label>`;
+    }).join("");
+  }
+
+  const builtinHost = document.getElementById("sensitive-guard-builtin-rules");
+  if (builtinHost) {
+    builtinHost.innerHTML = SENSITIVE_BUILTIN_RULE_OPTIONS.map((rule) => {
+      const checked = guard.builtinRules?.[rule.id] !== false;
+      return `<label class="import-provider-check" style="display:flex; gap:6px; align-items:center;">
+        <input type="checkbox" data-rule="${rule.id}" ${checked ? "checked" : ""}>
+        <span>${escapeHtml(rule.label)}</span>
       </label>`;
     }).join("");
   }

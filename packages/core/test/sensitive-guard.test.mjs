@@ -224,12 +224,31 @@ test("does not redact git urls or private ip inside http urls", () => {
   assert.equal(result.body.messages[0].content[0].image_url.url, "http://10.20.30.40:8080/a.png");
 });
 
+test("builtin rule toggles can disable internal ip redaction", () => {
+  const text = "主机 10.1.2.3 手机 13900001111";
+  const off = redactSensitiveText(text, {
+    config: { builtinRules: { private_ipv4: false } }
+  });
+  assert.equal(off.text.includes("10.1.2.3"), true);
+  assert.match(off.text, /REDACTED_PHONE/);
+  const on = redactSensitiveText(text, {
+    config: { builtinRules: { private_ipv4: true } }
+  });
+  assert.match(on.text, /REDACTED_INTERNAL_IP/);
+});
+
+test("rejects timestamp-like ids that pass Luhn as bank cards", () => {
+  const stamp = "20260731-195349";
+  const result = redactSensitiveText(`文件 ${stamp} 与主机 10.1.2.3`);
+  assert.equal(result.text.includes(stamp), true);
+  assert.equal(result.text.includes("REDACTED_BANK_CARD"), false);
+  assert.match(result.text, /REDACTED_INTERNAL_IP/);
+});
+
 test("still redacts spaced bank cards in prose", () => {
-  const result = redactSensitiveText("卡号 6222 0212 3456 7890");
-  // 仅当 Luhn 通过时命中；这里用明确分隔的卡号形态验证规则仍可用。
-  if (result.total > 0) {
-    assert.match(result.text, /REDACTED_BANK_CARD/);
-  }
+  const result = redactSensitiveText("卡号 4111-1111-1111-1111");
+  assert.match(result.text, /REDACTED_BANK_CARD/);
+  assert.equal(result.text.includes("4111-1111-1111-1111"), false);
 });
 
 test("outbound preview shows redacted snippets from actual outbound body", () => {
