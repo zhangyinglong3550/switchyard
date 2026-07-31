@@ -179,7 +179,12 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
     const result = await callCursorSubscription(provider, { ...outbound, model: upstreamModel, stream }, {
       keychain: upstreamOptsWithOverrides.cursorSubscriptionKeychain,
       transport: upstreamOptsWithOverrides.cursorSubscriptionTransport,
-      signal: upstreamOptsWithOverrides.signal
+      signal: upstreamOptsWithOverrides.signal,
+      sensitiveGuard: upstreamOptsWithOverrides.sensitiveGuard,
+      onSensitiveAudit: upstreamOptsWithOverrides.onSensitiveAudit,
+      clientId: upstreamOptsWithOverrides.clientId,
+      sessionKey: upstreamOptsWithOverrides.sessionKey,
+      model: ctxModel
     });
     if (!result.ok) return withAccountMeta({ kind: "error", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     if (stream) {

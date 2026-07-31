@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
 import { canonicalCursorSubscriptionModelId, cursorSubscriptionDisplayName, isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
+import { normalizeSensitiveGuardConfig } from "./sensitive-guard.mjs";
 
 export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
@@ -20,6 +21,8 @@ export const DEFAULT_CONFIG = {
   host: "127.0.0.1",
   port: 17888,
   defaultModel: null,
+  // 出站敏感信息守卫：默认开启，脱敏后发送；审计不落原文。
+  sensitiveGuard: normalizeSensitiveGuardConfig({ enabled: true, mode: "redact" }),
   providers: [],
   models: [],
   clients: {
@@ -114,6 +117,9 @@ export function mergeWithDefaults(input) {
     if (typeof input.host === "string") out.host = input.host;
     if (Number.isFinite(input.port)) out.port = input.port;
     if (typeof input.defaultModel === "string") out.defaultModel = input.defaultModel;
+    if (input.sensitiveGuard && typeof input.sensitiveGuard === "object") {
+      out.sensitiveGuard = normalizeSensitiveGuardConfig(input.sensitiveGuard);
+    }
     if (Array.isArray(input.providers)) out.providers = input.providers.map(normalizeKnownProvider);
     if (Array.isArray(input.models)) {
       out.models = normalizeKnownVisionFallbacks(

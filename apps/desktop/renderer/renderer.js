@@ -428,6 +428,7 @@ function setActiveTab(tab) {
   if (tab === "logs") refreshLogTail().catch(() => {});
   if (tab === "traces") renderLiveLogs();
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
+  if (tab === "sensitive") renderSensitiveGuardSettings();
   if (tab === "settings") renderSettings();
   if (tab === "mobile-control") refreshMobileControl().catch(() => {});
 }
@@ -1447,6 +1448,67 @@ async function refreshDiagnostics() {
   }
 }
 
+function sensitiveAuditActionLabel(action) {
+  if (action === "redact") return "已脱敏发送";
+  if (action === "allow") return "会话放行（明文发送）";
+  if (action === "client_disabled") return "客户端关闭脱敏（明文发送）";
+  return action || "-";
+}
+
+function formatSensitiveOriginals(row) {
+  const items = Array.isArray(row.originals) && row.originals.length
+    ? row.originals
+    : (row.hits || []).flatMap((hit) => (hit.values || []).map((value) => ({
+      label: hit.label || hit.type,
+      value
+    })));
+  if (!items.length) {
+    return row.retainOriginal === false
+      ? `<span class="tiny muted">未保留原文</span>`
+      : `<span class="tiny muted">-</span>`;
+  }
+  return `<div class="mono tiny" style="white-space:pre-wrap; max-width:280px;">${items.map((item) =>
+    escapeHtml(`${item.label || item.type || "命中"}: ${item.value}`)
+  ).join("\n")}</div>`;
+}
+
+function formatSensitiveOutboundPreview(row) {
+  const preview = row.outboundPreview;
+  if (!preview || !Array.isArray(preview.snippets) || !preview.snippets.length) {
+    return `<span class="tiny muted">-</span>`;
+  }
+  const kindClass = preview.kind === "redacted" ? "ok" : "warn";
+  return `<div style="max-width:320px;">
+    <div class="chip ${kindClass}" style="margin-bottom:4px;">${escapeHtml(preview.label || (preview.kind === "redacted" ? "出站已打码" : "出站明文"))}</div>
+    <div class="mono tiny" style="white-space:pre-wrap;">${preview.snippets.map((item) => escapeHtml(item)).join("\n")}</div>
+  </div>`;
+}
+
+async function refreshSensitiveAudit() {
+  const tbody = document.getElementById("sensitive-audit-tbody");
+  const summary = document.getElementById("sensitive-audit-summary");
+  if (!tbody) return;
+  const result = await invoke("sensitive-audit:list", { limit: 80 });
+  const rows = result?.rows || [];
+  const withPreview = rows.some((row) => (row.outboundPreview?.snippets || []).length);
+  if (summary) {
+    summary.textContent = rows.length
+      ? `最近 ${rows.length} 条 · ${withPreview ? "含出站预览" : "待产生出站预览"}`
+      : "暂无命中";
+  }
+  tbody.innerHTML = rows.length
+    ? rows.map((row) => `<tr>
+        <td class="mono tiny">${escapeHtml((row.at || "").replace("T", " ").slice(0, 19))}</td>
+        <td>${escapeHtml(row.clientId || "-")}</td>
+        <td class="mono tiny">${escapeHtml(row.modelId || "-")}</td>
+        <td>${escapeHtml(sensitiveAuditActionLabel(row.action))}</td>
+        <td>${escapeHtml(row.summary || `${row.total || 0} 项`)}</td>
+        <td>${formatSensitiveOriginals(row)}</td>
+        <td>${formatSensitiveOutboundPreview(row)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="7" class="tiny muted">还没有发送审计。开启过滤后，命中原文与出站打码预览会显示在这里。</td></tr>`;
+}
+
 function renderDiagnostics() {
   const data = state.diagnostics;
   if (!data) return;
@@ -1595,6 +1657,162 @@ function renderDiagnostics() {
   if (modelSummary) modelSummary.textContent = `${data.models?.length || 0} 个模型`;
 }
 
+document.getElementById("btn-sensitive-audit-refresh")?.addEventListener("click", () => {
+  refreshSensitiveAudit().catch((error) => toast(`刷新审计失败：${error.message}`, "error"));
+});
+document.getElementById("btn-sensitive-audit-clear")?.addEventListener("click", async () => {
+  try {
+    await invoke("sensitive-audit:clear");
+    await refreshSensitiveAudit();
+    toast("已清空敏感信息审计");
+  } catch (error) {
+    toast(`清空失败：${error.message}`, "error");
+  }
+});
+const SENSITIVE_GUARD_CLIENT_LABELS = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+  hermes: "Hermes",
+  opencode: "OpenCode",
+  grok: "Grok",
+  "generic-openai": "Generic OpenAI",
+  "claude-app": "Claude App"
+};
+
+function splitListField(value) {
+  return String(value || "")
+    .split(/[\n,，;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function collectSensitiveGuardForm() {
+  const clients = {};
+  document.querySelectorAll("#sensitive-guard-clients input[data-client]")?.forEach((input) => {
+    clients[input.dataset.client] = Boolean(input.checked);
+  });
+  let patterns = [];
+  const patternsRaw = document.getElementById("sensitive-guard-patterns")?.value?.trim() || "";
+  if (patternsRaw) {
+    const parsed = JSON.parse(patternsRaw);
+    if (!Array.isArray(parsed)) throw new Error("自定义正则必须是 JSON 数组");
+    patterns = parsed;
+  }
+  return {
+    enabled: Boolean(document.getElementById("sensitive-guard-enabled")?.checked),
+    auditRetainOriginal: Boolean(document.getElementById("sensitive-guard-audit-original")?.checked),
+    clients,
+    keywords: splitListField(document.getElementById("sensitive-guard-keywords")?.value || ""),
+    patterns,
+    whitelist: {
+      phones: splitListField(document.getElementById("sensitive-guard-wl-phones")?.value || ""),
+      emails: splitListField(document.getElementById("sensitive-guard-wl-emails")?.value || ""),
+      emailDomains: splitListField(document.getElementById("sensitive-guard-wl-domains")?.value || ""),
+      substrings: splitListField(document.getElementById("sensitive-guard-wl-substrings")?.value || "")
+    }
+  };
+}
+
+async function refreshSensitiveBypassList() {
+  const list = document.getElementById("sensitive-guard-bypass-list");
+  if (!list) return;
+  const result = await invoke("sensitive-guard:bypass:list");
+  const rows = result.rows || [];
+  if (!rows.length) {
+    list.innerHTML = "<li>当前无放行会话</li>";
+    return;
+  }
+  list.innerHTML = rows.map((row) => {
+    const mins = Math.max(1, Math.ceil((row.remainingMs || 0) / 60000));
+    return `<li><code>${row.clientId}</code> / <code>${row.sessionKey}</code> · 约 ${mins} 分钟 <button type="button" class="linkish" data-bypass-clear="${row.key}">清除</button></li>`;
+  }).join("");
+  list.querySelectorAll("[data-bypass-clear]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await invoke("sensitive-guard:bypass:clear", { key: btn.dataset.bypassClear });
+        await refreshSensitiveBypassList();
+        toast("已清除放行");
+      } catch (error) {
+        toast(`清除失败：${error.message}`, "error");
+      }
+    });
+  });
+}
+
+document.getElementById("sensitive-guard-enabled")?.addEventListener("change", async (event) => {
+  try {
+    const result = await invoke("sensitive-guard:set", { enabled: Boolean(event.currentTarget.checked) });
+    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
+    toast(result.sensitiveGuard?.enabled ? "已开启出站脱敏" : "已关闭出站脱敏");
+  } catch (error) {
+    toast(`保存失败：${error.message}`, "error");
+    renderSensitiveGuardSettings();
+  }
+});
+
+document.getElementById("sensitive-guard-audit-original")?.addEventListener("change", async (event) => {
+  try {
+    const result = await invoke("sensitive-guard:set", {
+      auditRetainOriginal: Boolean(event.currentTarget.checked)
+    });
+    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
+    toast(result.sensitiveGuard?.auditRetainOriginal !== false ? "已开启原文审计" : "已关闭原文审计（只记类型）");
+  } catch (error) {
+    toast(`保存失败：${error.message}`, "error");
+    renderSensitiveGuardSettings();
+  }
+});
+
+document.getElementById("btn-sensitive-guard-save")?.addEventListener("click", async () => {
+  try {
+    const payload = collectSensitiveGuardForm();
+    const result = await invoke("sensitive-guard:set", payload);
+    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
+    renderSensitiveGuardSettings();
+    toast("敏感信息规则已保存");
+  } catch (error) {
+    toast(`保存失败：${error.message}`, "error");
+  }
+});
+
+document.getElementById("btn-sensitive-guard-preview")?.addEventListener("click", async () => {
+  const input = document.getElementById("sensitive-guard-preview-input")?.value || "";
+  const out = document.getElementById("sensitive-guard-preview-output");
+  const summary = document.getElementById("sensitive-guard-preview-summary");
+  try {
+    let config;
+    try { config = collectSensitiveGuardForm(); } catch { config = undefined; }
+    const result = await invoke("sensitive-guard:preview", { text: input, config });
+    if (out) out.textContent = result.output || "";
+    if (summary) {
+      summary.textContent = result.changed
+        ? `命中 ${result.total}：${result.summary || "-"}`
+        : "未命中规则";
+    }
+  } catch (error) {
+    if (out) out.textContent = "";
+    if (summary) summary.textContent = "";
+    toast(`预览失败：${error.message}`, "error");
+  }
+});
+
+document.getElementById("btn-sensitive-guard-bypass-allow")?.addEventListener("click", async () => {
+  try {
+    const clientId = document.getElementById("sensitive-guard-bypass-client")?.value || "*";
+    const sessionKey = document.getElementById("sensitive-guard-bypass-session")?.value?.trim() || "";
+    const minutes = Number(document.getElementById("sensitive-guard-bypass-minutes")?.value || 30);
+    if (!sessionKey) throw new Error("请填写会话 / Thread ID");
+    await invoke("sensitive-guard:bypass:allow", { clientId: clientId === "*" ? "" : clientId, sessionKey, minutes });
+    await refreshSensitiveBypassList();
+    toast("已添加会话放行（已写审计）");
+  } catch (error) {
+    toast(`放行失败：${error.message}`, "error");
+  }
+});
+
+document.getElementById("btn-sensitive-guard-bypass-refresh")?.addEventListener("click", () => {
+  refreshSensitiveBypassList().catch((error) => toast(`刷新失败：${error.message}`, "error"));
+});
 document.getElementById("btn-diagnostics-run")?.addEventListener("click", () => {
   const output = document.getElementById("diagnostics-output");
   if (output) {
@@ -1930,6 +2148,47 @@ async function restoreSelectedProfileBackup() {
   } catch (err) {
     toast(`恢复失败：${err.message}`);
   }
+}
+
+function renderSensitiveGuardSettings() {
+  const guard = state.config?.sensitiveGuard || {};
+  const toggle = document.getElementById("sensitive-guard-enabled");
+  if (toggle) toggle.checked = guard.enabled !== false;
+  const retain = document.getElementById("sensitive-guard-audit-original");
+  if (retain) retain.checked = guard.auditRetainOriginal !== false;
+
+  const clientsHost = document.getElementById("sensitive-guard-clients");
+  if (clientsHost) {
+    const clientIds = Object.keys(SENSITIVE_GUARD_CLIENT_LABELS);
+    clientsHost.innerHTML = clientIds.map((id) => {
+      const checked = guard.clients?.[id] !== false;
+      const label = SENSITIVE_GUARD_CLIENT_LABELS[id] || id;
+      return `<label class="import-provider-check" style="display:flex; gap:6px; align-items:center;">
+        <input type="checkbox" data-client="${id}" ${checked ? "checked" : ""}>
+        <span>${label}</span>
+      </label>`;
+    }).join("");
+  }
+
+  const keywordsEl = document.getElementById("sensitive-guard-keywords");
+  if (keywordsEl) keywordsEl.value = (guard.keywords || []).join("\n");
+  const patternsEl = document.getElementById("sensitive-guard-patterns");
+  if (patternsEl) {
+    patternsEl.value = Array.isArray(guard.patterns) && guard.patterns.length
+      ? JSON.stringify(guard.patterns, null, 2)
+      : "";
+  }
+  const wl = guard.whitelist || {};
+  const setArea = (id, values) => {
+    const el = document.getElementById(id);
+    if (el) el.value = (values || []).join("\n");
+  };
+  setArea("sensitive-guard-wl-phones", wl.phones);
+  setArea("sensitive-guard-wl-emails", wl.emails);
+  setArea("sensitive-guard-wl-domains", wl.emailDomains);
+  setArea("sensitive-guard-wl-substrings", wl.substrings);
+  refreshSensitiveBypassList().catch(() => {});
+  refreshSensitiveAudit().catch(() => {});
 }
 
 function renderSettings() {

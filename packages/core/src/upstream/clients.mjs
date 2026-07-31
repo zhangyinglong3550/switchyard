@@ -30,6 +30,7 @@ import {
   readCodexLocalAuth,
   resolveAccessExpiresAt
 } from "../oauth-codex-local.mjs";
+import { applySensitiveGuard, buildSensitiveOutboundPreview } from "../sensitive-guard.mjs";
 
 export const CODEX_OAUTH_CLIENT_VERSION = "1.0.0";
 const PROXY_AGENTS = new Map();
@@ -347,7 +348,62 @@ function shouldRetryFetchError(err) {
   return ["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT", "HPE_INVALID_EOF_STATE"].includes(code) || /fetch failed|terminated|HPE_INVALID_EOF_STATE/i.test(err?.message || "");
 }
 
-async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKeepAlive = false, retryOnFetchError = false, acceptSse = Boolean(body?.stream) } = {}) {
+function resolveSensitiveSessionKey(opts = {}, body = {}) {
+  return String(
+    opts.sessionKey
+    || body?.conversation_id
+    || body?.session_id
+    || body?.metadata?.session_id
+    || body?.metadata?.conversation_id
+    || ""
+  ).trim().slice(0, 200);
+}
+
+async function postJson(url, body, headers, {
+  signal,
+  fetchImpl,
+  proxyUrl,
+  noKeepAlive = false,
+  retryOnFetchError = false,
+  acceptSse = Boolean(body?.stream),
+  sensitiveGuard,
+  onSensitiveAudit,
+  clientId,
+  sessionKey,
+  model,
+  provider
+} = {}) {
+  let outbound = body;
+  // 仅当上层显式传入 sensitiveGuard 时启用（网关默认开启）；单测直连 call* 不受影响。
+  if (sensitiveGuard && sensitiveGuard.enabled !== false) {
+    try {
+      const guarded = applySensitiveGuard(body, sensitiveGuard, {
+        clientId: clientId || "",
+        sessionKey: resolveSensitiveSessionKey({ sessionKey }, body)
+      });
+      outbound = guarded.body;
+      if (typeof onSensitiveAudit === "function" && guarded.shouldAudit) {
+        onSensitiveAudit({
+          action: guarded.action,
+          hits: guarded.hits,
+          total: guarded.total,
+          bypass: Boolean(guarded.bypass),
+          retainOriginal: sensitiveGuard?.auditRetainOriginal !== false,
+          outboundPreview: buildSensitiveOutboundPreview(outbound, {
+            action: guarded.action,
+            hits: guarded.hits
+          }),
+          sessionKey: resolveSensitiveSessionKey({ sessionKey }, body),
+          clientId: clientId || "",
+          modelId: model?.id || "",
+          providerId: provider?.id || model?.providerId || ""
+        });
+      }
+    } catch {
+      // 守卫失败时不阻断上游请求。
+      outbound = body;
+    }
+  }
   const doFetch = fetchImpl || globalThis.fetch;
   const requestHeaders = {
     "Content-Type": "application/json",
@@ -359,7 +415,7 @@ async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKee
   const init = {
     method: "POST",
     headers: requestHeaders,
-    body: JSON.stringify(body),
+    body: JSON.stringify(outbound),
     signal
   };
   const dispatcher = proxyDispatcher(proxyUrl);
@@ -379,7 +435,7 @@ async function postJson(url, body, headers, { signal, fetchImpl, proxyUrl, noKee
 
 export async function callOpenAIChat(provider, body, opts) {
   const url = joinUrl(canonicalProviderBaseUrl(provider), "/chat/completions");
-  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), opts);
+  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), { ...opts, provider });
 }
 
 export async function callOpenAIResponses(provider, body, opts) {
@@ -418,7 +474,7 @@ export async function callOpenAIResponses(provider, body, opts) {
     url,
     body,
     await openAIResponsesHeaders(activeProvider, opts),
-    requestOptions
+    { ...requestOptions, provider: activeProvider }
   );
   let response = await send(provider);
   // A task in a restored backup can be invalidated by OpenAI. Re-register it
@@ -483,7 +539,7 @@ export async function callAnthropicMessages(provider, body, opts) {
       // 刷新失败时仍用磁盘上的 access token 尝试一次
     }
   }
-  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), opts);
+  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), { ...opts, provider });
 }
 
 /**
@@ -510,6 +566,7 @@ export async function callAntigravity(provider, envelope, opts = {}) {
   };
   return postJson(url, envelope, headers, {
     ...opts,
+    provider,
     acceptSse: Boolean(opts.stream),
     // Long-lived SSE connections are more reliable without a pooled keep-alive
     // socket being reused after an idle intermediary has closed it.

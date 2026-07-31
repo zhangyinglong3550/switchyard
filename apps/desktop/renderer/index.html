@@ -26,6 +26,7 @@
           <a data-tab="models" data-nav-tier="core"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
           <a data-tab="clients" data-nav-tier="core"><span class="icon-square">◉</span>客户端</a>
           <a data-tab="diagnostics" data-nav-tier="detailed"><span class="icon-square">◎</span>诊断中心</a>
+          <a data-tab="sensitive" data-nav-tier="detailed"><span class="icon-square">⊘</span>敏感信息</a>
         </nav>
       </div>
       <div id="tools-nav-block" data-nav-tier="detailed">
@@ -205,6 +206,139 @@
         <div class="card">
           <div class="hd"><h3>探针结果</h3><span class="sub">探针是启发式建议，确认后才写配置</span><button class="btn primary" id="btn-diagnostics-apply-capabilities" style="display:none;">应用到模型配置</button></div>
           <div class="bd"><pre class="log-pane xlarge" id="diagnostics-output"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sensitive Guard -->
+    <section class="tab-panel" id="panel-sensitive">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">敏感信息</div>
+          <div class="tiny muted">出站脱敏、组织词表、规则测试与发送审计（默认记录完整命中原文）</div>
+        </div>
+        <div style="flex:1;"></div>
+        <span class="sub" id="sensitive-audit-summary">含原文</span>
+        <button class="btn" type="button" id="btn-sensitive-audit-refresh">刷新审计</button>
+        <button class="btn" type="button" id="btn-sensitive-audit-clear">清空审计</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>过滤规则</h3><span class="sub">发送前脱敏 · 不拦截请求</span></div>
+          <div class="bd page-stack" style="gap:16px;">
+            <div class="callout compact">审计默认记录<strong>完整命中原文</strong>（本机 <code>~/.switchyard/logs/sensitive-audit.jsonl</code>，权限 0600）。清空前请勿分享该文件。</div>
+
+            <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="checkbox" id="sensitive-guard-enabled">
+              <span>
+                <strong>发送前脱敏敏感信息</strong>
+                <div class="tiny muted">识别手机号、身份证、银行卡、邮箱、常见 API Key / Token、内网 IP 等，替换为占位符后再发给上游（含 Cursor 订阅）。</div>
+              </span>
+            </label>
+            <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="checkbox" id="sensitive-guard-audit-original" checked>
+              <span>
+                <strong>审计记录完整原文</strong>
+                <div class="tiny muted">关闭后只记类型与次数；开启后可在下方表格直接看到发出/命中过的敏感串。</div>
+              </span>
+            </label>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:8px;">按客户端开关（关闭后该客户端出站不再脱敏，但仍会审计命中原文）</div>
+              <div id="sensitive-guard-clients" class="row" style="flex-wrap:wrap; gap:10px 16px;"></div>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">组织词表（每行一条，子串匹配）</div>
+              <textarea class="field" id="sensitive-guard-keywords" rows="3" placeholder="例如：内部项目代号&#10;机密代号"></textarea>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">自定义正则（JSON 数组：id / label / pattern / flags / type）</div>
+              <textarea class="field mono" id="sensitive-guard-patterns" rows="3" placeholder='[{"id":"ticket","label":"工单号","pattern":"TKT-\\\\d{6,}","flags":"g","type":"ticket"}]'></textarea>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">白名单（只填额外项；内置含 13800138000、example.com、TEST_ 等）</div>
+              <div class="row" style="gap:10px; align-items:stretch;">
+                <label style="flex:1;">手机号
+                  <textarea class="field" id="sensitive-guard-wl-phones" rows="2" placeholder="13800138000"></textarea>
+                </label>
+                <label style="flex:1;">邮箱
+                  <textarea class="field" id="sensitive-guard-wl-emails" rows="2" placeholder="test@example.com"></textarea>
+                </label>
+              </div>
+              <div class="row" style="gap:10px; align-items:stretch; margin-top:8px;">
+                <label style="flex:1;">邮箱域名
+                  <textarea class="field" id="sensitive-guard-wl-domains" rows="2" placeholder="example.com"></textarea>
+                </label>
+                <label style="flex:1;">子串
+                  <textarea class="field" id="sensitive-guard-wl-substrings" rows="2" placeholder="TEST_"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="btn primary" type="button" id="btn-sensitive-guard-save">保存规则</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>规则测试箱</h3><span class="sub">只预览，不写审计</span></div>
+            <div class="bd page-stack" style="gap:10px;">
+              <textarea class="field" id="sensitive-guard-preview-input" rows="4" placeholder="粘贴一段文本，预览脱敏结果…"></textarea>
+              <div class="actions">
+                <button class="btn" type="button" id="btn-sensitive-guard-preview">预览脱敏</button>
+                <span class="tiny muted" id="sensitive-guard-preview-summary"></span>
+              </div>
+              <pre class="mono tiny" id="sensitive-guard-preview-output" style="white-space:pre-wrap; max-height:180px; overflow:auto;"></pre>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>会话放行</h3><span class="sub">内存有效，重启清空</span></div>
+            <div class="bd page-stack" style="gap:10px;">
+              <div class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                <label>客户端
+                  <select class="field" id="sensitive-guard-bypass-client">
+                    <option value="*">全部</option>
+                    <option value="codex">Codex</option>
+                    <option value="claude-code">Claude Code</option>
+                    <option value="hermes">Hermes</option>
+                    <option value="opencode">OpenCode</option>
+                    <option value="grok">Grok</option>
+                    <option value="generic-openai">Generic OpenAI</option>
+                    <option value="claude-app">Claude App</option>
+                  </select>
+                </label>
+                <label style="flex:1; min-width:160px;">会话 / Thread ID
+                  <input class="field" id="sensitive-guard-bypass-session" placeholder="x-codex-thread-id 或 conversation_id">
+                </label>
+                <label>分钟
+                  <input class="field" id="sensitive-guard-bypass-minutes" type="number" min="1" max="1440" value="30" style="width:88px;">
+                </label>
+              </div>
+              <div class="actions">
+                <button class="btn" type="button" id="btn-sensitive-guard-bypass-allow">放行</button>
+                <button class="btn" type="button" id="btn-sensitive-guard-bypass-refresh">刷新</button>
+              </div>
+              <ul class="tiny muted" id="sensitive-guard-bypass-list" style="margin:0; padding-left:18px;"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><h3>发送审计</h3><span class="sub">原文 + 出站预览</span></div>
+          <div class="bd">
+            <div class="tiny muted" style="margin-bottom:8px;">「原文」是命中串；「出站预览」是实际发给上游的片段。会话/调用可视化仍显示进站明文，请以出站预览为准。</div>
+            <div class="table-scroll tall">
+              <table class="data compact" id="sensitive-audit-table">
+                <thead><tr><th>时间</th><th>客户端</th><th>模型</th><th>动作</th><th>命中</th><th>原文</th><th>出站预览</th></tr></thead>
+                <tbody id="sensitive-audit-tbody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </section>

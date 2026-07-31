@@ -13,7 +13,8 @@
     "./history-unify": "./src/history-unify.mjs",
     "./compat": "./src/compat/index.mjs",
     "./importers/ccswitch": "./src/importers/ccswitch.mjs",
-    "./config-bundle": "./src/config-bundle.mjs"
+    "./config-bundle": "./src/config-bundle.mjs",
+    "./sensitive-guard": "./src/sensitive-guard.mjs"
   },
   "bin": {
     "lls-gateway": "./bin/gateway.mjs"

@@ -14,6 +14,7 @@ import { readLocalCursorDesktopVersion, readLocalCursorRequestedModel } from "./
 import { cursorAgentCliEvents, isCursorAgentCliEligible } from "./agent-cli.mjs";
 import { http2CursorBidiEvents } from "./bidi-client.mjs";
 import { mapReadArguments, mapShellArguments, selectReadTool, selectShellTool, toolCatalog } from "./tool-capabilities.mjs";
+import { applySensitiveGuard, buildSensitiveOutboundPreview } from "../sensitive-guard.mjs";
 
 const lanes = new Map();
 
@@ -762,15 +763,72 @@ export function clearCursorSubscriptionRuntime(provider) {
   runtimeStates.delete(key);
 }
 
+function applyCursorSensitiveGuard(body, {
+  sensitiveGuard,
+  onSensitiveAudit,
+  clientId,
+  sessionKey,
+  model,
+  provider
+} = {}) {
+  if (!sensitiveGuard || sensitiveGuard.enabled === false) return body;
+  try {
+    const resolvedSession = String(
+      sessionKey
+      || body?.conversation_id
+      || body?.session_id
+      || body?.metadata?.session_id
+      || ""
+    ).trim().slice(0, 200);
+    const guarded = applySensitiveGuard(body, sensitiveGuard, {
+      clientId: clientId || "",
+      sessionKey: resolvedSession
+    });
+    if (typeof onSensitiveAudit === "function" && guarded.shouldAudit) {
+      onSensitiveAudit({
+        action: guarded.action,
+        hits: guarded.hits,
+        total: guarded.total,
+        bypass: Boolean(guarded.bypass),
+        retainOriginal: sensitiveGuard?.auditRetainOriginal !== false,
+        outboundPreview: buildSensitiveOutboundPreview(guarded.body, {
+          action: guarded.action,
+          hits: guarded.hits
+        }),
+        sessionKey: resolvedSession,
+        clientId: clientId || "",
+        modelId: model?.id || body?.model || "",
+        providerId: provider?.id || model?.providerId || "cursor-subscription"
+      });
+    }
+    return guarded.body;
+  } catch {
+    return body;
+  }
+}
+
 export async function callCursorSubscription(provider, body, {
   keychain = { get: (account) => getKeychainSecret(account) },
   transport = http2AgentEvents,
   readLocalModel = readLocalCursorRequestedModel,
-  signal
+  signal,
+  sensitiveGuard,
+  onSensitiveAudit,
+  clientId,
+  sessionKey,
+  model
 } = {}) {
   if (!isCursorSubscriptionProvider(provider)) throw new Error("Provider is not cursor_subscription");
   if (provider.enabled !== true) return { ok: false, status: 403, payload: { error: { code: "CURSOR_SUBSCRIPTION_DISABLED", message: "Cursor 订阅桥接默认关闭，请先在本机启用" } } };
   try { assertCursorSubscriptionRequest(body); } catch (error) { return { ok: false, status: 400, payload: { error: { code: error.code, message: error.message } } }; }
+  body = applyCursorSensitiveGuard(body, {
+    sensitiveGuard,
+    onSensitiveAudit,
+    clientId,
+    sessionKey,
+    model,
+    provider
+  });
   const useCursorAgentCli = transport === http2AgentEvents && provider.useCursorAgentCli !== false && isCursorAgentCliEligible(body);
   const credentials = useCursorAgentCli ? null : loadCursorSubscriptionCredentials(provider, keychain);
   if (!useCursorAgentCli && !credentials) return { ok: false, status: 401, payload: { error: { code: "CURSOR_SUBSCRIPTION_UNCONFIGURED", message: "Cursor 订阅桥接尚未连接本机凭据" } } };

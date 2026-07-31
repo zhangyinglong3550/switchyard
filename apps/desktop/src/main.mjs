@@ -77,6 +77,16 @@ import {
   parseConfigBundle,
   previewConfigBundleMerge
 } from "../../../packages/core/src/config-bundle.mjs";
+import { listSensitiveAudits, clearSensitiveAudits, recordSensitiveAudit } from "../../../packages/core/src/sensitive-audit-store.mjs";
+import {
+  summarizeSensitiveHits,
+  normalizeSensitiveGuardConfig,
+  previewSensitiveText,
+  allowSensitiveBypass,
+  clearSensitiveBypass,
+  listSensitiveBypasses,
+  SENSITIVE_GUARD_CLIENTS
+} from "../../../packages/core/src/sensitive-guard.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/model-directory-sync.mjs";
 import {
@@ -1024,6 +1034,82 @@ ipcMain.handle("config:save", (_e, payload) => {
   return r;
 });
 ipcMain.handle("config:file", () => configFile());
+ipcMain.handle("sensitive-audit:list", (_e, payload = {}) => {
+  const rows = listSensitiveAudits({ limit: payload.limit || 100 });
+  return {
+    ok: true,
+    enabled: readConfig()?.sensitiveGuard?.enabled !== false,
+    mode: readConfig()?.sensitiveGuard?.mode || "redact",
+    rows: rows.map((row) => ({
+      ...row,
+      summary: summarizeSensitiveHits(row.hits || [])
+    }))
+  };
+});
+ipcMain.handle("sensitive-audit:clear", () => clearSensitiveAudits());
+ipcMain.handle("sensitive-guard:set", (_e, payload = {}) => {
+  const cfg = readConfig();
+  const current = normalizeSensitiveGuardConfig(cfg.sensitiveGuard || {});
+  const nextGuard = normalizeSensitiveGuardConfig({
+    ...current,
+    ...payload,
+    enabled: payload.enabled !== undefined ? payload.enabled !== false : current.enabled,
+    mode: payload.mode !== undefined
+      ? (String(payload.mode).toLowerCase() === "block" ? "block" : "redact")
+      : current.mode,
+    clients: payload.clients !== undefined ? { ...current.clients, ...payload.clients } : current.clients,
+    keywords: payload.keywords !== undefined ? payload.keywords : current.keywords,
+    patterns: payload.patterns !== undefined ? payload.patterns : current.patterns,
+    auditRetainOriginal: payload.auditRetainOriginal !== undefined
+      ? payload.auditRetainOriginal !== false
+      : current.auditRetainOriginal,
+    whitelist: payload.whitelist !== undefined
+      ? { ...current.whitelist, ...payload.whitelist }
+      : current.whitelist
+  });
+  const next = {
+    ...cfg,
+    sensitiveGuard: nextGuard
+  };
+  const result = saveValidated(next, { reason: "sensitive-guard" });
+  try { reloadConfig(); } catch {}
+  return { ok: true, path: result.path, sensitiveGuard: next.sensitiveGuard, clients: SENSITIVE_GUARD_CLIENTS };
+});
+ipcMain.handle("sensitive-guard:get", () => ({
+  ok: true,
+  sensitiveGuard: normalizeSensitiveGuardConfig(readConfig()?.sensitiveGuard || {}),
+  clients: SENSITIVE_GUARD_CLIENTS
+}));
+ipcMain.handle("sensitive-guard:preview", (_e, payload = {}) => {
+  const guard = normalizeSensitiveGuardConfig(
+    payload.config || readConfig()?.sensitiveGuard || {}
+  );
+  return {
+    ok: true,
+    ...previewSensitiveText(payload.text || "", guard)
+  };
+});
+ipcMain.handle("sensitive-guard:bypass:list", () => ({
+  ok: true,
+  rows: listSensitiveBypasses()
+}));
+ipcMain.handle("sensitive-guard:bypass:allow", (_e, payload = {}) => {
+  const row = allowSensitiveBypass({
+    clientId: payload.clientId || "",
+    sessionKey: payload.sessionKey || "",
+    minutes: payload.minutes
+  });
+  try {
+    recordSensitiveAudit({
+      action: "allow",
+      clientId: row.clientId,
+      sessionKey: row.sessionKey,
+      hits: []
+    });
+  } catch {}
+  return { ok: true, row };
+});
+ipcMain.handle("sensitive-guard:bypass:clear", (_e, payload = {}) => clearSensitiveBypass(payload.key || ""));
 ipcMain.handle("config:history:list", () => listConfigHistory());
 ipcMain.handle("config:history:restore", (_e, id) => { const result = saveValidated(readConfigHistory(id), { reason: "history-restore" }); try { reloadConfig(); } catch {} syncCodexArtifacts("config-history-restore"); return result; });
 ipcMain.handle("route:preflight", (_e, payload = {}) => preflightRoute(readConfig(), payload));
