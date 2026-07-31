@@ -151,8 +151,8 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /function stripInternalUiDirectives/);
   assert.match(js, /filter\(\(line\) => !INTERNAL_UI_DIRECTIVE\.test\(line\.trim\(\)\)\)/);
   assert.match(js, /const prose = stripInternalUiDirectives\(chunks\[i\] \|\| ""\)/);
-  assert.match(html, /app\.js\?v=81/);
-  assert.match(html, /styles\.css\?v=81/);
+  assert.match(html, /app\.js\?v=82/);
+  assert.match(html, /styles\.css\?v=82/);
   assert.match(js, /status === "failed"\) return/);
   assert.match(js, /event\.messageId/);
   assert.match(js, /duplicateByText/);
