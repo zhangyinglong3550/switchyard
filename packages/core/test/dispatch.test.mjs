@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { dispatchChat, dispatchResponses } from "../src/upstream/dispatch.mjs";
+import { dispatchChat, dispatchResponses, stripConflictingImageGenTools } from "../src/upstream/dispatch.mjs";
 import { registerBuiltinPatches, registerPatch, resetPatches } from "../src/compat/index.mjs";
 import { glmContentTextPatch } from "../src/compat/patches/glm-content-text.mjs";
 import { SWITCHYARD_THINKING_KEY } from "../src/reasoning.mjs";
@@ -515,6 +515,107 @@ test("dispatchChat → retries a persistent OpenCode Go Console Go stream 400 wi
   assert.match(await result.upstream.text(), /data: \[DONE\]/);
 });
 
+test("dispatchResponses → trims OpenCode Go tool count after compact/minimal still 400", async (t) => {
+  resetPatches();
+  let calls = 0;
+  let finalBody = null;
+  const manyTools = Array.from({ length: 80 }, (_, i) => ({
+    type: "function",
+    name: i === 0 ? "exec_command" : i === 1 ? "apply_patch" : `mcp_tool_${i}`,
+    description: "x".repeat(200),
+    parameters: {
+      type: "object",
+      properties: { value: { type: ["string", "null"], description: "y".repeat(100) } },
+      additionalProperties: { type: "string" }
+    }
+  }));
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    if (calls < 4) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Error from provider (Console Go): Upstream request failed" }));
+      return;
+    }
+    finalBody = data;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n");
+  });
+  t.after(() => close(up));
+  const provider = { id: "opencode-go", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  const result = await dispatchResponses(provider, "deepseek-v4-flash", {
+    model: "deepseek-v4-flash",
+    stream: true,
+    input: [{ role: "user", content: "go" }],
+    tools: manyTools
+  });
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.ok, true);
+  assert.equal(calls, 4);
+  assert.deepEqual(result.rectifiers.map((item) => item.id), [
+    "opencode-go-tool-manifest",
+    "opencode-go-tool-manifest-minimal",
+    "opencode-go-tool-manifest-trimmed"
+  ]);
+  assert.ok(finalBody.tools.length <= 64);
+  assert.equal(finalBody.tools[0].function.name, "exec_command");
+  assert.equal(finalBody.tools[1].function.name, "apply_patch");
+  assert.match(await result.upstream.text(), /response\.completed/);
+});
+
+test("dispatchResponses → rectifies an OpenCode Go DeepSeek stream 400 before piping SSE", async (t) => {
+  resetPatches();
+  let calls = 0;
+  let retriedBody = null;
+  const up = await spawnUpstream((req, res, body) => {
+    calls += 1;
+    const data = JSON.parse(body);
+    assert.equal(req.url, "/v1/responses");
+    assert.equal(data.stream, true);
+    assert.equal(data.model, "deepseek-v4-flash");
+    if (calls === 1) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Error from provider (Console Go): Upstream request failed" }));
+      return;
+    }
+    retriedBody = data;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n");
+  });
+  t.after(() => close(up));
+  const provider = { id: "opencode-go", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+
+  const result = await dispatchResponses(provider, "deepseek-v4-flash", {
+    model: "deepseek-v4-flash",
+    stream: true,
+    input: [{ role: "user", content: "go" }],
+    tools: [{
+      type: "function",
+      name: "complex_tool",
+      description: "x".repeat(900),
+      parameters: {
+        type: "object",
+        properties: {
+          value: {
+            description: "y".repeat(600),
+            type: ["string", "null"],
+            oneOf: [{ type: "string" }, { type: "null" }]
+          }
+        },
+        additionalProperties: { type: "string" }
+      }
+    }]
+  });
+
+  assert.equal(result.kind, "stream");
+  assert.equal(result.upstream.ok, true);
+  assert.equal(calls, 2);
+  assert.equal(result.rectifiers[0].id, "opencode-go-tool-manifest");
+  assert.equal(retriedBody.tools[0].function.description.length, 480);
+  assert.equal(retriedBody.tools[0].function.parameters.properties.value.type, "string");
+  assert.match(await result.upstream.text(), /response\.completed/);
+});
+
 test("dispatchChat → openai_responses upstream flattens to chat-shape", async (t) => {
   resetPatches();
   const up = await spawnUpstream((req, res, body) => {
@@ -956,4 +1057,94 @@ test("dispatchChat → does not trim an oversized manifest for unrelated provide
   assert.equal(result.upstream.status, 400);
   assert.equal(calls, 1);
   assert.deepEqual(result.rectifiers, []);
+});
+
+test("stripConflictingImageGenTools → only function: drop function", () => {
+  const body = {
+    tools: [
+      { type: "function", name: "image_gen.imagegen" },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name), ["shell"]);
+});
+
+test("stripConflictingImageGenTools → only hosted: drop hosted", () => {
+  const body = {
+    tools: [
+      { type: "image_generation" },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name || t.type), ["shell"]);
+});
+
+test("stripConflictingImageGenTools → only namespace image_gen: drop namespace", () => {
+  const body = {
+    tools: [
+      { type: "namespace", name: "image_gen", tools: [{ type: "function", name: "imagegen" }] },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name), ["shell"]);
+});
+
+test("stripConflictingImageGenTools → hosted + function: drop both", () => {
+  const body = {
+    tools: [
+      { type: "image_generation" },
+      { type: "function", name: "image_gen.imagegen" },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name || t.type), ["shell"]);
+});
+
+test("stripConflictingImageGenTools → hosted + namespace: drop both", () => {
+  const body = {
+    tools: [
+      { type: "image_gen" },
+      { type: "namespace", name: "image_gen", tools: [{ type: "function", name: "imagegen" }] },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name), ["shell"]);
+});
+
+test("dispatchResponses → strips all conflicting image tools (any provider)", async (t) => {
+  resetPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "r",
+      object: "response",
+      model: "u-model",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }]
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "ordinary-relay", apiFormat: "openai_responses", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  const result = await dispatchResponses(provider, "u-model", {
+    model: "u-model",
+    input: [{ role: "user", content: "draw" }],
+    tools: [
+      { type: "image_generation" },
+      { type: "function", name: "image_gen.imagegen", parameters: { type: "object" } },
+      { type: "function", name: "shell", parameters: { type: "object" } }
+    ]
+  });
+  assert.equal(result.kind, "json");
+  assert.ok(received);
+  assert.deepEqual(
+    received.tools.map((t) => t.name || t.type),
+    ["shell"]
+  );
 });

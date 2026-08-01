@@ -967,13 +967,41 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
         }
         return next.upstream;
       };
-      const upstream = await dispatchNativeStream();
+      const result = await dispatchResponses(route.provider, route.upstreamModel, upstreamBody, withDispatchOpts(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
+      recordDispatchCompatibility(requestRecord, result);
+      if (result.kind !== "stream") {
+        const message = result.kind === "error"
+          ? (requestPayloadError(result.payload) || `status ${result.status}`)
+          : "native Responses dispatcher returned an unexpected result";
+        requestRecord.error = message;
+        recordResponseSummary(requestRecord, result.kind === "error" ? result.payload : null, { stream: true, status: result.status || 0, error: message });
+        json(res, result.status || 502, result.kind === "error" ? result.payload : { error: message });
+        return;
+      }
+      const upstream = result.upstream;
+      // 上游已是 JSON 错误体（含纠错失败）时，不要当 SSE 硬 pipe，否则 Codex 只看到 adapter_eof。
+      if (!upstream?.ok) {
+        const payload = await readJsonResponse(upstream);
+        requestRecord.error = requestPayloadError(payload) || `status ${upstream?.status || 0}`;
+        recordResponseSummary(requestRecord, payload, { stream: true, status: upstream?.status || 0, error: requestRecord.error });
+        json(res, upstream?.status || 502, payload);
+        return;
+      }
       recordResponseSummary(requestRecord, null, { stream: true, status: upstream?.status || 0 });
       return pipeRawStream(upstream, res, {
         protocol: "responses",
         model: body.model,
         idleTimeoutMs: streamIdleTimeoutMs(config, route),
-        retryUpstream: streamCompatibility(config, route, "responses").retryPreludeOnEof ? dispatchNativeStream : null,
+        retryUpstream: streamCompatibility(config, route, "responses").retryPreludeOnEof
+          ? async () => {
+            const next = await dispatchNativeStream();
+            if (!next?.ok) {
+              const payload = await readJsonResponse(next);
+              throw new Error(requestPayloadError(payload) || `status ${next?.status || 0}`);
+            }
+            return next;
+          }
+          : null,
         preludeRetryAttempts: streamCompatibility(config, route, "responses").preludeRetryAttempts,
         preludeRetryBackoffMs: streamCompatibility(config, route, "responses").preludeRetryBackoffMs,
         onStreamSummary: (summary) => {
@@ -1013,6 +1041,13 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
       const result = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, withDispatchOpts(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       recordDispatchCompatibility(requestRecord, result);
       if (result.kind === "stream" && result.translate === "responses") {
+        if (!result.upstream?.ok) {
+          const payload = await readJsonResponse(result.upstream);
+          requestRecord.error = requestPayloadError(payload) || `status ${result.upstream?.status || 0}`;
+          recordResponseSummary(requestRecord, payload, { stream: true, status: result.upstream?.status || 0, error: requestRecord.error });
+          json(res, result.upstream?.status || 502, payload);
+          return;
+        }
         recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
         return pipeRawStream(result.upstream, res, {
           protocol: "responses",

@@ -271,9 +271,8 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
 
   if (apiFormat === "openai_responses") {
     let responsesBody = applyBodyOverrides(chatToResponses(outbound, upstreamModel), requestOverrides);
-    if (isAigoLikeProvider(provider, ctxModel)) {
-      responsesBody = stripConflictingImageGenTools(responsesBody);
-    }
+    // 通用：去掉 image_gen hosted/function 冲突工具，避免三方 Responses 400。
+    responsesBody = stripConflictingImageGenTools(responsesBody);
     const codexOAuth = isCodexOAuthProvider(provider);
     if (codexOAuth) {
       responsesBody.store = false;
@@ -283,7 +282,24 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       Object.assign(responsesBody, normalizeChatgptCodexResponsesBody(responsesBody));
     }
     const upstream = await callOpenAIResponses(provider, responsesBody, upstreamOptsWithOverrides);
-    if (stream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    if (stream) {
+      // Codex → Responses 原生流：OpenCode Go 大工具清单常先 400，需在下发 SSE 前纠错重试。
+      const rectifiedStream = await retryFailedStreamWithRectifier({
+        upstream,
+        body: responsesBody,
+        apiFormat,
+        ctx,
+        send: (body) => callOpenAIResponses(provider, body, upstreamOptsWithOverrides)
+      });
+      return withAccountMeta({
+        kind: "stream",
+        upstream: rectifiedStream.upstream,
+        translate: "responses",
+        rectifiers: rectifiedStream.rectifiers,
+        errorClass: rectifiedStream.errorClass,
+        requestOverrides: requestOverrideSummary(requestOverrides)
+      }, account);
+    }
     if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     if (codexOAuth) {
       const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
@@ -335,10 +351,8 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
   const requestOverrides = collectRequestOverrides(provider, model);
   const upstreamOptsWithOverrides = applyHeaderOverrides(upstreamOpts, requestOverrides);
   let upstreamBody = applyBodyOverrides(stripInternalFields({ ...(responsesBody || {}), model: upstreamModel }), requestOverrides);
-  // AIGo / 号池中转：去掉 image_gen hosted 与 function 同名冲突，避免 upstream 400。
-  if (isAigoLikeProvider(provider, model)) {
-    upstreamBody = stripConflictingImageGenTools(upstreamBody);
-  }
+  // 通用：去掉 image_gen hosted/function 冲突工具，避免 upstream 400。
+  upstreamBody = stripConflictingImageGenTools(upstreamBody);
   const codexOAuth = isCodexOAuthProvider(provider);
   const clientRequestedStream = Boolean(responsesBody?.stream);
   if (codexOAuth) {
@@ -349,7 +363,24 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
     Object.assign(upstreamBody, normalizeChatgptCodexResponsesBody(upstreamBody));
   }
   const upstream = await callOpenAIResponses(provider, upstreamBody, upstreamOptsWithOverrides);
-  if (clientRequestedStream) return withAccountMeta({ kind: "stream", upstream, translate: "responses", requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+  if (clientRequestedStream) {
+    // 与 chat 流式一致：上游若因 tool manifest 直接 400，先纠错再把 SSE 交给客户端。
+    const rectifiedStream = await retryFailedStreamWithRectifier({
+      upstream,
+      body: upstreamBody,
+      apiFormat: "openai_responses",
+      ctx,
+      send: (body) => callOpenAIResponses(provider, body, upstreamOptsWithOverrides)
+    });
+    return withAccountMeta({
+      kind: "stream",
+      upstream: rectifiedStream.upstream,
+      translate: "responses",
+      rectifiers: rectifiedStream.rectifiers,
+      errorClass: rectifiedStream.errorClass,
+      requestOverrides: requestOverrideSummary(requestOverrides)
+    }, account);
+  }
   if (!upstream.ok) return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
   if (codexOAuth) {
     const chatLike = await responsesStreamToChatResponse(upstream, upstreamModel);
@@ -383,8 +414,17 @@ export function isAigoLikeProvider(provider, model = null) {
 }
 
 /**
- * 去掉 Responses tools 里 hosted image_gen 与 function `image_gen.imagegen` 的同名冲突。
- * ChatGPT App 会带 hosted image_gen；部分中转会再注入 imagegen function，导致 400。
+ * 剥离 Responses tools 里会触发上游 400 的 image_gen 冲突工具。
+ *
+ * Codex / ChatGPT App 常同时带：
+ * - hosted：`image_generation` / `image_gen`，或 namespace `image_gen`
+ * - 客户端技能：function `image_gen.imagegen`
+ *
+ * 官方后端能吞；多数三方 Responses（good-gpt 等）会报：
+ *   Function 'image_gen.imagegen' conflicts with a hosted tool
+ *
+ * 中转还可能在服务端再注入 hosted，因此不能「只删一边、保留 function」——
+ * 只要请求里出现任一类 image_gen 相关工具，就全部去掉，避免冲突。
  */
 export function stripConflictingImageGenTools(body) {
   if (!body || typeof body !== "object") return body;
@@ -414,12 +454,15 @@ export function stripConflictingImageGenTools(body) {
   const hasFunction = body.tools.some(isImageGenFunction);
   if (!hasHosted && !hasFunction) return body;
 
-  // 优先保留 function 路径不可控（中转可能再次注入），因此去掉 hosted + 冲突 function，
-  // 让上游只剩一种或零种 image 工具，避免 "conflicts with a hosted tool"。
   const nextTools = [];
   for (const tool of body.tools) {
     if (isHostedImageGen(tool) || isImageGenFunction(tool)) continue;
-    if (tool && typeof tool === "object" && String(tool.type || "").toLowerCase() === "namespace" && toolName(tool).toLowerCase() === "image_gen") {
+    if (
+      tool &&
+      typeof tool === "object" &&
+      String(tool.type || "").toLowerCase() === "namespace" &&
+      toolName(tool).toLowerCase() === "image_gen"
+    ) {
       const children = Array.isArray(tool.tools) ? tool.tools.filter((child) => !isImageGenFunction(child)) : [];
       if (!children.length) continue;
       nextTools.push({ ...tool, tools: children });
@@ -541,11 +584,9 @@ async function retryFailedStreamWithRectifier({ upstream, body, apiFormat, ctx, 
   const rectifiers = [];
   let errorClass = "";
 
-  // Both fallbacks are only sent before the downstream receives any upstream
-  // bytes. The first retains concise descriptions; the second preserves every
-  // tool name/schema field but removes descriptions, which keeps very large
-  // Codex tool manifests below fragile OpenCode Go backend limits.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // 纠错只在下游尚未收到上游字节时进行：
+  // 0) compact schema  1) 去掉 description  2) 再截断工具数量（OpenCode Go 193 工具面仍 400）
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const payload = await readJsonResponse(activeUpstream);
     const rectified = rectifyUpstreamRequest({
       apiFormat,

@@ -106,6 +106,18 @@ export function rectifyUpstreamRequest({ apiFormat = "openai_chat", body, payloa
 
   if (!errorClass && isOpenCodeGoToolManifestFailure(payload, status, body, ctx)) {
     const retryStage = Number(ctx?.runtimeRectifierAttempt || 0);
+    if (retryStage >= 2) {
+      const trimmed = limitOpenCodeToolManifest(minimalOpenCodeToolManifest(body), MAX_RETRY_TOOL_COUNT);
+      return actionResult(trimmed, {
+        id: "opencode-go-tool-manifest-trimmed",
+        label: "OpenCode Go trimmed tool manifest rectifier",
+        errorClass: "opencode-go.tool-manifest-crash",
+        changes: [
+          "removed all tool and schema descriptions",
+          `limited the retry manifest to ${trimmed.tools.length} tools after compact/minimal retries also failed`
+        ]
+      });
+    }
     if (retryStage > 0) {
       return actionResult(minimalOpenCodeToolManifest(body), {
         id: "opencode-go-tool-manifest-minimal",
@@ -379,6 +391,26 @@ function minimalOpenCodeToolManifest(body) {
       };
     })
   };
+}
+
+/** Codex 全量工具面过大时，优先保留编码核心工具，再截断到上限。 */
+function limitOpenCodeToolManifest(body, maxTools = MAX_RETRY_TOOL_COUNT) {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  const limit = Math.max(1, Number(maxTools) || MAX_RETRY_TOOL_COUNT);
+  if (tools.length <= limit) return body;
+  const rank = (tool) => {
+    const name = String(tool?.function?.name || tool?.name || "").toLowerCase();
+    if (/^(exec_command|shell|apply_patch|write_file|edit_file|read_file|list_dir|grep_files|rg|git_)/.test(name)) return 0;
+    if (name.includes("apply_patch") || name.includes("exec_command") || name.includes("shell")) return 1;
+    if (name.startsWith("mcp__") || name.includes("mcp")) return 3;
+    return 2;
+  };
+  const ordered = tools
+    .map((tool, index) => ({ tool, index, rank: rank(tool) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .slice(0, limit)
+    .map((item) => item.tool);
+  return { ...body, tools: ordered };
 }
 
 function minimalOpenCodeSchema(raw) {

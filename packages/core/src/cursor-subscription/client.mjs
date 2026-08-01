@@ -9,11 +9,20 @@ import { getKeychainSecret } from "../keychain-store.mjs";
 import { assertCursorSubscriptionRequest, isCursorSubscriptionProvider, resolveCursorSubscriptionModel } from "./model-catalog.mjs";
 import { createCursorSubscriptionLane } from "./rate-limit.mjs";
 import { collectCursorSubscriptionResponse, createCursorSubscriptionStream } from "./adapter.mjs";
-import { applyCursorToolCompatibility, prepareCursorConversation } from "./tool-compat.mjs";
+import { applyCursorToolCompatibility, prepareCursorAgentTurn } from "./tool-compat.mjs";
 import { readLocalCursorDesktopVersion, readLocalCursorRequestedModel } from "./local-auth.mjs";
 import { cursorAgentCliEvents, isCursorAgentCliEligible } from "./agent-cli.mjs";
 import { http2CursorBidiEvents } from "./bidi-client.mjs";
-import { mapReadArguments, mapShellArguments, selectReadTool, selectShellTool, toolCatalog } from "./tool-capabilities.mjs";
+import {
+  mapReadArguments,
+  mapShellArguments,
+  mapWriteArguments,
+  selectCursorBridgeTools,
+  selectReadTool,
+  selectShellTool,
+  selectWriteTool,
+  toolCatalog
+} from "./tool-capabilities.mjs";
 import { applySensitiveGuard, buildSensitiveOutboundPreview } from "../sensitive-guard.mjs";
 
 const lanes = new Map();
@@ -157,25 +166,40 @@ function requestedModelPayload(model, requestedModel) {
   return Buffer.concat(fields);
 }
 
+function encodeAgentHistoryMessage(message) {
+  const content = String(message?.content || "").trim();
+  if (!content) return null;
+  // ConversationHistoryMessage.user / .assistant -> repeated content -> text.
+  const text = fieldString(1, content);
+  if (message.role === "assistant") {
+    return fieldBytes(2, fieldBytes(1, fieldBytes(1, text)));
+  }
+  return fieldBytes(1, fieldBytes(1, fieldBytes(1, text)));
+}
+
 export function buildAgentRun(messages, model, { tools = [], requestedModel } = {}) {
-  // Tools are sent through AgentRunRequest.mcp_tools. Do not also describe an
-  // XML compatibility protocol in the prompt: that makes Cursor bypass its
-  // native execution request and leaves Codex with unbound text markup.
-  const { system, user } = prepareCursorConversation(messages, []);
-  // The Cursor Agent endpoint rejects AgentRunRequest.custom_system_prompt
-  // (field 8) as an unsupported option. Preserve system guidance by placing
-  // it at the start of the user turn. Capability flags (fields 19, 23) are
-  // intentionally omitted: 9router benchmarks show they trigger heavier
-  // server-side processing (~28s vs ~3s for a PONG round-trip).
-  const prompt = system ? `${system}\n\n${user}` : user;
-  const userMessage = Buffer.concat([fieldString(1, prompt), fieldString(2, crypto.randomUUID())]);
+  // 工具走 mcp_tools；对话用结构化 history（field 7），对标 9router。
+  // 不在 prompt 里塞 XML tool 协议，避免 Cursor 绕过 native MCP execution。
+  const bridgeTools = selectCursorBridgeTools(tools);
+  const turn = prepareCursorAgentTurn(messages, bridgeTools);
+  // custom_system_prompt (field 8) 会被上游拒；work 规则已并进 currentUserText。
+  // Capability flags (19/23) 省略：9router 实测会触发更重的服务端处理。
+  const userMessage = Buffer.concat([
+    fieldString(1, turn.currentUserText || "Continue."),
+    fieldString(2, crypto.randomUUID())
+  ]);
+  const historyEntries = (turn.historyMessages || []).map(encodeAgentHistoryMessage).filter(Boolean);
+  const conversationHistory = historyEntries.length
+    ? Buffer.concat(historyEntries.map((entry) => fieldBytes(1, entry)))
+    : null;
   const userAction = Buffer.concat([
     fieldBytes(1, userMessage),
-    fieldBytes(2, Buffer.alloc(0))
+    fieldBytes(2, Buffer.alloc(0)),
+    ...(conversationHistory ? [fieldBytes(7, conversationHistory)] : [])
   ]);
   const conversationAction = fieldBytes(1, userAction);
   const modelSelection = requestedModelPayload(model, requestedModel);
-  const mcpTools = nativeCursorMcpTools(tools);
+  const mcpTools = nativeCursorMcpTools(bridgeTools);
   const run = Buffer.concat([
     fieldBytes(1, Buffer.alloc(0)),
     fieldBytes(2, conversationAction),
@@ -184,6 +208,58 @@ export function buildAgentRun(messages, model, { tools = [], requestedModel } = 
     fieldBytes(9, modelSelection)
   ]);
   return frame(fieldBytes(1, run));
+}
+
+function mapWriteOrShellToolCall(tools, { filePath, fileText, callId }) {
+  const writeTool = selectWriteTool(tools);
+  const nativeArgs = writeTool && mapWriteArguments(writeTool, { filePath, fileText });
+  if (writeTool && nativeArgs) {
+    return {
+      type: "tool_call",
+      id: callId || `call_${crypto.randomUUID()}`,
+      name: writeTool.name,
+      arguments: JSON.stringify(nativeArgs)
+    };
+  }
+  const target = selectShellTool(tools);
+  if (!target) return { type: "unsupported_execution", execution: "write" };
+  const delim = `SWITCHYARD_${crypto.randomUUID().replace(/-/g, "")}`;
+  const command = `cat > ${shellQuote(filePath)} << '${delim}'\n${fileText || ""}\n${delim}`;
+  return {
+    type: "tool_call",
+    id: callId || `call_${crypto.randomUUID()}`,
+    name: target.name,
+    arguments: JSON.stringify(mapShellArguments(target, { command }))
+  };
+}
+
+function mapEditOrShellToolCall(tools, { filePath, oldText, newText, callId }) {
+  if (!filePath) return { type: "unsupported_execution", execution: "edit" };
+  // 有 old/new 时用 python 原地替换；否则整文件写入。
+  if (oldText != null && newText != null && oldText !== "") {
+    const target = selectShellTool(tools);
+    if (!target) return { type: "unsupported_execution", execution: "edit" };
+    const script = [
+      "python3 - <<'PY'",
+      "from pathlib import Path",
+      `path = Path(${JSON.stringify(filePath)})`,
+      "text = path.read_text(encoding='utf-8')",
+      `old = ${JSON.stringify(oldText)}`,
+      `new = ${JSON.stringify(newText)}`,
+      "if old not in text:",
+      "    raise SystemExit('old_string not found')",
+      "path.write_text(text.replace(old, new, 1), encoding='utf-8')",
+      "print('ok')",
+      "PY"
+    ].join("\n");
+    return {
+      type: "tool_call",
+      id: callId || `call_${crypto.randomUUID()}`,
+      name: target.name,
+      arguments: JSON.stringify(mapShellArguments(target, { command: script }))
+    };
+  }
+  return mapWriteOrShellToolCall(tools, { filePath, fileText: newText ?? oldText ?? "", callId });
 }
 
 export function buildCursorRequestContextResponse() {
@@ -477,18 +553,11 @@ export function cursorAgentExecutionEvent(payload, tools = []) {
     const filePath = firstText(args, 1);
     const fileText = firstText(args, 2);
     if (!filePath) return { type: "unsupported_execution", execution: "write" };
-    const target = selectShellTool(tools);
-    if (target) {
-      const delim = `SWITCHYARD_${crypto.randomUUID().replace(/-/g, "")}`;
-      const command = `cat > ${shellQuote(filePath)} << '${delim}'\n${fileText || ""}\n${delim}`;
-      return {
-        type: "tool_call",
-        id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,
-        name: target.name,
-        arguments: JSON.stringify(mapShellArguments(target, { command }))
-      };
-    }
-    return { type: "unsupported_execution", execution: "write" };
+    return mapWriteOrShellToolCall(tools, {
+      filePath,
+      fileText,
+      callId: firstText(args, 3) || firstText(execFields, 15)
+    });
   }
   // DeleteFile (exec field 4): DeleteArgs { path=1, tool_call_id=2 }
   const del = execFields.get(4)?.[0];
@@ -560,19 +629,31 @@ export function cursorAgentExecutionEvent(payload, tools = []) {
     }
     return { type: "unsupported_execution", execution: "pi_bash" };
   }
+  // pi_edit (47): path + old/new 或整文件内容，映射到 shell/写文件工具，避免 unsupported 中断。
+  const piEdit = execFields.get(47)?.[0];
+  if (piEdit) {
+    const args = fields(piEdit);
+    const filePath = firstText(args, 1);
+    const field2 = firstText(args, 2);
+    const field3 = firstText(args, 3);
+    if (!filePath) return { type: "unsupported_execution", execution: "pi_edit" };
+    const callId = firstText(args, 4) || firstText(execFields, 15);
+    if (field3) {
+      return mapEditOrShellToolCall(tools, { filePath, oldText: field2, newText: field3, callId });
+    }
+    return mapWriteOrShellToolCall(tools, { filePath, fileText: field2, callId });
+  }
   const piWrite = execFields.get(48)?.[0];
   if (piWrite) {
     const args = fields(piWrite);
     const filePath = firstText(args, 1);
     const fileText = firstText(args, 2);
     if (!filePath) return { type: "unsupported_execution", execution: "pi_write" };
-    const target = selectShellTool(tools);
-    if (target) {
-      const delim = `SWITCHYARD_${crypto.randomUUID().replace(/-/g, "")}`;
-      const command = `cat > ${shellQuote(filePath)} << '${delim}'\n${fileText || ""}\n${delim}`;
-      return { type: "tool_call", id: firstText(args, 3) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`, name: target.name, arguments: JSON.stringify(mapShellArguments(target, { command })) };
-    }
-    return { type: "unsupported_execution", execution: "pi_write" };
+    return mapWriteOrShellToolCall(tools, {
+      filePath,
+      fileText,
+      callId: firstText(args, 3) || firstText(execFields, 15)
+    });
   }
   const piGrep = execFields.get(49)?.[0];
   if (piGrep) {

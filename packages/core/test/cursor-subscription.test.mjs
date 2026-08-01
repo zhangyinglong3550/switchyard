@@ -215,8 +215,9 @@ function protoVarintField(field, value) {
 }
 
 function protoField(field, value) {
-  const body = Buffer.from(value);
-  return Buffer.concat([Buffer.from([(field << 3) | 2, body.length]), body]);
+  const body = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  // field tag / length 都可能超过单字节，必须用 varint（field 47=pi_edit 会踩坑）。
+  return Buffer.concat([encodeTestVarint((field << 3) | 2), encodeTestVarint(body.length), body]);
 }
 
 function readVarint(buffer, offset) {
@@ -547,8 +548,10 @@ test("cursor subscription · quota responses do not open the local circuit", asy
 
 import {
   applyCursorToolCompatibility,
+  prepareCursorAgentTurn,
   prepareCursorConversation
 } from "../src/cursor-subscription/tool-compat.mjs";
+import { selectCursorBridgeTools } from "../src/cursor-subscription/tool-capabilities.mjs";
 import { transformOpenCodeTextToolCalls } from "../src/opencode-text-tool-calls.mjs";
 
 test("cursor subscription · accepts function tools and preserves the tool-result turn", () => {
@@ -578,9 +581,60 @@ test("cursor subscription · accepts function tools and preserves the tool-resul
     { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: '{"path":"config.json"}' } }] },
     { role: "tool", tool_call_id: "call_1", content: "{\"enabled\":true}" }
   ], tools);
-  assert.match(conversation.system, /API endpoint/);
-  assert.match(conversation.user, /TOOL RESULT \(call_1\)/);
+  assert.match(conversation.system, /API endpoint|coding agent/i);
+  assert.match(conversation.user, /<tool_result>/);
+  assert.match(conversation.user, /call_1/);
   assert.match(conversation.user, /enabled/);
+});
+
+test("cursor subscription · drops update_plan from bridge tool surface", () => {
+  const tools = selectCursorBridgeTools([
+    { type: "function", function: { name: "update_plan", parameters: { type: "object" } } },
+    { type: "function", function: { name: "exec_command", parameters: { type: "object", properties: { cmd: {} } } } },
+    { type: "function", function: { name: "apply_patch", parameters: { type: "object", properties: { patch: {} } } } },
+    { type: "function", function: { name: "some_skill_helper", parameters: { type: "object" } } }
+  ]);
+  assert.deepEqual(tools.map((tool) => tool.function.name), [
+    "exec_command",
+    "apply_patch",
+    "some_skill_helper"
+  ]);
+});
+
+test("cursor subscription · agent turn keeps tool results and work rules in the active user text", () => {
+  const turn = prepareCursorAgentTurn([
+    { role: "user", content: "fix the bug" },
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "exec_command", arguments: '{"cmd":"ls"}' } }] },
+    { role: "tool", tool_call_id: "c1", content: "dispatch.mjs" }
+  ], [
+    { type: "function", function: { name: "exec_command", parameters: { type: "object", properties: { cmd: {} } } } },
+    { type: "function", function: { name: "update_plan", parameters: { type: "object" } } }
+  ]);
+  assert.match(turn.currentUserText, /fix the bug/);
+  assert.match(turn.currentUserText, /<tool_result>/);
+  assert.match(turn.currentUserText, /dispatch\.mjs/);
+  assert.match(turn.currentUserText, /Never call update_plan repeatedly/);
+  assert.equal(turn.bridgeTools.some((tool) => tool.function.name === "update_plan"), false);
+  assert.equal(turn.historyMessages.length, 0);
+});
+
+test("cursor subscription · agent run encodes prior turns as conversation_history", () => {
+  const framed = buildAgentRun([
+    { role: "user", content: "first question" },
+    { role: "assistant", content: "first answer" },
+    { role: "user", content: "now edit the file" }
+  ], "grok-4.5", {
+    tools: [{ type: "function", function: { name: "exec_command", parameters: { type: "object", properties: { cmd: {} } } } }]
+  });
+  const clientMessage = protoFields(framed.subarray(5));
+  const run = protoFields(clientMessage.get(1)[0]);
+  const action = protoFields(run.get(2)[0]);
+  const userAction = protoFields(action.get(1)[0]);
+  assert.equal(userAction.has(7), true);
+  const history = protoFields(userAction.get(7)[0]);
+  assert.equal(history.get(1).length >= 2, true);
+  assert.match(userAction.get(1)[0].toString(), /now edit the file/);
+  assert.match(userAction.get(1)[0].toString(), /Never call update_plan repeatedly|Prefer real work tools/);
 });
 
 test("cursor subscription · converts compatibility XML into an OpenAI function call", () => {
@@ -857,4 +911,36 @@ test("cursor subscription · maps Cursor built-in grep request to exec_command",
       cmd: "grep -n '\\.root\\[data-theme' '/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css'"
     })
   });
+});
+
+test("cursor subscription · maps pi_edit to exec_command instead of unsupported builtin", () => {
+  const editArgs = Buffer.concat([
+    protoField(1, "/tmp/demo.txt"),
+    protoField(2, "old line"),
+    protoField(3, "new line"),
+    protoField(4, "pi-edit-1")
+  ]);
+  const exec = Buffer.concat([protoVarintField(1, 47), protoField(47, editArgs)]);
+  const event = cursorAgentExecutionEvent(protoField(2, exec), ["exec_command"]);
+  assert.equal(event.type, "tool_call");
+  assert.equal(event.name, "exec_command");
+  assert.equal(event.id, "pi-edit-1");
+  const args = JSON.parse(event.arguments);
+  assert.match(args.cmd, /python3/);
+  assert.match(args.cmd, /old line/);
+  assert.match(args.cmd, /new line/);
+  assert.match(args.cmd, /\/tmp\/demo\.txt/);
+});
+
+test("cursor subscription · omits update_plan from mcp_tools payload", () => {
+  const framed = buildAgentRun([{ role: "user", content: "edit code" }], "grok-4.5", {
+    tools: [
+      { type: "function", function: { name: "update_plan", parameters: { type: "object" } } },
+      { type: "function", function: { name: "exec_command", parameters: { type: "object", properties: { cmd: {} } } } }
+    ]
+  });
+  const run = protoFields(protoFields(framed.subarray(5)).get(1)[0]);
+  const mcpTools = protoFields(run.get(4)[0]);
+  assert.equal(mcpTools.get(1).length, 1);
+  assert.equal(protoFields(mcpTools.get(1)[0]).get(1)[0].toString(), "exec_command");
 });
