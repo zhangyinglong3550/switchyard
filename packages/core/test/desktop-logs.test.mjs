@@ -72,3 +72,36 @@ test("desktop logs · drops gateway.log before append when it exceeds max bytes"
   assert.match(text, /after rotation/);
   assert.equal(text.includes("x".repeat(128)), false);
 });
+
+test("desktop logs · stream destroy during write does not raise uncaught exception", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-logs-"));
+  const logDir = path.join(tmp, "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+  process.env.SWITCHYARD_LOG_DIR = logDir;
+  process.env.SWITCHYARD_LOG_MAX_BYTES = "64";
+  const uncaught = [];
+  const onUncaught = (err) => uncaught.push(err);
+  process.on("uncaughtException", onUncaught);
+  let logs;
+  t.after(async () => {
+    process.off("uncaughtException", onUncaught);
+    try { await logs?.closeLogStreamForTest(); } catch {}
+    delete process.env.SWITCHYARD_LOG_DIR;
+    delete process.env.SWITCHYARD_LOG_MAX_BYTES;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  logs = await import(`../../../apps/desktop/src/logs.mjs?v=${Date.now()}-${Math.random()}`);
+  // 先撑开日志文件，再在写过程中触发 drop+destroy。
+  for (let i = 0; i < 40; i += 1) {
+    logs.appendLog({ level: "info", msg: `line-${i}`, pad: "y".repeat(8) });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  logs.appendLog({ level: "info", msg: "after-destroy-race" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await logs.closeLogStreamForTest();
+
+  assert.equal(uncaught.length, 0, uncaught[0]?.stack || "expected no uncaughtException");
+  const text = fs.readFileSync(path.join(logDir, "gateway.log"), "utf8");
+  assert.match(text, /after-destroy-race|line-/);
+});

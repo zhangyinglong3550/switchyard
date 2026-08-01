@@ -24,15 +24,29 @@ function configuredLogMaxBytes() {
   return Number.isFinite(value) && value > 0 ? Math.trunc(value) : DEFAULT_LOG_MAX_BYTES;
 }
 
+function streamUsable(stream) {
+  return Boolean(stream) && !stream.destroyed && !stream.closed && stream.writable !== false;
+}
+
+/** 轮转/关闭写流时吞掉异步 error，避免 Electron 弹「Cannot call write after a stream was destroyed」。 */
+function retireWriteStream(stream = writeStream) {
+  if (!stream) return;
+  if (writeStream === stream) writeStream = null;
+  stream.removeAllListeners("error");
+  stream.on("error", () => {});
+  try {
+    if (!stream.destroyed) stream.destroy();
+  } catch {
+    // ignore
+  }
+}
+
 function dropOversizedLogFile(file) {
   const maxBytes = configuredLogMaxBytes();
   try {
     const stat = fs.statSync(file);
     if (stat.size < maxBytes) return;
-    if (writeStream && !writeStream.closed) {
-      writeStream.destroy();
-      writeStream = null;
-    }
+    retireWriteStream();
     fs.rmSync(file, { force: true });
   } catch {
     // Missing or unreadable log files are handled by createWriteStream below.
@@ -44,20 +58,34 @@ function ensureWriteStream() {
   ensureDir(dir);
   const file = path.join(dir, "gateway.log");
   dropOversizedLogFile(file);
-  if (writeStream && !writeStream.closed) return writeStream;
-  writeStream = fs.createWriteStream(file, { flags: "a" });
+  if (streamUsable(writeStream)) return writeStream;
+  const stream = fs.createWriteStream(file, { flags: "a" });
+  // write() 的 ERR_STREAM_DESTROYED 常以 error 事件抛出，try/catch 接不住。
+  stream.on("error", () => {
+    if (writeStream === stream) writeStream = null;
+  });
+  writeStream = stream;
   return writeStream;
+}
+
+function writeLogLine(line) {
+  try {
+    const stream = ensureWriteStream();
+    if (!streamUsable(stream)) return;
+    stream.write(line, (err) => {
+      if (!err) return;
+      if (writeStream === stream) writeStream = null;
+    });
+  } catch {
+    writeStream = null;
+  }
 }
 
 export function appendLog(entry) {
   const enriched = redactLogValue({ ts: nowIso(), ...entry });
   RING.push(enriched);
   if (RING.length > RING_LIMIT) RING.shift();
-  try {
-    ensureWriteStream().write(JSON.stringify(enriched) + "\n");
-  } catch {
-    // ignore log write failures; UI still has the ring
-  }
+  writeLogLine(JSON.stringify(enriched) + "\n");
   try {
     if (enriched.requestLog) recordRequestEvent(enriched);
   } catch {
@@ -106,11 +134,20 @@ export function logFilePath() {
 }
 
 export function closeLogStreamForTest() {
-  if (!writeStream || writeStream.closed) return Promise.resolve();
+  if (!writeStream) return Promise.resolve();
+  const stream = writeStream;
+  writeStream = null;
+  stream.removeAllListeners("error");
+  stream.on("error", () => {});
   return new Promise((resolve) => {
-    writeStream.end(() => {
-      writeStream = null;
+    try {
+      if (stream.destroyed || stream.closed) {
+        resolve();
+        return;
+      }
+      stream.end(() => resolve());
+    } catch {
       resolve();
-    });
+    }
   });
 }
