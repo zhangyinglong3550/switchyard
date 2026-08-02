@@ -14,10 +14,13 @@ import { describeProtocolRoute } from "./protocol-capabilities.mjs";
 import { readJsonResponse } from "./upstream/clients.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
+import { previewText } from "./text-preview.mjs";
 import { responsesToChat, chatToResponse, streamChatAsResponses, extractNamespaceMap } from "./openai-adapter.mjs";
 import { streamResponsesAsChat } from "./openai-adapter-out.mjs";
 import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamResponsesAsAnthropic, streamAnthropicAsChat, streamMessageAsAnthropic, streamAnthropicError, countTokensApprox } from "./anthropic-adapter.mjs";
 import { registerBuiltinPatches, applyStreamLine, activePatchDescriptors } from "./compat/index.mjs";
+import { applyReasoningEffortCatalog } from "./reasoning-effort-catalog.mjs";
+import { captureRequestBody } from "./request-body-capture.mjs";
 import { SseParser } from "./sse-parser.mjs";
 import { iterateUpstreamBody } from "./stream-idle-timeout.mjs";
 import { streamCompatPolicy } from "./stream-compat-policy.mjs";
@@ -369,11 +372,6 @@ function recordRoute(record, route, requestedModel) {
   }
 }
 
-function previewText(value, max = 1200) {
-  const text = contentToText(value).replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[图片]").trim();
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
 function imageCount(value) {
   if (!value) return 0;
   if (typeof value === "string") return /data:image\/[^;]+;base64,|https?:\/\/\S+\.(?:png|jpe?g|webp|gif)/i.test(value) ? 1 : 0;
@@ -392,8 +390,9 @@ function summarizeTools(tools) {
     const fn = tool?.function || tool || {};
     return {
       name: String(fn.name || tool?.name || "").slice(0, 120),
-      description: String(fn.description || tool?.description || "").slice(0, 260),
-      required: Array.isArray(fn.parameters?.required) ? fn.parameters.required.slice(0, 20) : [],
+      // 描述宜短：长工具表会撑爆 request_summary，导致落库时 tools 整段丢失
+      description: String(fn.description || tool?.description || "").slice(0, 120),
+      required: Array.isArray(fn.parameters?.required) ? fn.parameters.required.slice(0, 12) : [],
       propertyCount: fn.parameters?.properties && typeof fn.parameters.properties === "object" ? Object.keys(fn.parameters.properties).length : 0
     };
   }).filter((tool) => tool.name);
@@ -401,27 +400,75 @@ function summarizeTools(tools) {
 
 function extractSkillNames(systemText) {
   const text = String(systemText || "");
-  if (!/(skill|skills|技能|能力)/i.test(text)) return [];
+  if (!/(skill|skills|技能|能力|SKILL\.md)/i.test(text)) return [];
   const names = new Set();
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     const match = /^(?:[-*]\s*)?`?([A-Za-z0-9_.:@/-]{2,80})`?\s*(?:[:：-]|—)\s+/.exec(trimmed);
     if (match && /skill|技能|能力/i.test(trimmed)) names.add(match[1]);
+    // Claude Code / Agent Skills 常见列表行：`- skill-name: ...` 或纯反引号名
+    const bullet = /^(?:[-*]\s+)(?:Skill\s+)?`([A-Za-z0-9_.:@/-]{2,80})`/i.exec(trimmed);
+    if (bullet) names.add(bullet[1]);
   }
   for (const match of text.matchAll(/(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) names.add(match[1]);
+  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) names.add(match[1]);
   return Array.from(names).slice(0, 80);
 }
 
+/** Codex 等会注入伪 user（internal_context），不能当作「用户刚发的话」。 */
+function isSyntheticUserText(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  if (/<codex_internal_context\b/i.test(t)) return true;
+  if (/^continue working toward the active thread/i.test(t)) return true;
+  if (/<recommended_plugins\b/i.test(t)) return true;
+  return false;
+}
+
+function isUserLikeRole(role) {
+  return Boolean(role && role !== "system" && role !== "assistant" && role !== "tool");
+}
+
 function summarizeMessages(messages) {
-  const out = { system: [], user: [], assistant: [], tool: [], images: 0, roleCounts: {} };
-  for (const message of messages || []) {
+  const out = { system: [], user: [], assistant: [], tool: [], images: 0, roleCounts: {}, latestUser: null };
+  const list = Array.isArray(messages) ? messages : [];
+  let lastMeaningfulUserIndex = -1;
+  let lastUserLikeIndex = -1;
+  for (let i = 0; i < list.length; i += 1) {
+    const role = list[i]?.role || "event";
+    if (!isUserLikeRole(role)) continue;
+    lastUserLikeIndex = i;
+    if (!isSyntheticUserText(contentToText(list[i]?.content || ""))) lastMeaningfulUserIndex = i;
+  }
+  const focusUserIndex = lastMeaningfulUserIndex >= 0 ? lastMeaningfulUserIndex : lastUserLikeIndex;
+  for (let index = 0; index < list.length; index += 1) {
+    const message = list[index];
     const role = message?.role || "event";
     out.roleCounts[role] = (out.roleCounts[role] || 0) + 1;
     out.images += imageCount(message?.content);
     const content = contentToText(message?.content || "");
+    // 最新真实用户消息用更大预算 + 头尾保留，便于调用可视化看到本轮增量
+    let max = 1200;
+    let strategy = "head-tail";
+    if (role === "system") {
+      max = 2000;
+      strategy = "head";
+    } else if (role === "tool") {
+      max = 800;
+      strategy = "head-tail";
+    } else if (index === focusUserIndex) {
+      max = 6000;
+      strategy = "head-tail";
+    } else if (isUserLikeRole(role)) {
+      max = 1600;
+      strategy = "head-tail";
+    }
+    const text = previewText(content, max, { strategy });
     const item = {
       role,
-      text: previewText(content, role === "system" ? 2000 : 1200),
+      text,
+      truncated: content.length > max,
+      synthetic: isUserLikeRole(role) && isSyntheticUserText(content),
       // Safe diagnostic only: retain the original size, never the full
       // tool/browser output. This distinguishes a malformed tool history from
       // an oversized transcript when an upstream returns only a generic 400.
@@ -435,16 +482,79 @@ function summarizeMessages(messages) {
     else if (role === "tool") out.tool.push(item);
     else out.user.push(item);
   }
+  for (let i = out.user.length - 1; i >= 0; i -= 1) {
+    if (!out.user[i]?.synthetic) {
+      out.latestUser = out.user[i];
+      break;
+    }
+  }
+  if (!out.latestUser && out.user.length) out.latestUser = out.user[out.user.length - 1];
   out.skills = extractSkillNames(out.system.map((item) => item.text).join("\n"));
   return out;
 }
 
+/** 判断本请求是「新用户提问」还是「同用户轮的工具/助手续跑」。 */
+function describeTurnPhase(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  let lastMeaningfulUserIndex = -1;
+  let effectiveLastIndex = -1;
+  for (let i = 0; i < list.length; i += 1) {
+    const role = list[i]?.role || "";
+    if (!role || role === "system") continue;
+    const syntheticUser = isUserLikeRole(role) && isSyntheticUserText(contentToText(list[i]?.content || ""));
+    if (isUserLikeRole(role) && !syntheticUser) lastMeaningfulUserIndex = i;
+    // 跳过伪 user，避免把 internal_context 当成「新的一问」
+    if (!syntheticUser) effectiveLastIndex = i;
+  }
+  const last = effectiveLastIndex >= 0 ? list[effectiveLastIndex] : null;
+  const lastRole = last?.role || "";
+  const continuation = Boolean(last && lastRole !== "user" && lastMeaningfulUserIndex >= 0 && effectiveLastIndex > lastMeaningfulUserIndex);
+  const toolNames = [];
+  if (lastRole === "assistant" && Array.isArray(last?.tool_calls)) {
+    for (const call of last.tool_calls) {
+      const name = call?.function?.name || call?.name || "";
+      if (name) toolNames.push(name);
+    }
+  }
+  let lastAction = "";
+  if (lastRole === "tool") {
+    const name = last?.name || last?.tool_name || "tool";
+    const preview = previewText(last?.content || "", 120, { strategy: "head" });
+    lastAction = preview ? `工具结果 ${name}: ${preview}` : `工具结果 ${name}`;
+  } else if (toolNames.length) {
+    lastAction = `待执行工具 ${[...new Set(toolNames)].slice(0, 4).join(", ")}`;
+  } else if (lastRole === "assistant") {
+    const preview = previewText(last?.content || "", 120, { strategy: "head" });
+    lastAction = preview ? `助手续写: ${preview}` : "助手续跑";
+  }
+  const afterUser = lastMeaningfulUserIndex >= 0 ? list.slice(lastMeaningfulUserIndex + 1) : [];
+  const continueSteps = afterUser.filter((item) => {
+    const role = item?.role || "";
+    if (!role || role === "system") return false;
+    if (isUserLikeRole(role) && isSyntheticUserText(contentToText(item?.content || ""))) return false;
+    return true;
+  }).length;
+  return {
+    turnPhase: continuation ? "continue" : "user",
+    continuation,
+    continueSteps,
+    lastRole: lastRole || "",
+    lastAction
+  };
+}
+
 function summarizeRequest(chatBody, route, protocol) {
   const messages = summarizeMessages(chatBody.messages || []);
+  const turn = describeTurnPhase(chatBody.messages || []);
   const protocolRoute = describeProtocolRoute({
     clientProtocol: protocol,
     provider: route?.provider
   });
+  // 用副本跑 catalog，只取 trace，不改原始 chatBody
+  const { trace: reasoningEffortTrace } = applyReasoningEffortCatalog(
+    { ...(chatBody || {}) },
+    { provider: route?.provider, model: route?.model }
+  );
   return {
     protocol,
     modelId: route?.model?.id || "",
@@ -474,7 +584,13 @@ function summarizeRequest(chatBody, route, protocol) {
       enableThinking: chatBody.enable_thinking,
       reasoningSplit: chatBody.reasoning_split
     },
+    reasoningEffortTrace: chatBody?._switchyardReasoningEffortTrace || reasoningEffortTrace || null,
     messages,
+    turnPhase: turn.turnPhase,
+    continuation: turn.continuation,
+    continueSteps: turn.continueSteps,
+    lastAction: turn.lastAction,
+    lastRole: turn.lastRole,
     vision: chatBody._switchyardVision || null,
     tools: summarizeTools(chatBody.tools),
     toolCount: Array.isArray(chatBody.tools) ? chatBody.tools.length : 0
@@ -623,9 +739,41 @@ function summarizeResponse(payload, { stream = false, status = null, error = "" 
   };
 }
 
-function recordRequestSummary(record, chatBody, route, protocol) {
+function recordRequestSummary(record, chatBody, route, protocol, config = null) {
   if (!record) return;
   record.requestSummary = summarizeRequest(chatBody, route, protocol);
+  maybeCaptureRequestBody(record, chatBody, route, protocol, config);
+}
+
+function maybeCaptureRequestBody(record, chatBody, route, protocol, config) {
+  if (!record || !config?.requestBodyCapture?.enabled) return;
+  try {
+    const captured = captureRequestBody({
+      body: chatBody,
+      captureConfig: config.requestBodyCapture,
+      sensitiveGuard: config.sensitiveGuard,
+      meta: {
+        protocol,
+        clientId: record.clientId || "",
+        modelId: route?.model?.id || record.modelId || "",
+        providerId: route?.provider?.id || record.providerId || "",
+        upstreamModel: route?.upstreamModel || record.upstreamModel || "",
+        path: record.path || "",
+        method: record.method || ""
+      }
+    });
+    if (!captured?.ref) return;
+    record.requestBodyRef = captured.ref;
+    if (!record.requestSummary) record.requestSummary = {};
+    record.requestSummary.requestBodyCapture = {
+      ref: captured.ref,
+      truncated: Boolean(captured.truncated),
+      originalBytes: captured.originalBytes,
+      storedBytes: captured.storedBytes
+    };
+  } catch {
+    // 调试落盘失败不能影响主请求
+  }
 }
 
 
@@ -698,10 +846,11 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
   const streamUsage = summary?.usage
     ? normalizeResponseUsage(summary.usage)
     : normalizeResponseUsage(null);
+  const sampledText = previewText(summary?.textSample || "", 800, { strategy: "head-tail", headRatio: 0.3 });
   return {
     stream: true,
     status,
-    text: "",
+    text: sampledText,
     reasoning: "",
     toolCalls,
     finishReason: summary?.terminalState || (summary?.sawTerminalEvent ? "completed" : "incomplete"),
@@ -732,6 +881,9 @@ function recordStreamDiagnostics(record, summary, { status = 0, error = "" } = {
   // 把流式解析到的 usage 落到 requestRecord 顶层，request_logs 入库才能汇总 Token
   if (summary.usage) applyUsageToRequestRecord(record, summary.usage);
   record.responseSummary = responseSummaryFromStreamDiagnostics(summary, { status, error: error || record.error || "" });
+  if (record.responseSummary?.text && !record.responsePreview) {
+    record.responsePreview = record.responseSummary.text;
+  }
 }
 
 function recordDispatchCompatibility(record, result) {
@@ -774,12 +926,17 @@ function emitTraceStart(emit, record) {
 
 function recordPrompt(record, messages) {
   if (!record || !Array.isArray(messages)) return;
-  const text = messages
-    .filter((message) => message?.role === "user")
-    .map((message) => previewText(message.content))
-    .filter(Boolean)
-    .slice(-3)
-    .join("\n---\n");
+  // 只保留最近一条真实用户消息，跳过 codex_internal_context 等伪 user
+  const users = messages.filter((message) => isUserLikeRole(message?.role));
+  let latest = null;
+  for (let i = users.length - 1; i >= 0; i -= 1) {
+    if (!isSyntheticUserText(contentToText(users[i]?.content || ""))) {
+      latest = users[i];
+      break;
+    }
+  }
+  if (!latest) latest = users[users.length - 1];
+  const text = latest ? previewText(latest.content, 2000, { strategy: "head-tail", headRatio: 0.25 }) : "";
   if (text) record.promptPreview = text;
 }
 
@@ -865,7 +1022,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord, withD
   recordPrompt(requestRecord, chatBody.messages);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
-  recordRequestSummary(requestRecord, chatBody, route, "openai_chat");
+  recordRequestSummary(requestRecord, chatBody, route, "openai_chat", config);
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
     // 流式支持 openai_chat 直通和 anthropic_messages 翻译两种模式。
@@ -955,7 +1112,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
     return;
   }
   if (routing.native) {
-    recordRequestSummary(requestRecord, { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id }, route, "openai_responses");
+    recordRequestSummary(requestRecord, { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id }, route, "openai_responses", config);
     emitTraceStart(emit, requestRecord);
     const upstreamBody = { ...body, model: route.upstreamModel, _modelId: route.model.id };
     if (body.stream) {
@@ -1034,7 +1191,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
   recordPrompt(requestRecord, chatBody.messages);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
-  recordRequestSummary(requestRecord, chatBody, route, "openai_responses");
+  recordRequestSummary(requestRecord, chatBody, route, "openai_responses", config);
   emitTraceStart(emit, requestRecord);
   if (body.stream) {
     if (apiFormat === "openai_responses") {
@@ -1249,8 +1406,19 @@ function createStreamDiagnostics(protocol) {
     preludeRetryCount: 0,
     sawTerminalEvent: false,
     sawMeaningfulEvent: false,
-    usage: null
+    usage: null,
+    // 采样一小段输出文本，供请求日志「回」摘要（非完整落盘）
+    textSample: ""
   };
+}
+
+function appendStreamTextSample(diag, piece, limit = 800) {
+  if (!diag) return;
+  const chunk = String(piece || "");
+  if (!chunk) return;
+  if (typeof diag.textSample !== "string") diag.textSample = "";
+  if (diag.textSample.length >= limit) return;
+  diag.textSample += chunk.slice(0, limit - diag.textSample.length);
 }
 
 function incrementCounter(target, key) {
@@ -1306,6 +1474,22 @@ function observeSseEvent(diag, event, protocol) {
   if (dataType === "[DONE]") diag.doneCount += 1;
   const usage = data ? extractUsageFromSseDataLine(data) : null;
   if (usage) diag.usage = mergeUsage(diag.usage, usage);
+
+  // 采样输出文本，避免流式请求日志「回」永远为空
+  if (parsed && protocol === "chat" && Array.isArray(parsed.choices)) {
+    for (const choice of parsed.choices) {
+      const delta = choice?.delta || {};
+      appendStreamTextSample(diag, delta.content || choice?.message?.content || choice?.text || "");
+      for (const call of delta.tool_calls || []) {
+        appendStreamTextSample(diag, call?.function?.arguments || call?.arguments || "");
+      }
+    }
+  } else if (parsed) {
+    if (typeof parsed.delta === "string") appendStreamTextSample(diag, parsed.delta);
+    if (typeof parsed.text === "string" && /output_text|function_call/.test(dataType)) {
+      appendStreamTextSample(diag, parsed.text);
+    }
+  }
 
   const terminal = protocol === "chat"
     ? isChatTerminalEvent(data, parsed)
@@ -1395,6 +1579,7 @@ function publicStreamDiagnostics(diag, extra = {}) {
     retryCount: diag.retryCount,
     preludeRetryCount: diag.preludeRetryCount,
     usage: diag.usage || null,
+    textSample: typeof diag.textSample === "string" ? diag.textSample.slice(0, 800) : "",
     terminalState,
     terminalReason: extra.terminalReason || (sawTerminalEvent ? "protocol_terminal" : "adapter_eof"),
     sawTerminalEvent,
@@ -1586,7 +1771,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
   recordPrompt(requestRecord, chatBody.messages);
   chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
   setVisionHeader(res, chatBody);
-  recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages");
+  recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages", config);
   maybeCaptureClaudeDebugRequest(requestRecord, body, route, "anthropic_messages");
   emitTraceStart(emit, requestRecord);
   if (body.stream) {

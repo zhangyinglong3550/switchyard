@@ -88,6 +88,11 @@ import {
   SENSITIVE_GUARD_CLIENTS,
   BUILTIN_SENSITIVE_RULE_OPTIONS
 } from "../../../packages/core/src/sensitive-guard.mjs";
+import {
+  normalizeRequestBodyCaptureConfig,
+  readCapturedRequestBody,
+  requestBodyCaptureDir
+} from "../../../packages/core/src/request-body-capture.mjs";
 import { listProviderPresets, providerPresetFor, presetModelHints } from "../../../packages/core/src/provider-presets.mjs";
 import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/model-directory-sync.mjs";
 import {
@@ -1048,6 +1053,43 @@ ipcMain.handle("sensitive-audit:list", (_e, payload = {}) => {
   };
 });
 ipcMain.handle("sensitive-audit:clear", () => clearSensitiveAudits());
+ipcMain.handle("request-body-capture:get", () => {
+  const cfg = readConfig();
+  return {
+    ok: true,
+    requestBodyCapture: normalizeRequestBodyCaptureConfig(cfg.requestBodyCapture || {}),
+    dir: requestBodyCaptureDir()
+  };
+});
+ipcMain.handle("request-body-capture:set", (_e, payload = {}) => {
+  const cfg = readConfig();
+  const current = normalizeRequestBodyCaptureConfig(cfg.requestBodyCapture || {});
+  const nextCapture = normalizeRequestBodyCaptureConfig({
+    ...current,
+    ...payload,
+    enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : current.enabled
+  });
+  const next = { ...cfg, requestBodyCapture: nextCapture };
+  const result = saveValidated(next, { reason: "request-body-capture" });
+  try { reloadConfig(); } catch {}
+  return {
+    ok: true,
+    path: result.path,
+    requestBodyCapture: nextCapture,
+    dir: requestBodyCaptureDir()
+  };
+});
+ipcMain.handle("request-body:read", (_e, payload = {}) => {
+  const ref = payload?.ref || payload?.requestBodyRef || payload?.request_body_ref || "";
+  return readCapturedRequestBody(ref);
+});
+ipcMain.handle("request-body:reveal", async (_e, payload = {}) => {
+  const ref = payload?.ref || payload?.requestBodyRef || payload?.request_body_ref || "";
+  const result = readCapturedRequestBody(ref);
+  if (!result.ok || !result.path) return result;
+  await shell.showItemInFolder(result.path);
+  return { ok: true, path: result.path };
+});
 ipcMain.handle("sensitive-guard:set", (_e, payload = {}) => {
   const cfg = readConfig();
   const current = normalizeSensitiveGuardConfig(cfg.sensitiveGuard || {});

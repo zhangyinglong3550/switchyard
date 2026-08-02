@@ -1070,6 +1070,18 @@ test("stripConflictingImageGenTools → only function: drop function", () => {
   assert.deepEqual(next.tools.map((t) => t.name), ["shell"]);
 });
 
+test("stripConflictingImageGenTools → reserved namespace image_gen.image_gen", () => {
+  const body = {
+    tools: [
+      { type: "function", name: "image_gen.image_gen" },
+      { type: "function", function: { name: "image_gen.image_gen", parameters: { type: "object" } } },
+      { type: "function", name: "shell" }
+    ]
+  };
+  const next = stripConflictingImageGenTools(body);
+  assert.deepEqual(next.tools.map((t) => t.name || t.function?.name), ["shell"]);
+});
+
 test("stripConflictingImageGenTools → only hosted: drop hosted", () => {
   const body = {
     tools: [

@@ -1,3 +1,5 @@
+import { applyReasoningEffortCatalog, resolveReasoningCapability } from "../../reasoning-effort-catalog.mjs";
+
 const REASONING_CONFIGS = {
   deepseek: {
     supportsThinking: true,
@@ -210,15 +212,32 @@ export const reasoningOptionsPatch = {
     "reasoning-options · maps Codex reasoning to OpenRouter reasoning.effort"
   ],
   match(ctx) {
+    const capability = resolveReasoningCapability(ctx);
+    const mode = capability?.wire?.effortValueMode || "";
+    // Responses 透传 / adapter / unsupported：不改写 body，仅由摘要层记 trace
+    if (capability && !capability.unsupported && mode && !["passthrough", "adapter", "unsupported"].includes(mode)) {
+      return true;
+    }
     return Boolean(selectedRule(ctx));
   },
   outbound(body, ctx) {
     const request = requestedReasoning(body);
     if (!request.explicit) return body;
+
+    const capability = resolveReasoningCapability(ctx);
+    const mode = capability?.wire?.effortValueMode || "";
+    if (capability && !capability.unsupported && mode && !["passthrough", "adapter", "unsupported"].includes(mode)) {
+      const { body: next } = applyReasoningEffortCatalog(body, ctx);
+      return next;
+    }
+
     const rule = selectedRule(ctx);
     if (!rule) return body;
     const out = stripGenericReasoningOptions({ ...body });
     rule.apply(out, request.enabled, request.effort);
+    // 启发式路径也补一条轻量 trace，便于可视化
+    const { trace } = applyReasoningEffortCatalog(body, ctx);
+    if (trace) out._switchyardReasoningEffortTrace = trace;
     return out;
   }
 };

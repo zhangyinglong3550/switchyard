@@ -245,6 +245,16 @@ test("rejects timestamp-like ids that pass Luhn as bank cards", () => {
   assert.match(result.text, /REDACTED_INTERNAL_IP/);
 });
 
+test("rejects log-rotation ids with embedded calendar dates as bank cards", () => {
+  // 审计实样：errors.log.1-5705-2026-06-08 16（过 Luhn，但含 2026-06-08）
+  const sample = "1-5705-2026-06-08 16";
+  const inPath = `/Users/zhangyinglong/.hermes/logs/errors.log.${sample}`;
+  const result = redactSensitiveText(inPath);
+  assert.equal(result.text.includes(sample), true);
+  assert.equal(result.text.includes("REDACTED_BANK_CARD"), false);
+  assert.equal((result.hits || []).some((h) => h.ruleId === "bank_card"), false);
+});
+
 test("still redacts spaced bank cards in prose", () => {
   const result = redactSensitiveText("卡号 4111-1111-1111-1111");
   assert.match(result.text, /REDACTED_BANK_CARD/);
@@ -274,4 +284,26 @@ test("outbound preview shows redacted snippets from actual outbound body", () =>
   }, { file });
   assert.equal(event.outboundPreview.kind, "redacted");
   assert.match(event.outboundPreview.snippets[0], /REDACTED_PHONE/);
+});
+
+test("outbound preview finds REDACTED markers even after many preceding strings", () => {
+  const noise = Array.from({ length: 100 }, (_, i) => ({
+    role: "user",
+    content: `noise line ${i} nothing sensitive`
+  }));
+  const body = {
+    messages: [
+      ...noise,
+      { role: "user", content: "请联系 13812345678 处理" }
+    ]
+  };
+  const guarded = applySensitiveGuard(body, { enabled: true });
+  assert.equal(JSON.stringify(guarded.body).includes("13812345678"), false);
+  assert.match(JSON.stringify(guarded.body), /REDACTED_PHONE/);
+  const preview = buildSensitiveOutboundPreview(guarded.body, {
+    action: guarded.action,
+    hits: guarded.hits
+  });
+  assert.equal(preview.kind, "redacted");
+  assert.ok(preview.snippets.some((item) => item.includes("[REDACTED_PHONE]")));
 });

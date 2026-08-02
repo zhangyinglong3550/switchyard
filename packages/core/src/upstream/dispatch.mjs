@@ -232,7 +232,10 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
   }
 
   if (apiFormat === "openai_chat") {
-    const upstreamBody = applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides);
+    // Chat 中转也可能在服务端转 Responses；同样剥掉 image_gen 保留命名空间冲突工具。
+    let upstreamBody = stripConflictingImageGenTools(
+      applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides)
+    );
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
     if (stream) {
       const rectifiedStream = await retryFailedStreamWithRectifier({
@@ -414,14 +417,15 @@ export function isAigoLikeProvider(provider, model = null) {
 }
 
 /**
- * 剥离 Responses tools 里会触发上游 400 的 image_gen 冲突工具。
+ * 剥离 tools 里会触发上游 400 的 image_gen 冲突工具。
  *
- * Codex / ChatGPT App 常同时带：
+ * Codex / ChatGPT / Grok 常带：
  * - hosted：`image_generation` / `image_gen`，或 namespace `image_gen`
- * - 客户端技能：function `image_gen.imagegen`
+ * - 客户端技能：function `image_gen.imagegen` / `image_gen.image_gen`
  *
- * 官方后端能吞；多数三方 Responses（good-gpt 等）会报：
+ * 官方后端能吞；多数三方 Responses / 中转会报：
  *   Function 'image_gen.imagegen' conflicts with a hosted tool
+ *   或 Function 'image_gen.image_gen' is not allowed in reserved namespace 'image_gen'
  *
  * 中转还可能在服务端再注入 hosted，因此不能「只删一边、保留 function」——
  * 只要请求里出现任一类 image_gen 相关工具，就全部去掉，避免冲突。
@@ -447,7 +451,11 @@ export function stripConflictingImageGenTools(body) {
     const type = String(tool.type || "function").toLowerCase();
     if (type !== "function" && type !== "") return false;
     const name = toolName(tool).toLowerCase();
-    return name === "image_gen.imagegen" || name === "imagegen" || name.endsWith(".imagegen");
+    // image_gen.imagegen / image_gen.image_gen / *.imagegen 都落在保留命名空间
+    return name === "imagegen"
+      || name === "image_gen"
+      || name.startsWith("image_gen.")
+      || name.endsWith(".imagegen");
   };
 
   const hasHosted = body.tools.some(isHostedImageGen);

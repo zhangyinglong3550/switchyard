@@ -922,7 +922,8 @@ export function createCodexRuntime({
       };
     },
     settings: {
-      effortOptions: ["low", "medium", "high", "xhigh"],
+      // 与 Codex 目录对齐的全集回退；具体模型若声明子集由客户端再裁
+      effortOptions: ["low", "medium", "high", "xhigh", "max", "ultra"],
       permissionOptions: [
         { id: "read-only", name: "只读", description: "仅查看与分析文件" },
         { id: "workspace-write", name: "可写工作区", description: "允许在当前项目内修改文件" },

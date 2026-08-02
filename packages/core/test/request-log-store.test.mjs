@@ -450,6 +450,53 @@ test("request log store · keeps oversized summaries as valid JSON with stream d
   assert.equal(row.request_summary.length < 12000, true);
 });
 
+test("request log store · preserves tool names when summary is truncated", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-tools-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=${Date.now()}-${Math.random()}`);
+
+  const tools = Array.from({ length: 40 }, (_, index) => ({
+    name: `tool_${index}_Read`,
+    description: "d".repeat(400),
+    propertyCount: 3
+  }));
+  store.recordRequestEvent({
+    ts: "2026-06-23T11:00:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/responses",
+    providerId: "codex",
+    modelId: "codex/gpt-5.5",
+    status: 200,
+    requestSummary: {
+      protocol: "openai_responses",
+      modelId: "codex/gpt-5.5",
+      providerId: "codex",
+      toolCount: tools.length,
+      tools,
+      messages: {
+        roleCounts: { system: 1, user: 1 },
+        skills: ["demo-skill"],
+        system: [{ role: "system", text: `skills:\n- demo-skill: help\n${"S".repeat(18000)}` }],
+        user: [{ role: "user", text: "hello ".repeat(2000) }],
+        latestUser: { role: "user", text: "hello latest" }
+      }
+    }
+  });
+
+  const [row] = store.listRequestLogs({ limit: 1 });
+  const summary = JSON.parse(row.request_summary);
+  assert.ok(Array.isArray(summary.tools) && summary.tools.length > 0, "tools should survive truncation");
+  assert.equal(summary.tools[0].name, "tool_0_Read");
+  assert.equal(summary.toolCount, 40);
+  assert.ok(summary.tools.every((tool) => tool.name && !tool.description || String(tool.description || "").length <= 120));
+});
+
 test("request log store · preserves rectifier metadata when verbose compatibility descriptors are present", async (t) => {
   if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-"));
@@ -522,4 +569,64 @@ test("request log store · cleanup deletes rows when SQLite log exceeds max byte
   assert.equal(store.listRequestLogs({ limit: 20 }).length, 8);
   store.cleanupRequestLogs({ retainDays: 3650, maxRows: 100, maxBytes: 1, now: new Date("2026-06-30T00:00:00.000Z") });
   assert.equal(store.listRequestLogs({ limit: 20 }).length, 0);
+});
+
+test("request log store · keeps latest user messages for turn Q&A preview", async (t) => {
+  if (!hasSqlite3()) return t.skip("sqlite3 cli not available");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-reqlog-latest-"));
+  process.env.SWITCHYARD_REQUEST_LOG_DB = path.join(tmp, "requests.sqlite3");
+  t.after(() => {
+    delete process.env.SWITCHYARD_REQUEST_LOG_DB;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const store = await import(`../../../apps/desktop/src/request-log-store.mjs?v=latest-${Date.now()}`);
+
+  const users = [
+    { role: "user", text: "第一轮：感觉表好多", contentChars: 8 },
+    { role: "user", text: "第二轮：再解释一下索引", contentChars: 10 },
+    { role: "user", text: "第三轮：把外键也画出来", contentChars: 11 },
+    { role: "user", text: "第四轮：只看本轮最新问题", contentChars: 12 }
+  ];
+  store.recordRequestEvent({
+    ts: "2026-08-02T10:00:00.000Z",
+    requestLog: true,
+    method: "POST",
+    path: "/v1/responses",
+    clientId: "codex",
+    providerId: "codex",
+    modelId: "codex/gpt-5.6-luna",
+    status: 200,
+    ms: 120,
+    totalTokens: 99,
+    promptPreview: "第四轮：只看本轮最新问题",
+    responsePreview: "好的，本轮返回摘要",
+    requestSummary: {
+      protocol: "openai_responses",
+      messages: {
+        roleCounts: { user: 4, assistant: 3 },
+        user: users,
+        assistant: [],
+        system: [],
+        tool: [],
+        images: 0,
+        skills: []
+      }
+    },
+    responseSummary: {
+      stream: true,
+      text: "好的，本轮返回摘要",
+      toolCalls: []
+    }
+  });
+
+  const row = store.listRequestLogs({ limit: 1 })[0];
+  assert.ok(row);
+  const request = JSON.parse(row.request_summary);
+  assert.equal(request.messages.latestUser.text, "第四轮：只看本轮最新问题");
+  assert.equal(request.messages.user.length, 3);
+  assert.equal(request.messages.user[0].text, "第二轮：再解释一下索引");
+  assert.equal(request.messages.user.at(-1).text, "第四轮：只看本轮最新问题");
+  assert.equal(request.messages.roleCounts.user, 4);
+  assert.match(String(row.prompt_preview || ""), /第四轮/);
+  assert.match(String(row.response_preview || ""), /本轮返回摘要/);
 });

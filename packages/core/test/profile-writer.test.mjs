@@ -277,7 +277,8 @@ test("codex profile · writes model catalog for Codex App model picker", () => {
   assert.equal(catalog.models[0]["x-switchyard-model-id"], "codex/gpt-5.5");
   assert.equal(catalog.models[0]["x-switchyard-upstream-model"], "gpt-5.5");
   assert.deepEqual(catalog.models[0].input_modalities, ["text", "image"]);
-  assert.equal(catalog.models[0].default_reasoning_level, "low");
+  assert.equal(catalog.models[0].default_reasoning_level, "medium");
+  assert.ok(catalog.models[0].supported_reasoning_levels.every((item) => ["low", "medium", "high", "xhigh"].includes(item.effort)));
   assert.deepEqual(catalog.models[0].additional_speed_tiers, ["fast"]);
   assert.deepEqual(catalog.models[0].service_tiers, [{
     id: "priority",
@@ -318,6 +319,33 @@ test("codex profile · model catalog exposes image input when a vision fallback 
 
   assert.deepEqual(catalog.models[0].input_modalities, ["text", "image"]);
   assert.equal(catalog.models[0]["x-switchyard-vision-fallback-model"], "codex/gpt-5.5");
+});
+
+test("codex profile · gpt-5.6 family exposes max/ultra reasoning levels", () => {
+  const catalog = pw.buildCodexModelCatalog({
+    models: [
+      {
+        id: "codex/gpt-5.6-sol",
+        providerId: "codex",
+        upstreamModel: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol"
+      },
+      {
+        id: "codex/gpt-5.6-luna",
+        providerId: "codex",
+        upstreamModel: "gpt-5.6-luna",
+        displayName: "GPT-5.6 Luna"
+      }
+    ]
+  });
+  const sol = catalog.models.find((model) => model.slug === "gpt-5.6-sol");
+  const luna = catalog.models.find((model) => model.slug === "gpt-5.6-luna");
+  assert.equal(sol.default_reasoning_level, "low");
+  assert.ok(sol.supported_reasoning_levels.some((item) => item.effort === "max"));
+  assert.ok(sol.supported_reasoning_levels.some((item) => item.effort === "ultra"));
+  assert.equal(luna.default_reasoning_level, "medium");
+  assert.ok(luna.supported_reasoning_levels.some((item) => item.effort === "max"));
+  assert.equal(luna.supported_reasoning_levels.some((item) => item.effort === "ultra"), false);
 });
 
 test("codex profile · Cursor models expose Agent-selected fast tier without model variants", () => {

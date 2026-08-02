@@ -134,7 +134,8 @@ const state = {
   diagnostics: null,
   usageRequests: [],
   lastCapabilitySuggestion: null,
-  traces: { sessions: [], requests: [], selected: null },
+  traces: { sessions: [], requests: [], selected: null, module: "request-log" },
+  callLog: { rows: [], selectedId: null },
   usageRange: defaultUsageRange(),
   liveLogAgent: "",
   mobileControl: {
@@ -340,10 +341,55 @@ function collectClientScopeOptions(containerId) {
   return checked;
 }
 
+function startOfLocalDay(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfLocalDay(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+/** 本周一开始（本地时区）。 */
+function startOfLocalWeek(date = new Date()) {
+  const d = startOfLocalDay(date);
+  const day = d.getDay(); // 0=周日
+  const diff = day === 0 ? 6 : day - 1;
+  d.setDate(d.getDate() - diff);
+  return d;
+}
+
+function startOfLocalMonth(date = new Date()) {
+  const d = startOfLocalDay(date);
+  d.setDate(1);
+  return d;
+}
+
 function defaultUsageRange() {
   const until = new Date();
-  const since = new Date(until.getTime() - 7 * 24 * 60 * 60 * 1000);
-  return { preset: "7d", since: since.toISOString(), until: until.toISOString(), compareEnabled: false, compareSince: "", compareUntil: "" };
+  const since = new Date(until.getTime() - 30 * 24 * 60 * 60 * 1000);
+  return {
+    preset: "30d",
+    granularity: "day",
+    since: since.toISOString(),
+    until: until.toISOString()
+  };
+}
+
+/** 范围变更时推荐的时间维度。 */
+function suggestedUsageGranularity(preset, sinceIso, untilIso) {
+  if (preset === "24h") return "hour";
+  if (preset === "3d" || preset === "7d" || preset === "30d") return "day";
+  const since = new Date(sinceIso || Date.now());
+  const until = new Date(untilIso || Date.now());
+  const hours = Math.max(1, (until.getTime() - since.getTime()) / (60 * 60 * 1000));
+  if (hours <= 48) return "hour";
+  if (hours <= 45 * 24) return "day";
+  if (hours <= 180 * 24) return "week";
+  return "month";
 }
 
 function dateInputValue(date) {
@@ -426,7 +472,11 @@ function setActiveTab(tab) {
   document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${tab}`));
   if (tab === "logs") refreshLogTail().catch(() => {});
-  if (tab === "traces") renderLiveLogs();
+  if (tab === "traces") {
+    renderLiveLogs();
+    setObserveModule(state.traces.module || "request-log");
+    refreshObservePanel().catch(() => {});
+  }
   if (tab === "diagnostics") refreshDiagnostics().catch(() => {});
   if (tab === "sensitive") renderSensitiveGuardSettings();
   if (tab === "settings") renderSettings();
@@ -477,7 +527,14 @@ async function refreshAll() {
   try { refreshAgentSkills(); } catch {}
   try { refreshAgentPlugins(); } catch {}
   try { refreshCoreFiles(); } catch {}
-  try { refreshTraces(); } catch {}
+  try { refreshObservePanel(); } catch {}
+  try { syncTraceBodyCaptureToggle(); } catch {}
+}
+
+function syncTraceBodyCaptureToggle() {
+  const input = document.getElementById("trace-capture-body");
+  if (!input) return;
+  input.checked = Boolean(state.config?.requestBodyCapture?.enabled);
 }
 
 function renderHeader() {
@@ -1484,13 +1541,23 @@ function formatSensitiveOriginals(row) {
 
 function formatSensitiveOutboundPreview(row) {
   const preview = row.outboundPreview;
-  if (!preview || !Array.isArray(preview.snippets) || !preview.snippets.length) {
+  if (!preview || typeof preview !== "object") {
     return `<span class="tiny muted">-</span>`;
   }
+  const snippets = Array.isArray(preview.snippets) ? preview.snippets : [];
   const kindClass = preview.kind === "redacted" ? "ok" : "warn";
+  const label = preview.label
+    || (preview.kind === "redacted" ? "出站已打码" : "出站明文");
+  // 即使截不到片段，也要展示 kind/label，避免误以为“没打码”
+  if (!snippets.length) {
+    return `<div style="max-width:320px;">
+      <div class="chip ${kindClass}">${escapeHtml(label)}</div>
+      <div class="tiny muted" style="margin-top:4px;">无预览片段（出站仍按动作处理）</div>
+    </div>`;
+  }
   return `<div style="max-width:320px;">
-    <div class="chip ${kindClass}" style="margin-bottom:4px;">${escapeHtml(preview.label || (preview.kind === "redacted" ? "出站已打码" : "出站明文"))}</div>
-    <div class="mono tiny" style="white-space:pre-wrap;">${preview.snippets.map((item) => escapeHtml(item)).join("\n")}</div>
+    <div class="chip ${kindClass}" style="margin-bottom:4px;">${escapeHtml(label)}</div>
+    <div class="mono tiny" style="white-space:pre-wrap;">${snippets.map((item) => escapeHtml(item)).join("\n")}</div>
   </div>`;
 }
 
@@ -1685,8 +1752,7 @@ const SENSITIVE_GUARD_CLIENT_LABELS = {
   hermes: "Hermes",
   opencode: "OpenCode",
   grok: "Grok",
-  "generic-openai": "Generic OpenAI",
-  "claude-app": "Claude App"
+  "generic-openai": "Generic OpenAI"
 };
 
 const SENSITIVE_BUILTIN_RULE_OPTIONS = [
@@ -1766,11 +1832,38 @@ async function refreshSensitiveBypassList() {
   });
 }
 
+async function persistSensitiveGuardPartial(patch, { okToast, silent = false } = {}) {
+  const result = await invoke("sensitive-guard:set", patch);
+  if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
+  if (!silent && okToast) toast(okToast);
+  return result;
+}
+
+function bindSensitiveGuardToggleAutosave(host, { dataAttr, patchKey, label }) {
+  if (!host) return;
+  host.querySelectorAll(`input[${dataAttr}]`).forEach((input) => {
+    input.addEventListener("change", async (event) => {
+      const key = event.currentTarget.getAttribute(dataAttr);
+      const checked = Boolean(event.currentTarget.checked);
+      try {
+        await persistSensitiveGuardPartial(
+          { [patchKey]: { [key]: checked } },
+          { okToast: `${label}已${checked ? "开启" : "关闭"}` }
+        );
+      } catch (error) {
+        toast(`保存失败：${error.message}`, "error");
+        renderSensitiveGuardSettings();
+      }
+    });
+  });
+}
+
 document.getElementById("sensitive-guard-enabled")?.addEventListener("change", async (event) => {
   try {
-    const result = await invoke("sensitive-guard:set", { enabled: Boolean(event.currentTarget.checked) });
-    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
-    toast(result.sensitiveGuard?.enabled ? "已开启出站脱敏" : "已关闭出站脱敏");
+    await persistSensitiveGuardPartial(
+      { enabled: Boolean(event.currentTarget.checked) },
+      { okToast: event.currentTarget.checked ? "已开启出站脱敏" : "已关闭出站脱敏" }
+    );
   } catch (error) {
     toast(`保存失败：${error.message}`, "error");
     renderSensitiveGuardSettings();
@@ -1779,11 +1872,14 @@ document.getElementById("sensitive-guard-enabled")?.addEventListener("change", a
 
 document.getElementById("sensitive-guard-audit-original")?.addEventListener("change", async (event) => {
   try {
-    const result = await invoke("sensitive-guard:set", {
-      auditRetainOriginal: Boolean(event.currentTarget.checked)
-    });
-    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
-    toast(result.sensitiveGuard?.auditRetainOriginal !== false ? "已开启原文审计" : "已关闭原文审计（只记类型）");
+    await persistSensitiveGuardPartial(
+      { auditRetainOriginal: Boolean(event.currentTarget.checked) },
+      {
+        okToast: event.currentTarget.checked
+          ? "已开启原文审计"
+          : "已关闭原文审计（只记类型）"
+      }
+    );
   } catch (error) {
     toast(`保存失败：${error.message}`, "error");
     renderSensitiveGuardSettings();
@@ -1793,10 +1889,8 @@ document.getElementById("sensitive-guard-audit-original")?.addEventListener("cha
 document.getElementById("btn-sensitive-guard-save")?.addEventListener("click", async () => {
   try {
     const payload = collectSensitiveGuardForm();
-    const result = await invoke("sensitive-guard:set", payload);
-    if (state.config) state.config.sensitiveGuard = result.sensitiveGuard;
+    await persistSensitiveGuardPartial(payload, { okToast: "词表 / 白名单 / 正则已保存" });
     renderSensitiveGuardSettings();
-    toast("敏感信息规则已保存");
   } catch (error) {
     toast(`保存失败：${error.message}`, "error");
   }
@@ -2195,6 +2289,11 @@ function renderSensitiveGuardSettings() {
         <span>${label}</span>
       </label>`;
     }).join("");
+    bindSensitiveGuardToggleAutosave(clientsHost, {
+      dataAttr: "data-client",
+      patchKey: "clients",
+      label: "客户端脱敏"
+    });
   }
 
   const builtinHost = document.getElementById("sensitive-guard-builtin-rules");
@@ -2206,6 +2305,11 @@ function renderSensitiveGuardSettings() {
         <span>${escapeHtml(rule.label)}</span>
       </label>`;
     }).join("");
+    bindSensitiveGuardToggleAutosave(builtinHost, {
+      dataAttr: "data-rule",
+      patchKey: "builtinRules",
+      label: "规则"
+    });
   }
 
   const keywordsEl = document.getElementById("sensitive-guard-keywords");
@@ -4050,17 +4154,17 @@ async function refreshUsageStats() {
     ...(query ? { modelQuery: query } : {}),
     ...(agentId ? { agentId } : {})
   });
-  const compareFilters = state.usageRange.compareEnabled
-    ? usageFilters({
-      ...(query ? { modelQuery: query } : {}),
-      ...(agentId ? { agentId } : {})
-    }, true)
-    : null;
-  const [usage, requests, daily, compareDaily] = await Promise.all([
+  const range = state.usageRange || defaultUsageRange();
+  const granularity = normalizeUsageGranularity(range.granularity, range);
+  const groupBy = granularity === "hour" ? "hour" : "day";
+  const spanMs = Math.max(0, new Date(range.until).getTime() - new Date(range.since).getTime());
+  const spanDays = Math.max(1, Math.ceil(spanMs / (24 * 60 * 60 * 1000)) + 1);
+  const spanHours = Math.max(1, Math.ceil(spanMs / (60 * 60 * 1000)) + 1);
+  const dailyLimit = groupBy === "hour" ? Math.min(168, Math.max(24, spanHours)) : Math.min(400, Math.max(30, spanDays));
+  const [usage, requests, daily] = await Promise.all([
     invoke("usage:by-agent-model", { ...filters, limit: 100 }),
     invoke("request-logs:list", { ...filters, limit: 80 }),
-    invoke("usage:daily", { ...filters, limit: 60 }),
-    compareFilters ? invoke("usage:daily", { ...compareFilters, limit: 60 }) : Promise.resolve([])
+    invoke("usage:daily", { ...filters, limit: dailyLimit, groupBy })
   ]);
   state.usageRequests = requests || [];
   const usageTbody = document.getElementById("usage-tbody");
@@ -4198,139 +4302,312 @@ async function refreshUsageStats() {
   }
   const requestSummary = document.getElementById("request-log-summary");
   if (requestSummary) requestSummary.textContent = `${requests?.length || 0} 条`;
-  renderUsageDailyChart(daily || [], compareDaily || []);
+  renderUsageDailyChart(daily || []);
   renderUsageRangeSummary();
 }
 
-function usageFilters(base = {}, compare = false) {
+function usageFilters(base = {}) {
   const range = state.usageRange || defaultUsageRange();
-  const since = compare ? range.compareSince : range.since;
-  const until = compare ? range.compareUntil : range.until;
   return {
     ...base,
-    ...(since ? { since } : {}),
-    ...(until ? { until } : {})
+    ...(range.since ? { since: range.since } : {}),
+    ...(range.until ? { until: range.until } : {})
   };
+}
+
+function syncUsageCustomRangeVisibility() {
+  const wrap = document.getElementById("usage-custom-range");
+  const preset = state.usageRange?.preset || "30d";
+  if (wrap) wrap.style.display = preset === "custom" ? "inline-flex" : "none";
 }
 
 function syncUsageRangeControls() {
   const range = state.usageRange || defaultUsageRange();
   const preset = document.getElementById("usage-range-preset");
-  if (preset) preset.value = range.preset || "7d";
+  if (preset) {
+    const known = ["24h", "3d", "7d", "30d", "custom"];
+    preset.value = known.includes(range.preset) ? range.preset : "30d";
+  }
+  const gran = document.getElementById("usage-granularity");
+  if (gran) gran.value = normalizeUsageGranularity(range.granularity, range);
   const since = document.getElementById("usage-since");
   const until = document.getElementById("usage-until");
-  const compareEnabled = document.getElementById("usage-compare-enabled");
-  const compareSince = document.getElementById("usage-compare-since");
-  const compareUntil = document.getElementById("usage-compare-until");
   if (since) since.value = dateInputValue(range.since);
   if (until) until.value = dateInputValue(range.until);
-  if (compareEnabled) compareEnabled.checked = !!range.compareEnabled;
-  if (compareSince) compareSince.value = dateInputValue(range.compareSince);
-  if (compareUntil) compareUntil.value = dateInputValue(range.compareUntil);
+  syncUsageCustomRangeVisibility();
 }
 
 function syncUsageRangeFromControls() {
   const range = state.usageRange || defaultUsageRange();
-  if (range.preset === "custom") {
-    const since = startOfDateInput(document.getElementById("usage-since")?.value);
-    const until = endOfDateInput(document.getElementById("usage-until")?.value);
-    if (since) range.since = since;
-    if (until) range.until = until;
+  const presetRaw = document.getElementById("usage-range-preset")?.value || range.preset || "30d";
+  const preset = ["24h", "3d", "7d", "30d", "custom"].includes(presetRaw) ? presetRaw : "30d";
+  const granularityInput = document.getElementById("usage-granularity")?.value || range.granularity || "day";
+  if (preset !== "custom") {
+    applyUsagePreset(preset, {
+      syncControls: false,
+      keepGranularity: true,
+      granularity: granularityInput
+    });
+    syncUsageCustomRangeVisibility();
+    return;
   }
-  range.compareEnabled = Boolean(document.getElementById("usage-compare-enabled")?.checked);
-  if (range.compareEnabled) {
-    const compareSince = startOfDateInput(document.getElementById("usage-compare-since")?.value);
-    const compareUntil = endOfDateInput(document.getElementById("usage-compare-until")?.value);
-    if (compareSince) range.compareSince = compareSince;
-    if (compareUntil) range.compareUntil = compareUntil;
-  }
-  state.usageRange = range;
+  const since = startOfDateInput(document.getElementById("usage-since")?.value);
+  const until = endOfDateInput(document.getElementById("usage-until")?.value);
+  state.usageRange = {
+    ...range,
+    preset: "custom",
+    granularity: normalizeUsageGranularity(granularityInput, {
+      preset: "custom",
+      since: since || range.since,
+      until: until || range.until
+    }),
+    ...(since ? { since } : {}),
+    ...(until ? { until } : {})
+  };
+  syncUsageCustomRangeVisibility();
 }
 
-function applyUsagePreset(value) {
-  const until = new Date();
-  const preset = value || "7d";
-  const durations = {
-    "24h": 24 * 60 * 60 * 1000,
-    "3d": 3 * 24 * 60 * 60 * 1000,
-    "7d": 7 * 24 * 60 * 60 * 1000,
-    "14d": 14 * 24 * 60 * 60 * 1000,
-    "30d": 30 * 24 * 60 * 60 * 1000
-  };
+function applyUsagePreset(value, {
+  syncControls = true,
+  keepGranularity = false,
+  granularity
+} = {}) {
+  const preset = ["24h", "3d", "7d", "30d", "custom"].includes(value) ? value : "30d";
+  const current = state.usageRange || defaultUsageRange();
   if (preset === "custom") {
-    state.usageRange = { ...(state.usageRange || defaultUsageRange()), preset: "custom" };
-  } else {
-    const span = durations[preset] || durations["7d"];
-    const since = new Date(until.getTime() - span);
-    const compareUntil = new Date(since.getTime());
-    const compareSince = new Date(compareUntil.getTime() - span);
     state.usageRange = {
-      ...(state.usageRange || defaultUsageRange()),
-      preset,
-      since: since.toISOString(),
-      until: until.toISOString(),
-      compareSince: compareSince.toISOString(),
-      compareUntil: compareUntil.toISOString()
+      ...current,
+      preset: "custom",
+      granularity: keepGranularity
+        ? normalizeUsageGranularity(granularity || current.granularity, current)
+        : suggestedUsageGranularity("custom", current.since, current.until)
     };
+    if (syncControls) syncUsageRangeControls();
+    return;
   }
-  syncUsageRangeControls();
+  const now = new Date();
+  let until = new Date(now);
+  let since;
+  if (preset === "24h") {
+    since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  } else if (preset === "3d") {
+    until = endOfLocalDay(now);
+    since = startOfLocalDay(now);
+    since.setDate(since.getDate() - 2);
+  } else if (preset === "7d") {
+    until = endOfLocalDay(now);
+    since = startOfLocalDay(now);
+    since.setDate(since.getDate() - 6);
+  } else {
+    // 30d
+    until = endOfLocalDay(now);
+    since = startOfLocalDay(now);
+    since.setDate(since.getDate() - 29);
+  }
+  const nextGran = keepGranularity
+    ? normalizeUsageGranularity(granularity || current.granularity, { preset, since: since.toISOString(), until: until.toISOString() })
+    : suggestedUsageGranularity(preset, since.toISOString(), until.toISOString());
+  state.usageRange = {
+    ...current,
+    preset,
+    granularity: nextGran,
+    since: since.toISOString(),
+    until: until.toISOString()
+  };
+  if (syncControls) syncUsageRangeControls();
+}
+
+function normalizeUsageGranularity(value, range = state.usageRange) {
+  let gran = ["hour", "day", "week", "month"].includes(value) ? value : "day";
+  const since = new Date(range?.since || Date.now());
+  const until = new Date(range?.until || Date.now());
+  const hours = Math.max(1, (until.getTime() - since.getTime()) / (60 * 60 * 1000));
+  // 跨度太大时强制降级，避免时间轴爆炸
+  if (gran === "hour" && hours > 72) gran = "day";
+  if (gran === "day" && hours > 120 * 24) gran = "week";
+  return gran;
+}
+
+function usageBucketKey(bucket, granularity) {
+  const raw = String(bucket || "");
+  if (granularity === "hour") {
+    // 支持 YYYY-MM-DDTHH:00 或带秒
+    const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2})/);
+    if (m) return `${m[1]}T${m[2]}:00`;
+    // 日级数据落到该日 00:00
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return `${raw}T00:00`;
+    return "";
+  }
+  const day = raw.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return "";
+  if (granularity === "month") return day.slice(0, 7);
+  if (granularity === "week") {
+    const [y, m, d] = day.split("-").map(Number);
+    return dateInputValue(startOfLocalWeek(new Date(y, m - 1, d)));
+  }
+  return day;
+}
+
+function usageBucketLabel(key, granularity, { prevKey = "" } = {}) {
+  if (!key) return "";
+  if (granularity === "hour") {
+    const m = String(key).match(/^(\d{4}-\d{2}-\d{2})T(\d{2})/);
+    if (!m) return key;
+    // 按小时只显示两点钟点，避免「08-02 01时」挤成一团；换日时标日期
+    const dayChanged = !prevKey || !String(prevKey).startsWith(m[1]);
+    if (dayChanged || m[2] === "00") return `${Number(m[1].slice(8))}日\n${m[2]}`;
+    return m[2];
+  }
+  if (granularity === "month") {
+    const [y, m] = key.split("-");
+    return `${y}-${m}`;
+  }
+  if (granularity === "week") {
+    return `${key.slice(5)}周`;
+  }
+  return key.slice(5);
+}
+
+/** 按所选范围生成完整时间轴（含无数据的空桶）。 */
+function enumerateUsageBuckets(sinceIso, untilIso, granularity) {
+  const since = new Date(sinceIso);
+  const until = new Date(untilIso);
+  if (!Number.isFinite(since.getTime()) || !Number.isFinite(until.getTime()) || since > until) return [];
+  const keys = [];
+  if (granularity === "hour") {
+    const cursor = new Date(since);
+    cursor.setMinutes(0, 0, 0);
+    const end = new Date(until);
+    end.setMinutes(0, 0, 0);
+    let guard = 0;
+    while (cursor <= end && guard < 200) {
+      const key = `${cursor.getFullYear()}-${pad2(cursor.getMonth() + 1)}-${pad2(cursor.getDate())}T${pad2(cursor.getHours())}:00`;
+      keys.push(key);
+      cursor.setHours(cursor.getHours() + 1);
+      guard += 1;
+    }
+    return keys;
+  }
+  if (granularity === "month") {
+    const cursor = startOfLocalMonth(since);
+    const end = startOfLocalMonth(until);
+    let guard = 0;
+    while (cursor <= end && guard < 60) {
+      keys.push(`${cursor.getFullYear()}-${pad2(cursor.getMonth() + 1)}`);
+      cursor.setMonth(cursor.getMonth() + 1);
+      guard += 1;
+    }
+    return keys;
+  }
+  if (granularity === "week") {
+    const cursor = startOfLocalWeek(since);
+    const end = startOfLocalWeek(until);
+    let guard = 0;
+    while (cursor <= end && guard < 80) {
+      keys.push(dateInputValue(cursor));
+      cursor.setDate(cursor.getDate() + 7);
+      guard += 1;
+    }
+    return keys;
+  }
+  // day
+  const cursor = startOfLocalDay(since);
+  const end = startOfLocalDay(until);
+  let guard = 0;
+  while (cursor <= end && guard < 400) {
+    keys.push(dateInputValue(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+    guard += 1;
+  }
+  return keys;
 }
 
 function renderUsageRangeSummary() {
   const summary = document.getElementById("usage-range-summary");
   if (!summary) return;
   const range = state.usageRange || defaultUsageRange();
-  const primary = `${formatDate(range.since)} 至 ${formatDate(range.until)}`;
-  const compare = range.compareEnabled ? ` · 对比 ${formatDate(range.compareSince)} 至 ${formatDate(range.compareUntil)}` : "";
-  summary.textContent = `${primary}${compare}`;
+  const rangeLabels = { "24h": "近24小时", "3d": "近3天", "7d": "近7天", "30d": "近30天", custom: "自定义" };
+  const granLabels = { hour: "按小时", day: "按日", week: "按周", month: "按月" };
+  const gran = normalizeUsageGranularity(range.granularity, range);
+  const sinceText = gran === "hour"
+    ? formatDate(range.since)
+    : dateInputValue(range.since);
+  const untilText = gran === "hour"
+    ? formatDate(range.until)
+    : dateInputValue(range.until);
+  summary.textContent = `${rangeLabels[range.preset] || "统计"} · ${sinceText} → ${untilText} · ${granLabels[gran] || ""}`;
 }
 
-function renderUsageDailyChart(rows, compareRows = []) {
+function renderUsageDailyChart(rows) {
   const wrap = document.getElementById("usage-daily-chart");
   const summary = document.getElementById("usage-daily-summary");
   if (!wrap) return;
-  const primary = aggregateDailyRows(rows);
-  const compare = aggregateDailyRows(compareRows);
+  const range = state.usageRange || defaultUsageRange();
+  const granularity = normalizeUsageGranularity(range.granularity, range);
+  const primary = buildUsageTimeline(rows, range, granularity);
+  const unit = granularity === "month" ? "月" : granularity === "week" ? "周" : granularity === "hour" ? "小时" : "天";
+  const activeBuckets = primary.filter((row) => row.request_count > 0 || row.total_tokens > 0).length;
   if (summary) {
     const requests = primary.reduce((sum, row) => sum + row.request_count, 0);
     const tokens = primary.reduce((sum, row) => sum + row.total_tokens, 0);
-    const compareTokens = compare.reduce((sum, row) => sum + row.total_tokens, 0);
-    summary.textContent = `${primary.length} 天 · ${requests} 次 · ${tokens} tokens${compare.length ? ` · 对比 ${compareTokens} tokens` : ""}`;
+    summary.textContent = `轴 ${primary.length} ${unit}（有数据 ${activeBuckets}） · ${requests} 次 · ${tokens} tokens`;
   }
-  if (!primary.length && !compare.length) {
-    wrap.innerHTML = '<div class="empty-state">暂无每日用量数据</div>';
+  if (!primary.length) {
+    wrap.innerHTML = '<div class="empty-state">暂无用量趋势数据</div>';
     return;
   }
-  const maxTokens = Math.max(...primary.map((row) => row.total_tokens), ...compare.map((row) => row.total_tokens), 1);
-  const maxLen = Math.max(primary.length, compare.length);
-  const groups = Array.from({ length: maxLen }, (_, index) => ({ a: primary[index], b: compare[index] }));
-  wrap.innerHTML = groups.map(({ a, b }, index) => {
-    const label = a?.day?.slice(5) || b?.day?.slice(5) || String(index + 1);
+  const maxTokens = Math.max(...primary.map((row) => row.total_tokens), 1);
+  wrap.classList.toggle("gran-hour", granularity === "hour");
+  wrap.classList.toggle("gran-dense", primary.length >= 20);
+  wrap.innerHTML = primary.map((row, index) => {
+    const prevKey = index > 0 ? primary[index - 1].key : "";
+    const label = usageBucketLabel(row.key, granularity, { prevKey });
+    const empty = !row.request_count && !row.total_tokens;
+    const tipTime = granularity === "hour"
+      ? String(row.key || "").replace("T", " ")
+      : String(row.key || "");
     return `
-      <div class="usage-bar ${b ? "compare" : ""}" title="${escapeHtml(a?.day || "")} · ${escapeHtml(a?.total_tokens || 0)} tokens${b ? ` / B ${escapeHtml(b.total_tokens || 0)} tokens` : ""}">
+      <div class="usage-bar${empty ? " empty" : ""}" title="${escapeHtml(tipTime)} · ${escapeHtml(row.total_tokens || 0)} tokens · ${escapeHtml(row.request_count || 0)} 次">
         <div class="usage-bar-track">
-          ${b ? `<div class="usage-bar-fill compare" style="height:${barHeight(b.total_tokens, maxTokens)}px"></div>` : ""}
-          ${a ? `<div class="usage-bar-fill" style="height:${barHeight(a.total_tokens, maxTokens)}px"></div>` : ""}
+          <div class="usage-bar-fill" style="height:${empty ? 2 : barHeight(row.total_tokens, maxTokens)}px;opacity:${empty ? 0.25 : 1}"></div>
         </div>
-        <div class="usage-bar-label">${escapeHtml(label)}</div>
-        <div class="usage-bar-value">${escapeHtml(shortNumber(a?.total_tokens || 0))}${b ? `/${escapeHtml(shortNumber(b.total_tokens || 0))}` : ""}</div>
+        <div class="usage-bar-label">${escapeHtml(label).replace(/\n/g, "<br>")}</div>
+        <div class="usage-bar-value">${escapeHtml(empty ? "—" : shortNumber(row.total_tokens || 0))}</div>
       </div>
     `;
   }).join("");
 }
 
-function aggregateDailyRows(rows) {
-  const byDay = new Map();
+function aggregateUsageRows(rows, granularity = "day") {
+  const byKey = new Map();
   for (const row of rows || []) {
-    const day = row.day || "";
-    if (!day) continue;
-    const prev = byDay.get(day) || { day, request_count: 0, total_tokens: 0, error_count: 0 };
+    const key = usageBucketKey(row.day, granularity);
+    if (!key) continue;
+    const prev = byKey.get(key) || { key, request_count: 0, total_tokens: 0, error_count: 0 };
     prev.request_count += Number(row.request_count || 0);
     prev.total_tokens += Number(row.total_tokens || 0);
     prev.error_count += Number(row.error_count || 0);
-    byDay.set(day, prev);
+    byKey.set(key, prev);
   }
-  return Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day)).slice(-60);
+  return Array.from(byKey.values()).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** 用所选 since/until 铺满时间轴，再填入聚合数据。 */
+function buildUsageTimeline(rows, range, granularity) {
+  const aggregated = aggregateUsageRows(rows, granularity);
+  const byKey = new Map(aggregated.map((row) => [row.key, row]));
+  const keys = enumerateUsageBuckets(range.since, range.until, granularity);
+  if (!keys.length) return aggregated;
+  return keys.map((key) => byKey.get(key) || {
+    key,
+    request_count: 0,
+    total_tokens: 0,
+    error_count: 0
+  });
+}
+
+function aggregateDailyRows(rows) {
+  return aggregateUsageRows(rows, "day").map((row) => ({ ...row, day: row.key }));
 }
 
 function barHeight(value, maxTokens) {
@@ -4355,16 +4632,38 @@ document.getElementById("usage-agent-filter")?.addEventListener("change", () => 
   refreshUsageStats().catch((err) => toast(`刷新统计失败：${err.message}`));
 });
 document.getElementById("usage-range-preset")?.addEventListener("change", (event) => {
-  applyUsagePreset(event.target.value);
+  applyUsagePreset(event.target.value, { keepGranularity: false });
   refreshUsageStats().catch((err) => toast(`刷新统计失败：${err.message}`));
 });
-["usage-since", "usage-until", "usage-compare-since", "usage-compare-until", "usage-compare-enabled"].forEach((id) => {
+document.getElementById("usage-granularity")?.addEventListener("change", (event) => {
+  const range = state.usageRange || defaultUsageRange();
+  const next = normalizeUsageGranularity(event.target.value, range);
+  if (next !== event.target.value) {
+    event.target.value = next;
+    toast(next === "day" ? "跨度较大，已自动改为按日" : `跨度较大，已自动改为${next}`);
+  }
+  state.usageRange = { ...range, granularity: next };
+  refreshUsageStats().catch((err) => toast(`刷新统计失败：${err.message}`));
+});
+["usage-since", "usage-until"].forEach((id) => {
   document.getElementById(id)?.addEventListener("change", () => {
-    if (id === "usage-since" || id === "usage-until") {
-      state.usageRange.preset = "custom";
-      const preset = document.getElementById("usage-range-preset");
-      if (preset) preset.value = "custom";
-    }
+    const since = startOfDateInput(document.getElementById("usage-since")?.value);
+    const until = endOfDateInput(document.getElementById("usage-until")?.value);
+    const current = state.usageRange || defaultUsageRange();
+    const nextRange = {
+      ...current,
+      preset: "custom",
+      ...(since ? { since } : {}),
+      ...(until ? { until } : {})
+    };
+    // 自由选择改日期后，若当前维度不合理则自动建议
+    nextRange.granularity = suggestedUsageGranularity("custom", nextRange.since, nextRange.until);
+    state.usageRange = nextRange;
+    const preset = document.getElementById("usage-range-preset");
+    if (preset) preset.value = "custom";
+    const gran = document.getElementById("usage-granularity");
+    if (gran) gran.value = nextRange.granularity;
+    syncUsageCustomRangeVisibility();
     refreshUsageStats().catch((err) => toast(`刷新统计失败：${err.message}`));
   });
 });
@@ -4405,52 +4704,426 @@ function formatDate(value) {
   }).replace(/\//g, "-");
 }
 
-async function refreshTraces() {
-  const agentId = document.getElementById("trace-agent-filter")?.value || "";
-  const [sessions, requests] = await Promise.all([
-    invoke("agent:sessions:list", agentId && agentId !== "generic-openai" ? { agentId } : {}),
-    invoke("request-logs:list", agentId ? { agentId, limit: 60 } : { limit: 60 })
-  ]);
-  state.traces.sessions = sessions || [];
-  state.traces.requests = requests || [];
+function formatCallLatency(ms) {
+  const value = Number(ms || 0);
+  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${Math.round(value)} ms`;
+}
+
+function formatTokenPair(prompt, completion) {
+  const p = Number(prompt || 0);
+  const c = Number(completion || 0);
+  if (!p && !c) return "—";
+  return `${p.toLocaleString("en-US")} / ${c.toLocaleString("en-US")}`;
+}
+
+function callLogLatencyClass(ms) {
+  const value = Number(ms || 0);
+  if (value >= 30000) return "bad";
+  if (value >= 8000) return "warn";
+  return "";
+}
+
+function callLogStreamLabel(row) {
+  const request = parseSummary(row?.request_summary || row?.requestSummary);
+  const response = parseSummary(row?.response_summary || row?.responseSummary);
+  if (response?.stream === true || request?.params?.stream === true) return "流式";
+  if (response?.stream === false || request?.params?.stream === false) return "非流式";
+  return "";
+}
+
+function callLogStatusChip(row) {
+  const status = Number(row?.status || 0);
+  if (status >= 200 && status < 400) return { cls: "good", text: "成功" };
+  if (status === 0 || status >= 400) return { cls: "warn", text: "失败" };
+  return { cls: "muted", text: String(status || "-") };
+}
+
+function visibleCallLogRows(rows = []) {
+  const userTurnsOnly = document.getElementById("trace-user-turns-only")
+    ? Boolean(document.getElementById("trace-user-turns-only").checked)
+    : true;
+  if (!userTurnsOnly) return rows;
+  const userTurnIds = annotateUserTurnRows(rows);
+  return rows.filter((row) => userTurnIds.has(row.id));
+}
+
+function setObserveModule(moduleId) {
+  const next = moduleId === "call-view" ? "call-view" : "request-log";
+  state.traces.module = next;
+  document.querySelectorAll("[data-observe-module]").forEach((button) => {
+    button.classList.toggle("on", button.dataset.observeModule === next);
+  });
+  const requestLog = document.getElementById("observe-module-request-log");
+  const callView = document.getElementById("observe-module-call-view");
+  if (requestLog) requestLog.style.display = next === "request-log" ? "" : "none";
+  if (callView) {
+    callView.style.display = next === "call-view" ? "grid" : "none";
+  }
+  document.querySelectorAll(".observe-only-request-log").forEach((el) => {
+    el.style.display = next === "request-log" ? "" : "none";
+  });
+  document.querySelectorAll(".observe-only-call-view").forEach((el) => {
+    el.style.display = next === "call-view" ? "" : "none";
+  });
+}
+
+async function refreshObservePanel() {
+  const agentId = document.getElementById("trace-agent-filter")?.value?.trim() || "";
+  const modelQuery = document.getElementById("call-log-model-filter")?.value?.trim() || "";
+  const limit = Number(document.getElementById("call-log-limit")?.value || 100) || 100;
+  const rows = await invoke("request-logs:list", {
+    ...(agentId ? { agentId } : {}),
+    ...(modelQuery && state.traces.module === "request-log" ? { modelQuery } : {}),
+    limit: Math.min(Math.max(limit, 1), 500)
+  });
+  state.traces.sessions = [];
+  state.traces.requests = rows || [];
+  state.callLog.rows = rows || [];
+  if (state.callLog.selectedId != null) {
+    const still = state.callLog.rows.some((row) => Number(row.id) === Number(state.callLog.selectedId));
+    if (!still) state.callLog.selectedId = null;
+  }
+  renderCallLogTable();
   renderTraceList();
+  if (state.callLog.selectedId != null) {
+    const selected = state.callLog.rows.find((row) => Number(row.id) === Number(state.callLog.selectedId));
+    if (selected) openCallLogRow(selected, { silent: true });
+  } else if (state.traces.module === "request-log") {
+    clearCallLogDetail();
+  }
+}
+
+async function refreshCallLog() {
+  await refreshObservePanel();
+}
+
+function clearCallLogDetail() {
+  const title = document.getElementById("call-log-detail-title");
+  const subtitle = document.getElementById("call-log-detail-subtitle");
+  const meta = document.getElementById("call-log-meta");
+  const detail = document.getElementById("call-log-detail");
+  const openTrace = document.getElementById("btn-call-log-open-trace");
+  if (title) title.textContent = "请求 / 响应";
+  if (subtitle) subtitle.textContent = "选择左侧一条请求";
+  if (meta) meta.innerHTML = "";
+  if (detail) detail.innerHTML = '<div class="empty-state">选择一条请求，查看请求体与响应体</div>';
+  if (openTrace) openTrace.style.display = "none";
+}
+
+function buildRequestBodyFromSummary(row, request) {
+  return {
+    source: "summary",
+    note: "未开启完整请求体落盘时，用摘要重建。勾选「落盘完整请求体」后可看真实请求体。",
+    id: row.id,
+    ts: row.ts,
+    method: row.method,
+    path: row.path,
+    model: row.model_id || row.requested_model,
+    provider: row.provider_id,
+    upstreamModel: row.upstream_model,
+    params: request?.params || null,
+    messages: request?.messages || null,
+    tools: request?.tools || null,
+    toolCount: request?.toolCount,
+    turnPhase: request?.turnPhase,
+    continuation: request?.continuation,
+    lastAction: request?.lastAction
+  };
+}
+
+function buildResponseBodyFromSummary(row, response) {
+  if (!response && !row.response_preview && !row.error) return null;
+  return {
+    source: "summary",
+    status: row.status,
+    latency_ms: row.latency_ms,
+    usage: {
+      prompt_tokens: row.prompt_tokens,
+      completion_tokens: row.completion_tokens,
+      total_tokens: row.total_tokens,
+      cache_read_tokens: row.cache_read_tokens,
+      cache_creation_tokens: row.cache_creation_tokens
+    },
+    error: row.error || response?.error || null,
+    text: response?.text || row.response_preview || "",
+    reasoning: response?.reasoning || "",
+    toolCalls: response?.toolCalls || [],
+    finishReason: response?.finishReason || null,
+    stream: response?.stream ?? null,
+    streamEventSummary: response?.streamEventSummary || null
+  };
+}
+
+function prettyJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+async function renderRequestResponseBodies(row, hostId = "call-log-detail") {
+  const host = document.getElementById(hostId);
+  if (!host || !row) return;
+  const request = parseSummary(row.request_summary);
+  const response = parseSummary(row.response_summary);
+  let requestBody = null;
+  let requestLabel = "摘要重建";
+  const ref = traceBodyRef(row);
+  if (ref) {
+    try {
+      const result = await invoke("request-body:read", { ref });
+      if (result?.ok && result.payload != null) {
+        requestBody = result.payload?.body ?? result.payload;
+        requestLabel = result.payload?.truncated ? "完整落盘（有截断）" : "完整落盘";
+      }
+    } catch {
+      // fallback below
+    }
+  }
+  if (requestBody == null) requestBody = buildRequestBodyFromSummary(row, request);
+  const responseBody = buildResponseBodyFromSummary(row, response);
+  const status = Number(row.status || 0);
+  const statusCls = status >= 400 || status === 0 ? "warn" : "good";
+  const requestText = prettyJson(requestBody);
+  const responseText = responseBody ? prettyJson(responseBody) : "";
+
+  host.innerHTML = `
+    <div class="body-split">
+      <section class="body-pane">
+        <div class="body-pane-hd">
+          <strong>请求体</strong>
+          <span class="chip muted">${escapeHtml(requestLabel)}</span>
+          <button class="btn" type="button" data-copy-body="request">复制</button>
+        </div>
+        ${requestText
+          ? `<pre class="body-pane-pre" data-body-text="request">${escapeHtml(requestText)}</pre>`
+          : `<div class="body-pane-empty"><span>📄</span><span>暂无请求数据</span></div>`}
+      </section>
+      <section class="body-pane">
+        <div class="body-pane-hd">
+          <strong>响应体</strong>
+          <button class="btn" type="button" data-copy-body="response" ${responseText ? "" : "disabled"}>复制</button>
+          <span class="chip ${statusCls}">${escapeHtml(status || "-")}</span>
+        </div>
+        ${responseText
+          ? `<pre class="body-pane-pre" data-body-text="response">${escapeHtml(responseText)}</pre>`
+          : `<div class="body-pane-empty"><span>📄</span><span>暂无响应数据</span></div>`}
+      </section>
+    </div>
+  `;
+  host.querySelectorAll("[data-copy-body]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const kind = button.dataset.copyBody;
+      const text = kind === "request" ? requestText : responseText;
+      if (!text) return toast("没有可复制的内容");
+      await navigator.clipboard.writeText(text);
+      toast(kind === "request" ? "已复制请求体" : "已复制响应体");
+    });
+  });
+}
+
+function renderCallLogTable() {
+  const tbody = document.getElementById("call-log-tbody");
+  const summary = document.getElementById("call-log-summary");
+  if (!tbody) return;
+  const allRows = state.callLog.rows || [];
+  const rows = visibleCallLogRows(allRows);
+  const hidden = Math.max(0, allRows.length - rows.length);
+  if (summary) {
+    summary.textContent = hidden
+      ? `${rows.length} 条 · 已隐藏 ${hidden} 条续跑`
+      : `${rows.length} 条`;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无请求记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((row) => {
+    const selected = Number(row.id) === Number(state.callLog.selectedId);
+    const statusChip = callLogStatusChip(row);
+    const stream = callLogStreamLabel(row);
+    const latencyCls = callLogLatencyClass(row.latency_ms);
+    const provider = row.provider_id || "";
+    const model = row.model_id || row.requested_model || "-";
+    const userSnippet = traceRequestSnippet(row, { preferUser: true });
+    return `
+      <tr class="${selected ? "is-selected" : ""}" data-call-log-id="${escapeHtml(row.id)}" title="${escapeHtml(userSnippet)}">
+        <td>
+          <div class="call-log-time">
+            <span class="mono">${escapeHtml(formatDate(row.ts))}</span>
+            <span class="chip ${statusChip.cls}">${escapeHtml(statusChip.text)}</span>
+          </div>
+        </td>
+        <td>
+          <div class="call-log-client">
+            <strong>${escapeHtml(agentLabel(row.client_id))}</strong>
+            <span class="muted">${escapeHtml(userSnippet || row.path || "")}</span>
+          </div>
+        </td>
+        <td>
+          <div class="call-log-model-cell">
+            <span class="mono">${escapeHtml(model)}</span>
+            ${provider ? `<span class="tiny muted">${escapeHtml(provider)}</span>` : ""}
+          </div>
+        </td>
+        <td>
+          <div class="call-log-latency">
+            <span class="call-log-latency-bar ${latencyCls}"></span>
+            <div class="call-log-latency-meta">
+              <strong>耗时 ${escapeHtml(formatCallLatency(row.latency_ms))}</strong>
+              <span class="muted">${escapeHtml(stream || "—")}</span>
+            </div>
+          </div>
+        </td>
+        <td class="call-log-tokens mono" title="prompt / completion">${escapeHtml(formatTokenPair(row.prompt_tokens, row.completion_tokens))}</td>
+        <td><button class="btn" type="button" data-call-log-open="${escapeHtml(row.id)}">查看</button></td>
+      </tr>
+    `;
+  }).join("");
+  tbody.querySelectorAll("[data-call-log-id]").forEach((tr) => {
+    tr.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      const row = rows.find((item) => Number(item.id) === Number(tr.dataset.callLogId));
+      if (row) openCallLogRow(row);
+    });
+  });
+  tbody.querySelectorAll("[data-call-log-open]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const row = rows.find((item) => Number(item.id) === Number(button.dataset.callLogOpen));
+      if (row) openCallLogRow(row);
+    });
+  });
+}
+
+function openCallLogRow(row, { silent = false } = {}) {
+  if (!row) return;
+  state.callLog.selectedId = row.id;
+  if (!silent) renderCallLogTable();
+  const title = document.getElementById("call-log-detail-title");
+  const subtitle = document.getElementById("call-log-detail-subtitle");
+  const meta = document.getElementById("call-log-meta");
+  const openTrace = document.getElementById("btn-call-log-open-trace");
+  if (title) title.textContent = `请求 / 响应 · ${agentLabel(row.client_id)}`;
+  if (subtitle) subtitle.textContent = `${row.model_id || row.requested_model || "-"} · ${formatDate(row.ts)}`;
+  if (meta) {
+    const status = Number(row.status || 0);
+    const statusCls = status >= 400 || status === 0 ? "warn" : "good";
+    const hasFullBody = Boolean(traceBodyRef(row));
+    meta.innerHTML = [
+      `<span class="chip ${statusCls}">${escapeHtml(status || "-")}</span>`,
+      row.provider_id ? `<span class="chip">${escapeHtml(row.provider_id)}</span>` : "",
+      `<span class="chip">${escapeHtml(formatCallLatency(row.latency_ms))}</span>`,
+      `<span class="chip mono">${escapeHtml(formatTokenPair(row.prompt_tokens, row.completion_tokens))} tokens</span>`,
+      callLogStreamLabel(row) ? `<span class="chip">${escapeHtml(callLogStreamLabel(row))}</span>` : "",
+      hasFullBody ? '<span class="chip good">完整请求体</span>' : '<span class="chip muted">摘要请求体</span>',
+      row.error ? `<span class="chip warn">${escapeHtml(row.error)}</span>` : ""
+    ].filter(Boolean).join("");
+  }
+  renderRequestResponseBodies(row, "call-log-detail").catch((err) => toast(`加载请求/响应失败：${err.message}`));
+  if (openTrace) openTrace.style.display = "";
+}
+
+function traceUserTurnKey(row) {
+  const last = traceLastUserMessage(row);
+  const text = String(last?.text || row?.prompt_preview || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  // 同一用户原话归为一轮（工具续跑会重复同一句）
+  return `${row.client_id || ""}|${row.model_id || row.requested_model || ""}|${text.slice(0, 240)}`;
+}
+
+/** 旧日志没有 continuation 字段时，按「用户原话变化」推断用户轮起点。 */
+function annotateUserTurnRows(rows = []) {
+  const chronological = [...rows].sort((a, b) => {
+    const cmp = String(a.ts || "").localeCompare(String(b.ts || ""));
+    return cmp !== 0 ? cmp : Number(a.id || 0) - Number(b.id || 0);
+  });
+  const userTurnIds = new Set();
+  let prevKey = null;
+  for (const row of chronological) {
+    const request = parseSummary(row.request_summary || row.requestSummary);
+    if (request?.continuation === true || request?.turnPhase === "continue") {
+      continue;
+    }
+    if (request?.continuation === false || request?.turnPhase === "user") {
+      userTurnIds.add(row.id);
+      prevKey = traceUserTurnKey(row);
+      continue;
+    }
+    const key = traceUserTurnKey(row);
+    if (!key) {
+      userTurnIds.add(row.id);
+      prevKey = key;
+      continue;
+    }
+    if (key !== prevKey) {
+      userTurnIds.add(row.id);
+      prevKey = key;
+    }
+  }
+  return userTurnIds;
+}
+
+async function refreshTraces() {
+  await refreshObservePanel();
 }
 
 function renderTraceList() {
   const wrap = document.getElementById("trace-list");
   const summary = document.getElementById("traces-summary");
   if (!wrap) return;
-  const sessionItems = (state.traces.sessions || []).slice(0, 30).map((row) => ({ type: "session", row }));
-  const requestItems = (state.traces.requests || []).slice(0, 30).map((row) => ({ type: "request", row }));
-  const items = [...requestItems, ...sessionItems].sort((a, b) => {
-    const at = a.type === "request" ? a.row.ts : a.row.mtime;
-    const bt = b.type === "request" ? b.row.ts : b.row.mtime;
-    return String(bt || "").localeCompare(String(at || ""));
-  }).slice(0, 60);
-  if (summary) summary.textContent = `${requestItems.length} 个请求 · ${sessionItems.length} 个会话`;
+  const userTurnsOnly = document.getElementById("trace-user-turns-only")
+    ? Boolean(document.getElementById("trace-user-turns-only").checked)
+    : true;
+  const allRequests = state.traces.requests || [];
+  const userTurnIds = annotateUserTurnRows(allRequests);
+  const visibleRequests = userTurnsOnly
+    ? allRequests.filter((row) => userTurnIds.has(row.id))
+    : allRequests;
+  const items = visibleRequests.slice(0, 40).map((row) => ({
+    type: "request",
+    row,
+    userTurn: userTurnIds.has(row.id)
+  }));
+  if (summary) {
+    const hidden = Math.max(0, allRequests.length - visibleRequests.length);
+    summary.textContent = userTurnsOnly
+      ? `${items.length} 轮用户发言${hidden ? ` · 已隐藏 ${hidden} 条续跑` : ""}`
+      : `${items.length} 条请求`;
+  }
   if (!items.length) {
-    wrap.innerHTML = '<div class="empty-state">暂无可视化对象</div>';
+    wrap.innerHTML = '<div class="empty-state">暂无请求记录</div>';
     return;
   }
   wrap.innerHTML = items.map((item, index) => {
-    if (item.type === "request") {
-      const row = item.row;
-      return `
-        <button class="trace-list-item" data-trace-kind="request" data-trace-index="${index}">
-          <span class="chip ${Number(row.status || 0) >= 400 ? "warn" : "good"}">请求</span>
-          <strong>${escapeHtml(agentLabel(row.client_id))}</strong>
-          <span class="mono">${escapeHtml(row.model_id || row.requested_model || "-")}</span>
-          <small>${escapeHtml(formatDate(row.ts))} · ${escapeHtml(row.latency_ms || 0)} ms · ${escapeHtml(row.total_tokens || 0)} tokens</small>
-        </button>
-      `;
-    }
     const row = item.row;
+    const status = Number(row.status || 0);
+    const statusCls = status >= 400 || status === 0 ? "warn" : "good";
+    const outSnippet = traceRequestSnippet(row, { preferUser: true });
+    const inSnippet = traceResponseSnippet(row);
+    const turn = traceTurnMeta(row);
+    const turnChip = item.userTurn
+      ? `<span class="chip good">用户发言</span>`
+      : (turn.continuation
+        ? `<span class="chip warn">续跑${turn.steps ? ` · ${turn.steps}` : ""}</span>`
+        : `<span class="chip muted">请求</span>`);
     return `
-      <button class="trace-list-item" data-trace-kind="session" data-trace-index="${index}">
-        <span class="chip">会话</span>
-        <strong>${escapeHtml(row.agentLabel || agentLabel(row.agentId))}</strong>
-        <span class="mono">${escapeHtml(row.name || row.relativePath || "-")}</span>
-        <small>${escapeHtml(formatDate(row.mtime))} · ${escapeHtml(row.source === "hermes-state-db" ? `${row.messageCount || 0} 条` : formatBytes(row.size))}</small>
+      <button class="trace-list-item req-log-item" data-trace-kind="request" data-trace-index="${index}">
+        <div class="req-log-item-top">
+          <span class="chip ${statusCls}">${escapeHtml(status || "-")}</span>
+          <strong>${escapeHtml(agentLabel(row.client_id))}</strong>
+          ${turnChip}
+          <small>${escapeHtml(formatDate(row.ts))}</small>
+        </div>
+        <span class="mono req-log-item-model">${escapeHtml(row.model_id || row.requested_model || "-")}</span>
+        <small>${escapeHtml(row.latency_ms || 0)} ms · ${escapeHtml(row.total_tokens || 0)} tokens</small>
+        <div class="req-log-qa">
+          <small class="trace-list-snippet"><span class="req-dir">我说</span>${escapeHtml(outSnippet || "（无用户消息摘要）")}</small>
+          <small class="trace-list-snippet in"><span class="req-dir">返回</span>${escapeHtml(inSnippet || "（无响应摘要）")}</small>
+        </div>
       </button>
     `;
   }).join("");
@@ -4460,97 +5133,584 @@ function renderTraceList() {
 }
 
 async function openTraceItem(item) {
-  if (!item) return;
-  if (item.type === "request") {
-    renderRequestTrace(item.row);
-    return;
-  }
-  const row = await invoke("agent:sessions:read", { id: item.row.id });
-  renderSessionTrace(row);
+  if (!item || item.type !== "request") return;
+  await renderRequestTrace(item.row);
 }
 
-function renderRequestTrace(row) {
+/** 从完整 chat 请求体补全 tools / system / skills（调用透视优先用）。 */
+function summarizeToolsFromBody(tools) {
+  if (!Array.isArray(tools)) return [];
+  return tools.slice(0, 120).map((tool) => {
+    const fn = tool?.function || tool || {};
+    return {
+      name: String(fn.name || tool?.name || "").slice(0, 120),
+      description: String(fn.description || tool?.description || "").slice(0, 240),
+      propertyCount: fn.parameters?.properties && typeof fn.parameters.properties === "object"
+        ? Object.keys(fn.parameters.properties).length
+        : 0
+    };
+  }).filter((tool) => tool.name);
+}
+
+function extractSkillNamesFromText(systemText) {
+  const text = String(systemText || "");
+  if (!/(skill|skills|技能|能力|SKILL\.md)/i.test(text)) return [];
+  const names = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const match = /^(?:[-*]\s*)?`?([A-Za-z0-9_.:@/-]{2,80})`?\s*(?:[:：-]|—)\s+/.exec(trimmed);
+    if (match && /skill|技能|能力/i.test(trimmed)) names.add(match[1]);
+    const bullet = /^(?:[-*]\s+)(?:Skill\s+)?`([A-Za-z0-9_.:@/-]{2,80})`/i.exec(trimmed);
+    if (bullet) names.add(bullet[1]);
+  }
+  for (const match of text.matchAll(/(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) names.add(match[1]);
+  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) names.add(match[1]);
+  return Array.from(names).slice(0, 80);
+}
+
+function contentToPlainText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === "string") return part;
+      if (part?.type === "text") return part.text || "";
+      if (part?.text) return part.text;
+      return "";
+    }).filter(Boolean).join("\n");
+  }
+  if (content && typeof content === "object" && typeof content.text === "string") return content.text;
+  return "";
+}
+
+function mergeSummaryFromChatBody(request, body) {
+  const base = request && typeof request === "object" ? { ...request } : {};
+  const toolsFromBody = summarizeToolsFromBody(body?.tools);
+  const toolCount = Array.isArray(body?.tools) ? body.tools.length : Number(base.toolCount || 0);
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const systemTexts = [];
+  if (typeof body?.system === "string" && body.system.trim()) systemTexts.push(body.system);
+  else if (Array.isArray(body?.system)) {
+    for (const block of body.system) {
+      const text = contentToPlainText(block?.text != null ? block.text : block);
+      if (text.trim()) systemTexts.push(text);
+    }
+  }
+  for (const message of messages) {
+    if (message?.role === "system") {
+      const text = contentToPlainText(message.content);
+      if (text.trim()) systemTexts.push(text);
+    }
+  }
+  if (typeof body?.instructions === "string" && body.instructions.trim()) {
+    systemTexts.push(body.instructions);
+  }
+  const skills = extractSkillNamesFromText(systemTexts.join("\n"));
+  const nextMessages = {
+    ...(base.messages || {}),
+    roleCounts: base.messages?.roleCounts || {},
+    skills: skills.length ? skills : (base.messages?.skills || [])
+  };
+  if (systemTexts.length) {
+    nextMessages.system = systemTexts.slice(0, 3).map((text) => ({
+      role: "system",
+      text: text.length > 12000 ? `${text.slice(0, 6000)}\n…\n${text.slice(-4000)}` : text,
+      truncated: text.length > 12000,
+      contentChars: text.length
+    }));
+  }
+  return {
+    ...base,
+    toolCount: toolCount || toolsFromBody.length || Number(base.toolCount || 0),
+    tools: toolsFromBody.length ? toolsFromBody : (base.tools || []),
+    messages: nextMessages,
+    enrichedFromBody: Boolean(toolsFromBody.length || systemTexts.length)
+  };
+}
+
+function normalizeRequestSummaryTools(request) {
+  const base = request && typeof request === "object" ? { ...request } : {};
+  const tools = Array.isArray(base.tools) ? base.tools : [];
+  const toolCount = Number(base.toolCount || tools.length || 0);
+  if (tools.length || !toolCount) {
+    return { ...base, toolCount: toolCount || tools.length, tools };
+  }
+  // 摘要被截断：只剩 toolCount
+  return {
+    ...base,
+    toolCount,
+    tools: [],
+    toolsMissingDueToTruncation: Boolean(base.truncated || toolCount > 0)
+  };
+}
+
+async function enrichRequestSummaryForCallView(row, request) {
+  let next = normalizeRequestSummaryTools(request);
+  const ref = traceBodyRef(row);
+  if (!ref) return next;
+  try {
+    const result = await invoke("request-body:read", { ref });
+    if (!result?.ok) return next;
+    const body = result.payload?.body ?? result.payload;
+    if (!body || typeof body !== "object") return next;
+    next = mergeSummaryFromChatBody(next, body);
+    next.toolsMissingDueToTruncation = false;
+    return next;
+  } catch {
+    return next;
+  }
+}
+
+function reasoningEffortChips(request) {
+  const trace = request?.reasoningEffortTrace;
+  const requested = trace?.requested ?? request?.params?.reasoningEffort;
+  const wire = trace?.wireValue ?? requested;
+  if (requested == null && (wire == null || wire === "")) {
+    return ['<span class="chip">effort 未指定</span>'];
+  }
+  const clamped = Boolean(trace?.clamped)
+    || (requested != null && wire != null && String(requested) !== String(wire));
+  const cls = clamped ? "chip map-warn" : "chip key";
+  return [
+    `<span class="${cls}">effort 请求 ${escapeHtml(String(requested ?? "-"))} → 上游 ${escapeHtml(String(wire ?? "-"))}</span>`,
+    trace?.wireParam ? `<span class="chip">${escapeHtml(trace.wireParam)}</span>` : "",
+    trace?.providerMode ? `<span class="chip">${escapeHtml(trace.providerMode)}</span>` : ""
+  ].filter(Boolean);
+}
+
+function renderTraceParamsBar(entry, request, { session = false } = {}) {
+  const host = document.getElementById("trace-params-bar");
+  if (!host) return;
+  if (session) {
+    host.innerHTML = [
+      entry?.agentId || entry?.agent?.id ? `<span class="chip">${escapeHtml(agentLabel(entry.agentId || entry.agent?.id))}</span>` : "",
+      entry?.name ? `<span class="chip mono">${escapeHtml(entry.name)}</span>` : ""
+    ].filter(Boolean).join("");
+    return;
+  }
+  const bodyRef = traceBodyRef(entry);
+  const toolCount = Number(request?.toolCount || request?.tools?.length || 0);
+  const skillCount = Array.isArray(request?.messages?.skills) ? request.messages.skills.length : 0;
+  const chips = [
+    ...reasoningEffortChips(request),
+    entry?.model_id || entry?.modelId ? `<span class="chip mono">${escapeHtml(entry.model_id || entry.modelId)}</span>` : "",
+    entry?.provider_id || entry?.providerId ? `<span class="chip">${escapeHtml(entry.provider_id || entry.providerId)}</span>` : "",
+    entry?.upstream_model || entry?.upstreamModel ? `<span class="chip mono">${escapeHtml(entry.upstream_model || entry.upstreamModel)}</span>` : "",
+    toolCount > 0 ? `<span class="chip key">tools ${escapeHtml(toolCount)}</span>` : '<span class="chip muted">tools 0</span>',
+    skillCount > 0 ? `<span class="chip">skills ${escapeHtml(skillCount)}</span>` : "",
+    request?.params?.stream != null ? `<span class="chip">stream ${request.params.stream ? "true" : "false"}</span>` : "",
+    request?.params?.toolChoice != null
+      ? `<span class="chip">tool_choice ${escapeHtml(typeof request.params.toolChoice === "string" ? request.params.toolChoice : JSON.stringify(request.params.toolChoice).slice(0, 40))}</span>`
+      : "",
+    request?.enrichedFromBody ? '<span class="chip good">已从完整请求体拆解</span>' : "",
+    request?.truncated && !request?.enrichedFromBody ? '<span class="chip warn">摘要有截断</span>' : "",
+    bodyRef
+      ? `<span class="chip good">完整请求体已落盘${request?.requestBodyCapture?.truncated ? "（有截断）" : ""}</span>`
+      : ""
+  ].filter(Boolean);
+  host.innerHTML = chips.join("");
+}
+
+function setTraceDetailTab(tab) {
+  const timeline = document.getElementById("trace-timeline");
+  const raw = document.getElementById("trace-raw");
+  document.querySelectorAll("#trace-tabs .trace-tab").forEach((button) => {
+    button.classList.toggle("on", button.dataset.traceTab === tab);
+  });
+  if (timeline) timeline.style.display = tab === "timeline" ? "" : "none";
+  if (raw) raw.style.display = tab === "raw" ? "" : "none";
+}
+
+function showTraceDetailChrome({ requestMode = false, hasBody = false } = {}) {
+  const tabs = document.getElementById("trace-tabs");
+  const copyParams = document.getElementById("btn-trace-copy-params");
+  const copyUser = document.getElementById("btn-trace-copy-user");
+  const copyBody = document.getElementById("btn-trace-copy-body");
+  const revealBody = document.getElementById("btn-trace-reveal-body");
+  const replayButton = document.getElementById("btn-trace-replay");
+  const issueButton = document.getElementById("btn-trace-issue-bundle");
+  const exportButton = document.getElementById("btn-trace-issue-export");
+  if (tabs) tabs.style.display = requestMode ? "" : "none";
+  if (copyParams) copyParams.style.display = requestMode ? "" : "none";
+  if (copyUser) copyUser.style.display = requestMode ? "" : "none";
+  if (copyBody) copyBody.style.display = requestMode && hasBody ? "" : "none";
+  if (revealBody) revealBody.style.display = requestMode && hasBody ? "" : "none";
+  if (replayButton) replayButton.style.display = requestMode ? "" : "none";
+  if (issueButton) issueButton.style.display = requestMode ? "" : "none";
+  if (exportButton) exportButton.style.display = requestMode ? "" : "none";
+}
+
+function traceBodyRef(row) {
+  if (!row) return "";
+  if (row.request_body_ref) return String(row.request_body_ref);
+  if (row.requestBodyRef) return String(row.requestBodyRef);
+  const request = parseSummary(row.request_summary || row.requestSummary);
+  return String(request?.requestBodyCapture?.ref || "");
+}
+
+function traceLastUserMessage(row) {
+  const request = parseSummary(row?.request_summary || row?.requestSummary);
+  if (request?.messages?.latestUser) return request.messages.latestUser;
+  const users = request?.messages?.user || [];
+  return users.length ? users[users.length - 1] : null;
+}
+
+function traceTurnMeta(row) {
+  const request = parseSummary(row?.request_summary || row?.requestSummary);
+  const counts = request?.messages?.roleCounts || {};
+  const continuation = Boolean(request?.continuation || request?.turnPhase === "continue");
+  const steps = Number(request?.continueSteps || 0);
+  const lastAction = String(request?.lastAction || "").replace(/\s+/g, " ").trim();
+  return {
+    request,
+    continuation,
+    steps,
+    lastAction,
+    assistantCount: Number(counts.assistant || 0),
+    toolCount: Number(counts.tool || 0)
+  };
+}
+
+function traceRequestSnippet(row, { preferUser = false } = {}) {
+  const turn = traceTurnMeta(row);
+  const last = traceLastUserMessage(row);
+  const userRaw = String(last?.text || row?.prompt_preview || "").replace(/\s+/g, " ").trim();
+  // 用户轮列表：始终展示用户原话；全部请求模式下续跑才展示动作
+  if (!preferUser && turn.continuation) {
+    const action = turn.lastAction
+      || (turn.toolCount || turn.assistantCount
+        ? `工具续跑 · 助手 ${turn.assistantCount} · 工具 ${turn.toolCount}`
+        : "工具续跑");
+    const step = turn.steps > 0 ? `第 ${turn.steps} 步 · ` : "";
+    const clipped = action.length > 96 ? `${action.slice(0, 96)}…` : action;
+    return `${step}${clipped}`;
+  }
+  if (!userRaw) return "";
+  return userRaw.length > 110 ? `…${userRaw.slice(-110)}` : userRaw;
+}
+
+function traceResponseSnippet(row) {
+  const response = parseSummary(row?.response_summary || row?.responseSummary);
+  let raw = String(response?.text || row?.response_preview || "").replace(/\s+/g, " ").trim();
+  if (!raw && response?.toolCalls?.length) {
+    raw = response.toolCalls.map((call) => call.name || "tool").filter(Boolean).join(", ");
+    if (raw) raw = `工具调用：${raw}`;
+  }
+  if (!raw && response?.streamEventSummary) {
+    const s = response.streamEventSummary;
+    if (s.functionCallDeltaCount || s.functionCallDoneCount) {
+      raw = `工具调用 · ${s.functionCallDoneCount || 0} done / ${s.functionCallDeltaCount || 0} delta`;
+    } else if (s.textDeltaCount) {
+      raw = `文本流 · ${s.textDeltaCount} delta`;
+    }
+  }
+  if (!raw && row?.error) raw = String(row.error);
+  if (!raw) return "";
+  return raw.length > 110 ? `${raw.slice(0, 110)}…` : raw;
+}
+
+function formatTraceMessageText(item, { preferTail = false } = {}) {
+  const text = String(item?.text || "");
+  if (!text) return "";
+  const meta = [];
+  if (item.contentChars) meta.push(`原文约 ${item.contentChars} 字`);
+  if (item.truncated) meta.push(preferTail ? "摘要已截断，优先保留头尾" : "摘要已截断");
+  return meta.length ? `${text}\n\n—— ${meta.join(" · ")} ——` : text;
+}
+
+async function copyTraceParams(row) {
+  const request = parseSummary(row.request_summary || row.requestSummary);
+  const payload = {
+    params: request?.params || null,
+    reasoningEffortTrace: request?.reasoningEffortTrace || null,
+    modelId: row.model_id || row.modelId,
+    providerId: row.provider_id || row.providerId,
+    upstreamModel: row.upstream_model || row.upstreamModel
+  };
+  await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+  toast("已复制 params JSON");
+}
+
+async function copyTraceUserMessages(row) {
+  const request = parseSummary(row.request_summary || row.requestSummary);
+  const latest = request?.messages?.latestUser || traceLastUserMessage(row);
+  if (latest?.text) {
+    await navigator.clipboard.writeText(String(latest.text));
+    toast(latest.truncated ? "已复制本轮请求摘要（含截断）" : "已复制本轮请求");
+    return;
+  }
+  const fallback = String(row.prompt_preview || "").trim();
+  if (!fallback) throw new Error("没有可复制的用户消息");
+  await navigator.clipboard.writeText(fallback);
+  toast("已复制 prompt 预览");
+}
+
+async function copyTraceFullBody(row) {
+  const ref = traceBodyRef(row);
+  if (!ref) throw new Error("这条请求没有完整请求体（需先开启「落盘完整请求体」后再发请求）");
+  const result = await invoke("request-body:read", { ref });
+  if (!result?.ok) throw new Error(result?.error || "读取失败");
+  await navigator.clipboard.writeText(JSON.stringify(result.payload, null, 2));
+  toast(result.payload?.truncated ? "已复制完整请求体（落盘时有截断）" : "已复制完整请求体");
+}
+
+async function revealTraceFullBody(row) {
+  const ref = traceBodyRef(row);
+  if (!ref) throw new Error("这条请求没有完整请求体文件");
+  const result = await invoke("request-body:reveal", { ref });
+  if (!result?.ok) throw new Error(result?.error || "打开失败");
+  toast("已在访达中显示请求体文件");
+}
+
+async function renderRequestTrace(row) {
   state.traces.selected = { type: "request", row };
   document.getElementById("trace-title").textContent = `请求 · ${agentLabel(row.client_id)}`;
-  document.getElementById("trace-subtitle").textContent = row.model_id || row.requested_model || "-";
-  const replayButton = document.getElementById("btn-trace-replay");
-  if (replayButton) replayButton.style.display = "";
-  const issueButton = document.getElementById("btn-trace-issue-bundle");
-  if (issueButton) issueButton.style.display = "";
-  const exportButton = document.getElementById("btn-trace-issue-export");
-  if (exportButton) exportButton.style.display = "";
-  const request = parseSummary(row.request_summary);
+  document.getElementById("trace-subtitle").textContent = `${row.model_id || row.requested_model || "-"} · ${formatDate(row.ts)}`;
+  const bodyRef = traceBodyRef(row);
+  showTraceDetailChrome({ requestMode: true, hasBody: Boolean(bodyRef) });
   const response = parseSummary(row.response_summary);
-  const events = [];
+  const timeline = document.getElementById("trace-timeline");
+  if (timeline) timeline.innerHTML = '<div class="empty-state">正在拆解上下文…</div>';
+  let request = parseSummary(row.request_summary);
+  request = await enrichRequestSummaryForCallView(row, request);
+  renderTraceParamsBar(row, request);
+  const rawEl = document.getElementById("trace-raw");
+  if (rawEl) {
+    rawEl.textContent = JSON.stringify({
+      request,
+      response,
+      requestBodyRef: bodyRef || null,
+      row: {
+        id: row.id, ts: row.ts, status: row.status, latency_ms: row.latency_ms,
+        model_id: row.model_id, provider_id: row.provider_id, upstream_model: row.upstream_model,
+        request_body_ref: bodyRef || null
+      }
+    }, null, 2);
+  }
+  setTraceDetailTab("timeline");
+  renderRequestLogDetail(row, request, response);
+}
+
+function renderRequestLogDetail(row, request, response, { hostId = "trace-timeline", mode = "prompt" } = {}) {
+  const wrap = document.getElementById(hostId);
+  if (!wrap) return;
+  const users = request?.messages?.user || [];
+  const lastUser = request?.messages?.latestUser || (users.length ? users[users.length - 1] : null);
+  const recentOlderUsers = users.slice(0, -1);
+  const status = Number(row.status || 0);
+  const statusCls = status >= 400 || status === 0 ? "warn" : "good";
+  const totalUserCount = Number(request?.messages?.roleCounts?.user || users.length || 0);
+  const outboundText = lastUser
+    ? formatTraceMessageText(lastUser, { preferTail: true })
+    : String(row.prompt_preview || "").trim();
+  const inboundParts = [];
+  if (row.error) inboundParts.push(`错误：${row.error}`);
+  if (response?.reasoning) inboundParts.push(`思考：\n${response.reasoning}`);
+  if (response?.toolCalls?.length) {
+    inboundParts.push(`工具调用：\n${response.toolCalls.map((call) => `${call.name}${call.argumentsPreview ? `\n${call.argumentsPreview}` : ""}`).join("\n\n")}`);
+  }
+  if (response?.text) inboundParts.push(response.text);
+  else if (row.response_preview) inboundParts.push(row.response_preview);
+  if (!inboundParts.length) inboundParts.push("（无响应文本；若为工具-only 或流式未落摘要，可看原始 JSON / 完整请求体）");
+  const inboundText = inboundParts.join("\n\n——\n\n");
+  const metaLine = [
+    `${row.method || "POST"} ${row.path || "-"}`,
+    `${row.latency_ms || 0} ms`,
+    `tokens ${row.total_tokens || 0}`,
+    row.provider_id ? `provider ${row.provider_id}` : "",
+    row.upstream_model ? `upstream ${row.upstream_model}` : ""
+  ].filter(Boolean).join(" · ");
+  const turn = traceTurnMeta(row);
+  const userLabel = turn.continuation
+    ? `同用户轮续跑${turn.steps ? ` · 第 ${turn.steps} 步` : ""}（用户原话未变）`
+    : (totalUserCount > 1 ? `本轮用户消息（会话共 ${totalUserCount} 条）` : "本轮用户消息");
+
+  // 使用日志：只展示发出/返回
+  if (mode === "simple") {
+    wrap.innerHTML = `
+      <div class="req-log-detail">
+        <section class="req-log-block out">
+          <div class="req-log-block-hd">
+            <strong>发出</strong>
+            <span class="tiny muted">${escapeHtml(userLabel)}</span>
+          </div>
+          ${turn.continuation && turn.lastAction
+            ? `<div class="tiny" style="padding:8px 12px 0;color:var(--text-muted);">本步动作：${escapeHtml(turn.lastAction)}</div>`
+            : ""}
+          <pre class="req-log-body">${escapeHtml(outboundText || "（无用户消息摘要）")}</pre>
+        </section>
+        <section class="req-log-block in ${statusCls}">
+          <div class="req-log-block-hd">
+            <strong>返回</strong>
+            <span class="chip ${statusCls}">${escapeHtml(status || "-")}</span>
+            <span class="tiny muted">${escapeHtml(metaLine)}</span>
+          </div>
+          <pre class="req-log-body">${escapeHtml(inboundText)}</pre>
+        </section>
+      </div>
+    `;
+    return;
+  }
+
+  // 调用透视：用户 / 系统提示 / Skill / 工具定义 / 返回（有完整请求体时会二次拆解）
+  const toolCount = Number(request?.toolCount || request?.tools?.length || 0);
+  const tools = Array.isArray(request?.tools) ? request.tools : [];
+  const historyToolCalls = (request?.messages?.assistant || [])
+    .flatMap((item) => Array.isArray(item.toolCalls) ? item.toolCalls : [])
+    .filter((call) => call?.name);
+  let toolsText = "";
+  if (tools.length) {
+    const shown = tools.slice(0, 80);
+    toolsText = shown.map((tool, index) => {
+      const props = tool.propertyCount ? ` · ${tool.propertyCount} 参数` : "";
+      const desc = tool.description ? `\n  ${tool.description}` : "";
+      return `${index + 1}. ${tool.name}${props}${desc}`;
+    }).join("\n");
+    if (toolCount > shown.length) toolsText += `\n\n…共 ${toolCount} 个工具，此处显示前 ${shown.length} 个`;
+    if (request?.enrichedFromBody) toolsText += "\n\n—— 来自完整请求体 ——";
+  } else if (toolCount > 0 || request?.toolsMissingDueToTruncation) {
+    toolsText = `本请求携带了 ${toolCount || "若干"} 个工具，但摘要落库时被截断未保留名称。\n勾选「落盘完整请求体」后重新发起请求，即可在此看到完整工具列表。`;
+  } else if (historyToolCalls.length) {
+    toolsText = `本请求顶层未带 tools 定义；历史消息里出现过工具调用：\n${[...new Set(historyToolCalls.map((c) => c.name))].join(", ")}`;
+  } else {
+    toolsText = "（本请求未携带 tools 定义）";
+  }
+
+  const sections = [];
+  sections.push({
+    title: "① 用户消息",
+    text: [
+      turn.continuation && turn.lastAction ? `本步动作：${turn.lastAction}\n\n` : "",
+      outboundText || "（无用户消息摘要）"
+    ].join(""),
+    collapseDefault: false,
+    accent: "out"
+  });
   if (request?.messages?.system?.length) {
-    events.push({ role: "system", title: "系统提示", text: request.messages.system.map((item) => item.text).join("\n\n---\n\n"), timestamp: row.ts });
+    sections.push({
+      title: "② 系统提示",
+      text: request.messages.system.map((item) => item.text).join("\n\n---\n\n"),
+      collapseDefault: false
+    });
+  } else {
+    sections.push({
+      title: "② 系统提示",
+      text: "（本请求摘要中未保留系统提示；可开启「落盘完整请求体」后查看）",
+      collapseDefault: false
+    });
   }
-  if (request?.tools?.length) {
-    events.push({ role: "tool", title: "当前可用工具", text: request.tools.map((tool) => `${tool.name}${tool.description ? `\n${tool.description}` : ""}`).join("\n\n"), timestamp: row.ts });
+  sections.push({
+    title: `③ Skill${request?.messages?.skills?.length ? ` · ${request.messages.skills.length}` : ""}`,
+    text: request?.messages?.skills?.length
+      ? request.messages.skills.map((name, index) => `${index + 1}. ${name}`).join("\n")
+      : "（未从系统提示中解析到 Skill 名称，或本轮未携带）",
+    collapseDefault: false
+  });
+  sections.push({
+    title: `④ 工具定义${toolCount ? ` · ${toolCount}` : tools.length ? ` · ${tools.length}` : ""}`,
+    text: toolsText,
+    collapseDefault: false
+  });
+  sections.push({
+    title: "⑤ 返回结果",
+    text: inboundText,
+    collapseDefault: false,
+    accent: statusCls === "warn" ? "in warn" : "in"
+  });
+
+  const moreEvents = [];
+  if (recentOlderUsers.length) {
+    moreEvents.push({
+      title: `近轮用户消息 · ${recentOlderUsers.length} 条`,
+      text: recentOlderUsers.map((item, index) => `—— #${index + 1} ——\n${formatTraceMessageText(item)}`).join("\n\n"),
+      collapseDefault: true
+    });
   }
-  if (request?.messages?.skills?.length) {
-    events.push({ role: "tool", title: "当前可用 Skill", text: request.messages.skills.join("\n"), timestamp: row.ts });
+  if (request?.messages?.assistant?.length) {
+    moreEvents.push({
+      title: `历史助手消息 · ${request.messages.assistant.length} 条`,
+      text: request.messages.assistant.map((item, index) => {
+        const calls = Array.isArray(item.toolCalls) && item.toolCalls.length
+          ? `\n工具调用: ${item.toolCalls.map((c) => c.name).join(", ")}`
+          : "";
+        return `—— #${index + 1} ——\n${formatTraceMessageText(item)}${calls}`;
+      }).join("\n\n"),
+      collapseDefault: true
+    });
   }
-  if (request?.messages?.user?.length) {
-    events.push({ role: "user", title: "用户消息", text: request.messages.user.map((item) => item.text).join("\n\n---\n\n"), timestamp: row.ts });
-  } else if (row.prompt_preview) {
-    events.push({ role: "user", title: "请求内容", text: row.prompt_preview, timestamp: row.ts });
-  }
-  if (request?.conversionChain?.steps?.length) {
-    events.push({
-      role: "system",
-      title: "协议转换",
-      text: `协议链路：${request.conversionChain.steps.join(" -> ")}`,
-      timestamp: row.ts
+  if (request?.messages?.tool?.length) {
+    moreEvents.push({
+      title: `历史工具结果 · ${request.messages.tool.length} 条`,
+      text: request.messages.tool.map((item, index) => `—— #${index + 1} ——\n${formatTraceMessageText(item)}`).join("\n\n"),
+      collapseDefault: true
     });
   }
   {
     const details = [];
+    if (request?.conversionChain?.steps?.length) details.push(`协议链路：${request.conversionChain.steps.join(" -> ")}`);
     const errorClass = requestErrorClass(request);
     if (errorClass) details.push(`错误分类：${errorClass}`);
     const rectifiers = rectifierItems(request);
-    if (rectifiers.length) {
-      details.push("运行时整流：");
-      rectifiers.forEach((item) => details.push(`- ${item}`));
-    }
+    if (rectifiers.length) details.push(`运行时整流：\n${rectifiers.map((item) => `- ${item}`).join("\n")}`);
     const overrides = requestOverrideItems(request);
-    if (overrides.length) {
-      details.push("请求覆盖：");
-      overrides.forEach((item) => details.push(`- ${item}`));
-    }
+    if (overrides.length) details.push(`请求覆盖：\n${overrides.map((item) => `- ${item}`).join("\n")}`);
+    details.push(...routeSummaryItems(row, request));
     if (details.length) {
-      events.push({ role: "system", title: "运行时适配动作", text: details.join("\n"), timestamp: row.ts });
+      moreEvents.push({
+        title: "路由与适配",
+        text: details.join("\n"),
+        collapseDefault: true
+      });
     }
   }
-  events.push(
-    { role: "system", title: "实际路由", text: routeSummaryItems(row, request).join("\n"), timestamp: row.ts },
-    { role: "system", title: "入口", text: `${row.method || "POST"} ${row.path || "-"}\n${agentLabel(row.client_id)} → ${row.provider_id || "-"} / ${row.upstream_model || "-"}`, timestamp: row.ts },
-    { role: Number(row.status || 0) >= 400 ? "event" : "assistant", title: `响应 ${row.status || "-"}`, text: `${row.latency_ms || 0} ms\nprompt ${row.prompt_tokens || 0} · completion ${row.completion_tokens || 0} · total ${row.total_tokens || 0}${row.error ? `\n${row.error}` : ""}`, timestamp: row.ts }
-  );
-  if (response?.reasoning) {
-    events.push({ role: "assistant", title: "思考 / reasoning", text: response.reasoning, timestamp: row.ts });
+
+  wrap.innerHTML = `
+    <div class="req-log-detail">
+      ${sections.map((section) => `
+        <section class="req-log-block ${section.accent || ""}">
+          <div class="req-log-block-hd">
+            <strong>${escapeHtml(section.title)}</strong>
+            ${section.title.startsWith("①") ? `<span class="tiny muted">${escapeHtml(userLabel)}</span>` : ""}
+            ${section.title.startsWith("⑤") ? `<span class="chip ${statusCls}">${escapeHtml(status || "-")}</span><span class="tiny muted">${escapeHtml(metaLine)}</span>` : ""}
+          </div>
+          <pre class="req-log-body">${escapeHtml(section.text || "")}</pre>
+        </section>
+      `).join("")}
+      ${moreEvents.length ? `
+        <details class="req-log-more">
+          <summary>更多上下文（历史消息 / 路由）</summary>
+          <div class="req-log-more-body" data-more-context></div>
+        </details>
+      ` : ""}
+    </div>
+  `;
+  const moreHost = wrap.querySelector("[data-more-context]");
+  if (moreHost && moreEvents.length) {
+    moreHost.innerHTML = moreEvents.map((event) => `
+      <div class="trace-card${event.collapseDefault ? " collapsed" : ""}">
+        <button class="trace-card-head" type="button" data-collapse-card>
+          <span>${escapeHtml(event.title)}</span>
+          <span class="trace-card-toggle">${event.collapseDefault ? "展开" : "收起"}</span>
+        </button>
+        <div class="trace-card-body">
+          <div class="message-text">${escapeHtml(event.text || "").replace(/\n/g, "<br>")}</div>
+        </div>
+      </div>
+    `).join("");
+    moreHost.querySelectorAll("[data-collapse-card]").forEach((button) => {
+      button.addEventListener("click", () => toggleCollapseCard(button.closest(".trace-card")));
+    });
   }
-  if (response?.toolCalls?.length) {
-    events.push({ role: "tool", title: "响应工具调用", text: response.toolCalls.map((call) => `${call.name}\n${call.argumentsPreview || ""}`).join("\n\n"), timestamp: row.ts });
-  }
-  if (response?.text) {
-    events.push({ role: "assistant", title: "响应文本", text: response.text, timestamp: row.ts });
-  } else if (row.response_preview) {
-    events.push({ role: "assistant", title: "响应内容", text: row.response_preview, timestamp: row.ts });
-  }
-  renderTraceTimeline(events);
 }
 
 function renderSessionTrace(row) {
   state.traces.selected = { type: "session", row };
   document.getElementById("trace-title").textContent = `会话 · ${row.agent?.label || row.agentLabel || agentLabel(row.agentId)}`;
   document.getElementById("trace-subtitle").textContent = row.target || row.path || "";
-  const replayButton = document.getElementById("btn-trace-replay");
-  if (replayButton) replayButton.style.display = "none";
-  const issueButton = document.getElementById("btn-trace-issue-bundle");
-  if (issueButton) issueButton.style.display = "none";
-  const exportButton = document.getElementById("btn-trace-issue-export");
-  if (exportButton) exportButton.style.display = "none";
+  showTraceDetailChrome({ requestMode: false });
+  renderTraceParamsBar(row, null, { session: true });
+  const rawEl = document.getElementById("trace-raw");
+  if (rawEl) rawEl.textContent = "";
+  setTraceDetailTab("timeline");
   const events = (row.conversation?.messages || []).map((message) => ({
     role: message.role,
     title: roleLabel(message.role),
@@ -4571,11 +5731,11 @@ function renderTraceTimeline(events) {
   wrap.innerHTML = events.map((event) => `
     <div class="trace-event ${escapeHtml(event.role || "event")}">
       <div class="trace-dot"></div>
-      <div class="trace-card">
+      <div class="trace-card${event.collapseDefault ? " collapsed" : ""}">
         <button class="trace-card-head" type="button" data-collapse-card>
           <span>${escapeHtml(event.title || roleLabel(event.role))}${event.kind ? ` · ${escapeHtml(event.kind)}` : ""}</span>
           <span class="trace-card-meta">${escapeHtml(formatDate(event.timestamp))}</span>
-          <span class="trace-card-toggle">收起</span>
+          <span class="trace-card-toggle">${event.collapseDefault ? "展开" : "收起"}</span>
         </button>
         <div class="trace-card-body">
           <div class="message-text">${escapeHtml(event.text || "").replace(/\n/g, "<br>")}</div>
@@ -4597,7 +5757,83 @@ function toggleCollapseCard(card) {
 }
 
 document.getElementById("btn-traces-refresh")?.addEventListener("click", () => {
-  refreshTraces().catch((err) => toast(`刷新调用可视化失败：${err.message}`));
+  refreshObservePanel().catch((err) => toast(`刷新请求日志失败：${err.message}`));
+});
+document.querySelectorAll("[data-observe-module]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setObserveModule(button.dataset.observeModule);
+    refreshObservePanel().catch((err) => toast(`刷新失败：${err.message}`));
+  });
+});
+setObserveModule(state.traces.module || "request-log");
+document.getElementById("trace-agent-filter")?.addEventListener("change", () => {
+  refreshObservePanel().catch((err) => toast(`刷新失败：${err.message}`));
+});
+document.getElementById("call-log-limit")?.addEventListener("change", () => {
+  refreshObservePanel().catch((err) => toast(`刷新失败：${err.message}`));
+});
+let callLogModelFilterTimer = null;
+document.getElementById("call-log-model-filter")?.addEventListener("input", () => {
+  clearTimeout(callLogModelFilterTimer);
+  callLogModelFilterTimer = setTimeout(() => {
+    refreshObservePanel().catch((err) => toast(`刷新失败：${err.message}`));
+  }, 250);
+});
+document.getElementById("btn-call-log-open-trace")?.addEventListener("click", () => {
+  const row = (state.callLog.rows || []).find((item) => Number(item.id) === Number(state.callLog.selectedId));
+  if (!row) return toast("请先选择一条请求");
+  setObserveModule("call-view");
+  state.traces.selected = { type: "request", row };
+  openTraceItem({ type: "request", row });
+});
+document.getElementById("trace-show-sessions")?.addEventListener("change", () => {
+  renderTraceList();
+});
+document.getElementById("trace-user-turns-only")?.addEventListener("change", () => {
+  renderCallLogTable();
+  renderTraceList();
+});
+document.getElementById("btn-trace-copy-params")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) {
+    copyTraceParams(selected.row).catch((err) => toast(`复制失败：${err.message}`));
+  }
+});
+document.getElementById("btn-trace-copy-user")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) {
+    copyTraceUserMessages(selected.row).catch((err) => toast(`复制失败：${err.message}`));
+  }
+});
+document.getElementById("btn-trace-copy-body")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) {
+    copyTraceFullBody(selected.row).catch((err) => toast(`复制失败：${err.message}`));
+  }
+});
+document.getElementById("btn-trace-reveal-body")?.addEventListener("click", () => {
+  const selected = state.traces.selected;
+  if (selected?.type === "request" && selected.row) {
+    revealTraceFullBody(selected.row).catch((err) => toast(`打开失败：${err.message}`));
+  }
+});
+document.getElementById("trace-capture-body")?.addEventListener("change", async (event) => {
+  const enabled = Boolean(event.currentTarget.checked);
+  try {
+    const result = await invoke("request-body-capture:set", { enabled });
+    if (state.config) state.config.requestBodyCapture = result.requestBodyCapture;
+    toast(enabled
+      ? "已开启完整请求体落盘（仅对新请求生效；会脱敏密钥/图片）"
+      : "已关闭完整请求体落盘");
+  } catch (error) {
+    event.currentTarget.checked = !enabled;
+    toast(`保存失败：${error.message}`, "error");
+  }
+});
+document.getElementById("trace-tabs")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-trace-tab]");
+  if (!button) return;
+  setTraceDetailTab(button.dataset.traceTab);
 });
 document.getElementById("btn-trace-replay")?.addEventListener("click", () => {
   const selected = state.traces.selected;
@@ -4614,7 +5850,7 @@ document.getElementById("btn-trace-issue-export")?.addEventListener("click", () 
 document.getElementById("trace-agent-filter")?.addEventListener("change", () => {
   state.liveLogAgent = document.getElementById("trace-agent-filter")?.value || "";
   renderLiveLogs();
-  refreshTraces().catch((err) => toast(`刷新调用可视化失败：${err.message}`));
+  refreshTraces().catch((err) => toast(`刷新请求日志失败：${err.message}`));
 });
 
 async function refreshAgentSessions() {
@@ -5459,8 +6695,13 @@ function formatLogLine(entry) {
 }
 
 function renderLiveLogs() {
-  const entries = visibleLogEntries();
-  renderStructuredLogs(entries);
+  // 方案 A：不再维护右侧双卡实时列表，有新请求时刷新左侧对象并选中最新
+  const entries = visibleLogEntries().filter((entry) => entry?.requestLog);
+  if (!entries.length) return;
+  refreshTraces().then(() => {
+    const latest = (state.traces.requests || [])[0];
+    if (latest) openTraceItem({ type: "request", row: latest });
+  }).catch(() => {});
 }
 
 function renderStructuredLogs(entries) {
@@ -5556,7 +6797,26 @@ function structuredSummaryHtml(entry) {
       `stream: ${request.params?.stream ? "true" : "false"}`,
       request.params?.temperature !== undefined ? `temperature: ${request.params.temperature}` : "",
       request.params?.maxTokens !== undefined ? `max_tokens: ${request.params.maxTokens}` : "",
-      request.params?.toolChoice ? `tool_choice: ${JSON.stringify(request.params.toolChoice).slice(0, 180)}` : ""
+      request.params?.toolChoice ? `tool_choice: ${JSON.stringify(request.params.toolChoice).slice(0, 180)}` : "",
+      // 思考档位：网关 summarizeRequest 已落库，这里补齐展示
+      request.params?.reasoningEffort !== undefined && request.params?.reasoningEffort !== ""
+        ? `reasoning_effort: ${request.params.reasoningEffort}`
+        : "",
+      request.params?.reasoning != null
+        ? `reasoning: ${typeof request.params.reasoning === "string"
+          ? request.params.reasoning
+          : JSON.stringify(request.params.reasoning).slice(0, 180)}`
+        : "",
+      request.params?.thinking != null
+        ? `thinking: ${typeof request.params.thinking === "string"
+          ? request.params.thinking
+          : JSON.stringify(request.params.thinking).slice(0, 180)}`
+        : "",
+      request.params?.enableThinking !== undefined ? `enable_thinking: ${request.params.enableThinking}` : "",
+      request.params?.reasoningSplit !== undefined ? `reasoning_split: ${request.params.reasoningSplit}` : "",
+      request.reasoningEffortTrace
+        ? `effort_trace: ${request.reasoningEffortTrace.requested || "-"} → ${request.reasoningEffortTrace.wireValue ?? request.reasoningEffortTrace.mapped ?? "-"}${request.reasoningEffortTrace.clamped ? " (clamped)" : ""}`
+        : ""
     ].filter(Boolean)));
     if (request.conversionChain?.steps?.length) {
       parts.push(summaryListBlock("协议转换链路", [request.conversionChain.steps.join(" -> ")]));
@@ -5647,8 +6907,8 @@ onLog((entry) => {
   if (entry?.requestLog) {
     clearTimeout(refreshUsageStats._logT);
     refreshUsageStats._logT = setTimeout(() => refreshUsageStats().catch(() => {}), 250);
-    clearTimeout(refreshTraces._logT);
-    refreshTraces._logT = setTimeout(() => refreshTraces().catch(() => {}), 400);
+    clearTimeout(refreshObservePanel._logT);
+    refreshObservePanel._logT = setTimeout(() => refreshObservePanel().catch(() => {}), 400);
   }
 });
 

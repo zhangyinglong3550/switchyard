@@ -161,3 +161,20 @@ test("tool-history-adjacent does not auto-activate for native Anthropic upstream
   assert.equal(outbound.some((rule) => rule.id === "tool-history-adjacent"), false);
   resetPatches();
 });
+
+test("reasoning-options uses catalog clamp for deepseek xhigh→high", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const out = applyOutbound(
+    { messages: [{ role: "user", content: "hi" }], reasoning: { effort: "xhigh" } },
+    {
+      provider: { id: "deepseek", presetId: "deepseek", apiFormat: "openai_chat", baseUrl: "https://api.deepseek.com/v1" },
+      model: { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" },
+      clientId: "codex"
+    }
+  );
+  assert.equal(out.reasoning_effort, "high");
+  assert.equal(out._switchyardReasoningEffortTrace?.requested, "xhigh");
+  assert.equal(out._switchyardReasoningEffortTrace?.clamped, true);
+  resetPatches();
+});

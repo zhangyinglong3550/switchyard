@@ -1,6 +1,6 @@
 {
   "name": "switchyard",
-  "version": "2.2.45",
+  "version": "2.2.46",
   "description": "Local multi-client LLM gateway and desktop control panel for Codex, Claude Code, Hermes, OpenCode, Grok Build and other OpenAI-compatible / Anthropic-compatible tools. Includes multi-account OAuth pools (Grok / Codex) and Anthropic official OAuth.",
   "license": "MIT",
   "repository": {

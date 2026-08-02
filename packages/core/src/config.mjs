@@ -5,6 +5,7 @@ import path from "node:path";
 import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
 import { canonicalCursorSubscriptionModelId, cursorSubscriptionDisplayName, isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
 import { normalizeSensitiveGuardConfig } from "./sensitive-guard.mjs";
+import { normalizeRequestBodyCaptureConfig } from "./request-body-capture.mjs";
 
 export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
@@ -23,6 +24,8 @@ export const DEFAULT_CONFIG = {
   defaultModel: null,
   // 出站敏感信息守卫：默认开启，脱敏后发送；审计不落原文。
   sensitiveGuard: normalizeSensitiveGuardConfig({ enabled: true, mode: "redact" }),
+  // 完整请求体调试落盘：默认关闭；开启后写入 logs/request-bodies/。
+  requestBodyCapture: normalizeRequestBodyCaptureConfig({ enabled: false }),
   providers: [],
   models: [],
   clients: {
@@ -119,6 +122,9 @@ export function mergeWithDefaults(input) {
     if (typeof input.defaultModel === "string") out.defaultModel = input.defaultModel;
     if (input.sensitiveGuard && typeof input.sensitiveGuard === "object") {
       out.sensitiveGuard = normalizeSensitiveGuardConfig(input.sensitiveGuard);
+    }
+    if (input.requestBodyCapture && typeof input.requestBodyCapture === "object") {
+      out.requestBodyCapture = normalizeRequestBodyCaptureConfig(input.requestBodyCapture);
     }
     if (Array.isArray(input.providers)) out.providers = input.providers.map(normalizeKnownProvider);
     if (Array.isArray(input.models)) {

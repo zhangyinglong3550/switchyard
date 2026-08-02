@@ -93,17 +93,50 @@ export const CODEX_ACCESS_MODES = Object.freeze({
   PROVIDER_DIRECT: "provider_direct"
 });
 
+function reasoningLevel(effort, description) {
+  return { effort, description };
+}
+
+const CODEX_BASE_REASONING_LEVELS = [
+  reasoningLevel("low", "Fast responses with lighter reasoning"),
+  reasoningLevel("medium", "Balances speed and reasoning depth"),
+  reasoningLevel("high", "Greater reasoning depth"),
+  reasoningLevel("xhigh", "Extra high reasoning depth")
+];
+
+function supportedReasoningLevelsForCodexModel(slug, upstreamModel) {
+  const id = `${slug || ""} ${upstreamModel || ""}`.toLowerCase();
+  if (/gpt-5\.6-(sol|terra)/.test(id)) {
+    return {
+      default_reasoning_level: /sol/.test(id) ? "low" : "medium",
+      supported_reasoning_levels: [
+        ...CODEX_BASE_REASONING_LEVELS,
+        reasoningLevel("max", "Maximum reasoning depth for the hardest problems"),
+        reasoningLevel("ultra", "Codex-only orchestration tier; not a generic API effort")
+      ]
+    };
+  }
+  if (/gpt-5\.6-luna|\bgpt-5\.6\b/.test(id)) {
+    return {
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: [
+        ...CODEX_BASE_REASONING_LEVELS,
+        reasoningLevel("max", "Maximum reasoning depth for the hardest problems")
+      ]
+    };
+  }
+  return {
+    default_reasoning_level: "medium",
+    supported_reasoning_levels: [...CODEX_BASE_REASONING_LEVELS]
+  };
+}
+
 const CODEX_MODEL_TEMPLATE = {
   slug: "switchyard/default",
   display_name: "Switchyard Default",
   description: "Routed by Switchyard.",
   default_reasoning_level: "medium",
-  supported_reasoning_levels: [
-    { effort: "low", description: "Fast responses with lighter reasoning" },
-    { effort: "medium", description: "Balances speed and reasoning depth" },
-    { effort: "high", description: "Greater reasoning depth" },
-    { effort: "xhigh", description: "Extra high reasoning depth" }
-  ],
+  supported_reasoning_levels: [...CODEX_BASE_REASONING_LEVELS],
   additional_speed_tiers: [],
   service_tiers: [],
   shell_type: "shell_command",
@@ -434,14 +467,15 @@ function codexCatalogModelFrom(model, index = 0, options = {}) {
   const supportsImages = Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || hasVisionFallback);
   const providerId = String(model?.providerId || "").trim();
   const upstreamModel = String(model?.upstreamModel || slug).trim();
-  const isOfficialGpt = /^(codex|openai|official-gpt)$/i.test(providerId) || /\bgpt[-_\w.]*/i.test(upstreamModel);
   const supportsPriority = supportsCodexPriorityTier({ providerId, providerApiFormat: model?.providerApiFormat, upstreamModel });
+  const reasoningLevels = supportedReasoningLevelsForCodexModel(slug, upstreamModel);
   return {
     ...CODEX_MODEL_TEMPLATE,
     slug,
     display_name: codexCatalogDisplayName(model, slug),
     description: `${model?.providerName || model?.providerId || "Switchyard"} via Switchyard.`,
-    default_reasoning_level: isOfficialGpt ? "low" : CODEX_MODEL_TEMPLATE.default_reasoning_level,
+    default_reasoning_level: reasoningLevels.default_reasoning_level,
+    supported_reasoning_levels: reasoningLevels.supported_reasoning_levels,
     additional_speed_tiers: supportsPriority ? ["fast"] : [],
     service_tiers: supportsPriority ? [{ ...CODEX_PRIORITY_SERVICE_TIER }] : [],
     priority: 100 + index,

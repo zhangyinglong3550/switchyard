@@ -17,8 +17,7 @@ export const SENSITIVE_GUARD_CLIENTS = [
   "hermes",
   "opencode",
   "grok",
-  "generic-openai",
-  "claude-app"
+  "generic-openai"
 ];
 
 export const DEFAULT_SENSITIVE_WHITELIST = Object.freeze({
@@ -45,6 +44,20 @@ function luhnOk(digits) {
   return sum % 10 === 0;
 }
 
+/** 分组中是否出现连续的公历「年-月-日」。 */
+function hasCalendarDateParts(parts) {
+  for (let i = 0; i < parts.length - 2; i += 1) {
+    if (
+      /^(19|20)\d{2}$/.test(parts[i]) &&
+      /^(0[1-9]|1[0-2])$/.test(parts[i + 1]) &&
+      /^(0[1-9]|[12]\d|3[01])$/.test(parts[i + 2])
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** 排除时间戳/日期号等易过 Luhn 的假银行卡。 */
 function looksLikeTimestampId(text, digits) {
   const raw = String(text || "").trim();
@@ -57,6 +70,11 @@ function looksLikeTimestampId(text, digits) {
     // 14 位日期时分秒、或更长但以日期开头且总长偏短的追踪号
     if (digits.length <= 16) return true;
   }
+  // 任意位置嵌套 YYYY-MM-DD（日志轮转名：1-5705-2026-06-08 16）
+  // 年份限定 19xx/20xx，避免误伤 4111-1111-1111-1111
+  if (/(19|20)\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])/.test(raw)) return true;
+  const parts = raw.split(/[ -]+/).filter(Boolean);
+  if (hasCalendarDateParts(parts)) return true;
   return false;
 }
 
@@ -71,8 +89,9 @@ function looksLikeBankCard(match) {
   // 拒绝 20260731-195349 这类「8位日期-6位时分秒」。
   if (/^\d{8}[ -]\d{6}$/.test(text)) return false;
   const parts = text.split(/[ -]+/).filter(Boolean);
-  // 常见卡号分组：至少 3 组，每组 1–4 位，且至少一组是 4 位。
-  if (parts.length < 3) return false;
+  // 常见卡号分组：3–4 组，每组 1–4 位，且至少一组是 4 位。
+  // 超过 4 组多为日志序号/日期拼接，而非卡号。
+  if (parts.length < 3 || parts.length > 4) return false;
   if (parts.some((part) => !/^\d{1,4}$/.test(part))) return false;
   if (!parts.some((part) => part.length === 4)) return false;
   return true;
@@ -611,18 +630,29 @@ export function flattenSensitiveHitValues(hits = []) {
   return out;
 }
 
-function collectSensitiveStrings(value, out = [], depth = 0) {
-  if (depth > 12 || out.length >= 80) return out;
+function collectSensitiveStrings(value, out = [], depth = 0, {
+  maxStrings = 80,
+  preferRedacted = false
+} = {}) {
+  if (depth > 12 || out.length >= maxStrings) return out;
   if (typeof value === "string") {
-    if (value) out.push(value);
+    if (!value) return out;
+    if (preferRedacted && !/\[REDACTED_[A-Z0-9_]+\]/.test(value)) return out;
+    out.push(value);
     return out;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectSensitiveStrings(item, out, depth + 1);
+    for (const item of value) {
+      collectSensitiveStrings(item, out, depth + 1, { maxStrings, preferRedacted });
+      if (out.length >= maxStrings) break;
+    }
     return out;
   }
   if (value && typeof value === "object") {
-    for (const item of Object.values(value)) collectSensitiveStrings(item, out, depth + 1);
+    for (const item of Object.values(value)) {
+      collectSensitiveStrings(item, out, depth + 1, { maxStrings, preferRedacted });
+      if (out.length >= maxStrings) break;
+    }
   }
   return out;
 }
@@ -647,10 +677,17 @@ export function buildSensitiveOutboundPreview(outboundBody, {
   contextChars = 48
 } = {}) {
   const snippets = [];
-  const strings = collectSensitiveStrings(outboundBody);
   const redacted = action === "redact";
 
   if (redacted) {
+    // 大请求（Codex tools/history）前 80 段字符串里常扫不到 REDACTED；优先只收集含打码标记的串
+    let strings = collectSensitiveStrings(outboundBody, [], 0, {
+      maxStrings: 120,
+      preferRedacted: true
+    });
+    if (!strings.length) {
+      strings = collectSensitiveStrings(outboundBody, [], 0, { maxStrings: 240 });
+    }
     for (const text of strings) {
       if (snippets.length >= maxSnippets) break;
       if (!/\[REDACTED_[A-Z0-9_]+\]/.test(text)) continue;
@@ -667,10 +704,12 @@ export function buildSensitiveOutboundPreview(outboundBody, {
     }
     return {
       kind: "redacted",
-      label: "出站已打码",
+      label: snippets.length ? "出站已打码" : "出站已打码（未截到片段）",
       snippets
     };
   }
+
+  const strings = collectSensitiveStrings(outboundBody, [], 0, { maxStrings: 240 });
 
   const originals = flattenSensitiveHitValues(hits).map((row) => row.value).filter(Boolean);
   for (const text of strings) {

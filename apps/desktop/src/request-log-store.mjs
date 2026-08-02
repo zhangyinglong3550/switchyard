@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { ensureDir, logDir, nowIso } from "../../../packages/core/src/utils.mjs";
 import { cacheHitRatePercent } from "../../../packages/core/src/stream-usage.mjs";
+import { previewText } from "../../../packages/core/src/text-preview.mjs";
 import {
   DISCOVERY_PROBE_MODEL_ID,
   isDiscoveryProbeRequest,
@@ -108,14 +109,26 @@ function intValue(value) {
   return 0;
 }
 
-function compactMessageList(messages = [], maxItems = 2) {
+function compactMessageText(text, max = 300) {
+  if (typeof text !== "string") return text;
+  return previewText(text, max, { strategy: "head-tail", headRatio: 0.25 });
+}
+
+/** 保留最近 N 条消息（旧实现 slice(0,N) 会丢掉本轮最新用户消息）。 */
+function compactMessageList(messages = [], maxItems = 2, {
+  textMax = 300,
+  latestTextMax = 1200
+} = {}) {
   if (!Array.isArray(messages)) return [];
-  return messages.slice(0, maxItems).map((message) => ({
-    ...message,
-    text: typeof message?.text === "string" && message.text.length > 300
-      ? `${message.text.slice(0, 300)}...`
-      : message?.text
-  }));
+  const selected = messages.slice(-Math.max(1, maxItems));
+  return selected.map((message, index) => {
+    const isLatest = index === selected.length - 1;
+    const max = isLatest ? latestTextMax : textMax;
+    const text = typeof message?.text === "string"
+      ? compactMessageText(message.text, max)
+      : message?.text;
+    return { ...message, text };
+  });
 }
 
 function compactSummaryForStorage(summary) {
@@ -140,18 +153,53 @@ function compactSummaryForStorage(summary) {
     );
   }
   if (summary.messages && typeof summary.messages === "object") {
+    const users = Array.isArray(summary.messages.user) ? summary.messages.user : [];
+    let latestSource = summary.messages.latestUser || null;
+    if (!latestSource || latestSource.synthetic) {
+      latestSource = null;
+      for (let i = users.length - 1; i >= 0; i -= 1) {
+        if (!users[i]?.synthetic) {
+          latestSource = users[i];
+          break;
+        }
+      }
+      if (!latestSource && users.length) latestSource = users[users.length - 1];
+    }
+    const latestUser = latestSource
+      ? compactMessageList([latestSource], 1, { latestTextMax: 2000 })[0]
+      : null;
+    // 近轮用户样本也优先保留非伪消息
+    const meaningfulUsers = users.filter((item) => !item?.synthetic);
+    const userSample = (meaningfulUsers.length ? meaningfulUsers : users);
     out.messages = {
       roleCounts: summary.messages.roleCounts || {},
       images: intValue(summary.messages.images),
       skills: Array.isArray(summary.messages.skills) ? summary.messages.skills.slice(0, 40) : [],
-      system: compactMessageList(summary.messages.system, 1),
-      user: compactMessageList(summary.messages.user, 3),
-      assistant: compactMessageList(summary.messages.assistant, 2),
-      tool: compactMessageList(summary.messages.tool, 2)
+      system: compactMessageList(summary.messages.system, 1, { textMax: 800, latestTextMax: 800 }),
+      user: compactMessageList(userSample, 3, { textMax: 400, latestTextMax: 2000 }),
+      latestUser,
+      assistant: compactMessageList(summary.messages.assistant, 2, { textMax: 400, latestTextMax: 800 }),
+      tool: compactMessageList(summary.messages.tool, 2, { textMax: 300, latestTextMax: 600 })
     };
   }
-  if (Array.isArray(summary.tools)) out.tools = summary.tools.slice(0, 40);
+  // 工具定义优先保留名称；描述压短，避免 Codex 大工具表撑爆 12KB 后整段丢失
+  if (Array.isArray(summary.tools)) {
+    out.tools = summary.tools.slice(0, 80).map((tool) => ({
+      name: String(tool?.name || "").slice(0, 120),
+      description: String(tool?.description || "").slice(0, 80),
+      propertyCount: Number(tool?.propertyCount || 0) || undefined
+    })).filter((tool) => tool.name);
+  }
+  if (summary.toolCount != null) out.toolCount = intValue(summary.toolCount);
   return out;
+}
+
+/** 截断信封里仍保留工具名列表，避免调用透视误显示「未携带 tools」。 */
+function compactToolsForEnvelope(tools = [], limit = 60) {
+  if (!Array.isArray(tools)) return [];
+  return tools.slice(0, limit).map((tool) => ({
+    name: String(tool?.name || "").slice(0, 80)
+  })).filter((tool) => tool.name);
 }
 
 function jsonSummary(value, max = 12000) {
@@ -159,6 +207,18 @@ function jsonSummary(value, max = 12000) {
   const compact = compactSummaryForStorage(value);
   const text = JSON.stringify(compact);
   if (text.length <= max) return text;
+  // 系统提示再压短，优先给 tools 腾空间
+  const messages = compact?.messages
+    ? {
+      ...compact.messages,
+      system: Array.isArray(compact.messages.system)
+        ? compactMessageList(compact.messages.system, 1, { textMax: 400, latestTextMax: 400 })
+        : [],
+      assistant: compactMessageList(compact.messages.assistant || [], 1, { textMax: 240, latestTextMax: 400 }),
+      tool: compactMessageList(compact.messages.tool || [], 1, { textMax: 200, latestTextMax: 300 })
+    }
+    : null;
+  const tools = compactToolsForEnvelope(compact?.tools, 60);
   const envelope = {
     truncated: true,
     protocol: compact?.protocol || "",
@@ -170,8 +230,10 @@ function jsonSummary(value, max = 12000) {
     rectifiers: compact?.rectifiers || null,
     requestOverrides: compact?.requestOverrides || null,
     params: compact?.params || null,
+    reasoningEffortTrace: compact?.reasoningEffortTrace || null,
     vision: compact?.vision || null,
-    toolCount: compact?.toolCount || 0,
+    toolCount: compact?.toolCount || tools.length || 0,
+    tools,
     streamDiagnostics: compact?.streamDiagnostics || null,
     status: compact?.status,
     stream: compact?.stream,
@@ -181,10 +243,46 @@ function jsonSummary(value, max = 12000) {
     text: typeof compact?.text === "string" ? compact.text.slice(0, 800) : undefined,
     reasoning: typeof compact?.reasoning === "string" ? compact.reasoning.slice(0, 800) : undefined,
     toolCalls: Array.isArray(compact?.toolCalls) ? compact.toolCalls.slice(0, 20) : undefined,
-    messages: compact?.messages || null
+    messages,
+    turnPhase: compact?.turnPhase || "",
+    continuation: Boolean(compact?.continuation),
+    continueSteps: compact?.continueSteps,
+    lastAction: typeof compact?.lastAction === "string" ? compact.lastAction.slice(0, 400) : undefined,
+    lastRole: compact?.lastRole || "",
+    requestBodyCapture: compact?.requestBodyCapture || null
   };
-  const fallback = JSON.stringify(envelope);
-  return fallback.length <= max ? fallback : JSON.stringify({ truncated: true, streamDiagnostics: compact?.streamDiagnostics || null });
+  let fallback = JSON.stringify(envelope);
+  if (fallback.length <= max) return fallback;
+  // 仍超限：只留工具名 + 关键轮次元数据
+  const minimal = {
+    truncated: true,
+    protocol: envelope.protocol,
+    modelId: envelope.modelId,
+    providerId: envelope.providerId,
+    toolCount: envelope.toolCount,
+    tools: compactToolsForEnvelope(tools, 40),
+    messages: messages
+      ? {
+        roleCounts: messages.roleCounts || {},
+        skills: Array.isArray(messages.skills) ? messages.skills.slice(0, 20) : [],
+        latestUser: messages.latestUser || null,
+        system: Array.isArray(messages.system) ? compactMessageList(messages.system, 1, { textMax: 200, latestTextMax: 200 }) : [],
+        user: Array.isArray(messages.user) ? compactMessageList(messages.user, 1, { latestTextMax: 800 }) : []
+      }
+      : null,
+    turnPhase: envelope.turnPhase,
+    continuation: envelope.continuation,
+    lastAction: envelope.lastAction,
+    streamDiagnostics: envelope.streamDiagnostics || null,
+    requestBodyCapture: envelope.requestBodyCapture || null
+  };
+  fallback = JSON.stringify(minimal);
+  return fallback.length <= max ? fallback : JSON.stringify({
+    truncated: true,
+    toolCount: envelope.toolCount,
+    tools: compactToolsForEnvelope(tools, 20),
+    streamDiagnostics: compact?.streamDiagnostics || null
+  });
 }
 
 function retainDaysValue(value = process.env.SWITCHYARD_REQUEST_LOG_RETAIN_DAYS) { const parsed = Number(value ?? DEFAULT_RETAIN_DAYS); return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : DEFAULT_RETAIN_DAYS; }
@@ -221,6 +319,7 @@ export function initRequestLogStore() {
       response_preview TEXT,
       request_summary TEXT,
       response_summary TEXT,
+      request_body_ref TEXT,
       error TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_request_logs_ts ON request_logs(ts);
@@ -240,6 +339,7 @@ function ensureRequestLogColumns() {
     ["response_preview", "TEXT"],
     ["request_summary", "TEXT"],
     ["response_summary", "TEXT"],
+    ["request_body_ref", "TEXT"],
     ["cache_read_tokens", "INTEGER DEFAULT 0"],
     ["cache_creation_tokens", "INTEGER DEFAULT 0"]
   ]) {
@@ -280,10 +380,17 @@ function sanitizeEvent(entry) {
     total_tokens: intValue(entry.totalTokens),
     cache_read_tokens: intValue(entry.cacheReadTokens ?? entry.cache_read_tokens),
     cache_creation_tokens: intValue(entry.cacheCreationTokens ?? entry.cache_creation_tokens),
-    prompt_preview: entry.promptPreview ? String(entry.promptPreview).slice(0, (Number(entry.status) >= 400 ? 800 : 300)) : null,
-    response_preview: entry.responsePreview ? String(entry.responsePreview).slice(0, (Number(entry.status) >= 400 ? 1200 : 500)) : null,
+    prompt_preview: entry.promptPreview
+      ? compactMessageText(String(entry.promptPreview), Number(entry.status) >= 400 ? 800 : 500)
+      : null,
+    response_preview: entry.responsePreview
+      ? compactMessageText(String(entry.responsePreview), Number(entry.status) >= 400 ? 1200 : 600)
+      : null,
     request_summary: jsonSummary(entry.requestSummary),
     response_summary: jsonSummary(entry.responseSummary),
+    request_body_ref: entry.requestBodyRef || entry.request_body_ref
+      || entry.requestSummary?.requestBodyCapture?.ref
+      || null,
     error: entry.error ? String(entry.error).slice(0, 500) : null
   };
 }
@@ -457,21 +564,26 @@ export function usageByAgentModel(filters = {}) {
 
 export function usageDaily(filters = {}) {
   initRequestLogStore();
-  const limit = Math.min(Math.max(intValue(filters.limit) || 30, 1), 366);
+  const groupBy = String(filters.groupBy || "day") === "hour" ? "hour" : "day";
+  // hour 时 limit 表示小时桶数；day 时表示天数。乘以 client×model 展开上限。
+  const limit = Math.min(Math.max(intValue(filters.limit) || 30, 1), groupBy === "hour" ? 168 : 400);
   const modelKey = usageModelKeySql();
+  const bucketExpr = groupBy === "hour"
+    ? `strftime('%Y-%m-%dT%H:00', ts, 'localtime')`
+    : `date(ts, 'localtime')`;
   const rows = runSql(`
     SELECT
-      date(ts, 'localtime') AS day,
+      ${bucketExpr} AS day,
       COALESCE(client_id, '(unknown)') AS client_id,
       ${modelKey} AS model_id,
       ${usageSelectMetrics()}
     FROM request_logs
     ${whereClause(filters)}
-    GROUP BY date(ts, 'localtime'), COALESCE(client_id, '(unknown)'), ${modelKey}
+    GROUP BY ${bucketExpr}, COALESCE(client_id, '(unknown)'), ${modelKey}
     ORDER BY day DESC, request_count DESC, total_tokens DESC
-    LIMIT ${limit * 200};
+    LIMIT ${limit * 300};
   `, { json: true });
-  return (rows || []).map(enrichUsageStatsRow).slice(0, limit * 200);
+  return (rows || []).map(enrichUsageStatsRow).slice(0, limit * 300);
 }
 
 export function cleanupRequestLogs({ retainDays = retainDaysValue(), maxRows = maxRowsValue(), maxBytes = maxBytesValue(), now = new Date() } = {}) {
