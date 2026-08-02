@@ -860,7 +860,8 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
       state: summary.terminalState,
       reason: summary.terminalReason || ""
     } : null,
-    streamDiagnostics: summary || null,
+    // diagnostics 只留计数/状态，不回写原文采样（避免敏感内容进 requestSummary.streamDiagnostics）
+    streamDiagnostics: sanitizeStreamDiagnostics(summary),
     streamEventSummary: {
       textDeltaCount,
       textDoneCount,
@@ -874,10 +875,19 @@ function responseSummaryFromStreamDiagnostics(summary, { status = 0, error = "" 
   };
 }
 
+function sanitizeStreamDiagnostics(summary) {
+  if (!summary || typeof summary !== "object") return summary || null;
+  const { textSample, ...safe } = summary;
+  return {
+    ...safe,
+    textSampleChars: typeof textSample === "string" ? textSample.length : 0
+  };
+}
+
 function recordStreamDiagnostics(record, summary, { status = 0, error = "" } = {}) {
   if (!record || !summary) return;
   if (!record.requestSummary) record.requestSummary = {};
-  record.requestSummary.streamDiagnostics = summary;
+  record.requestSummary.streamDiagnostics = sanitizeStreamDiagnostics(summary);
   // 把流式解析到的 usage 落到 requestRecord 顶层，request_logs 入库才能汇总 Token
   if (summary.usage) applyUsageToRequestRecord(record, summary.usage);
   record.responseSummary = responseSummaryFromStreamDiagnostics(summary, { status, error: error || record.error || "" });
@@ -1569,6 +1579,7 @@ function publicStreamDiagnostics(diag, extra = {}) {
   if (!diag) return null;
   const sawTerminalEvent = Boolean(extra.sawTerminalEvent ?? diag.sawTerminalEvent);
   const terminalState = extra.terminalState || (sawTerminalEvent ? "completed" : "incomplete");
+  // textSample 仅供组装 responseSummary.text；写入日志前会经 sanitizeStreamDiagnostics 剥离
   return {
     protocol: diag.protocol,
     chunkCount: diag.chunkCount,
