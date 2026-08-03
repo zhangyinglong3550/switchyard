@@ -1044,6 +1044,11 @@
           </label>
           <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="默认 3"></label>
         </div>
+        <div class="row">
+          <label>空流首段重试次数 <input class="field" name="streamCompatAttempts" type="number" min="0" max="10" placeholder="继承 / 默认 1"></label>
+          <label>重试退避（ms，逗号分隔） <input class="field" name="streamCompatBackoff" placeholder="250, 750, 1500"></label>
+        </div>
+        <div class="tiny muted">上游在写出任何内容前就返回空流（200 + 空 SSE + EOF）时，网关内部按此次数与退避重试，成功后再回给 Agent，避免客户端反复重连。填 0 表示关闭空流重试；留空表示使用默认（1 次、无退避）。</div>
       </details>
       <label>高级：路由策略
         <select class="field" name="routingMode">
@@ -1372,6 +1377,11 @@
           </label>
           <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="继承供应商 / 默认 3"></label>
         </div>
+        <div class="row">
+          <label>空流首段重试次数 <input class="field" name="streamCompatAttempts" type="number" min="0" max="10" placeholder="继承供应商 / 默认 1"></label>
+          <label>重试退避（ms，逗号分隔） <input class="field" name="streamCompatBackoff" placeholder="250, 750, 1500"></label>
+        </div>
+        <div class="tiny muted">上游在写出任何内容前就返回空流（200 + 空 SSE + EOF）时，网关内部按此次数与退避重试，成功后再回给 Agent，避免客户端反复重连。填 0 表示关闭空流重试；留空表示继承供应商 / 默认（1 次、无退避）。</div>
       </details>
       <div class="callout compact">
         <div class="callout-title">可见 Agent</div>

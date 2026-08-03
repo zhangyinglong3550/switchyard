@@ -2628,12 +2628,41 @@ function fillRetryFormFields(form, retry) {
   max.value = r.maxAttempts || "";
 }
 
+/** 从表单字段解析“空流首段重试”（streamCompat）配置（供应商 / 模型共用字段名） */
+function collectStreamCompatFromRaw(raw) {
+  const attemptsRaw = String(raw.streamCompatAttempts || "").trim();
+  const backoffRaw = String(raw.streamCompatBackoff || "").trim();
+  if (!attemptsRaw && !backoffRaw) return undefined;
+  const out = {};
+  if (attemptsRaw) {
+    const n = Math.min(10, Math.max(0, Math.floor(Number(attemptsRaw) || 0)));
+    if (n === 0) out.retryPreludeOnEof = false;
+    else out.preludeRetryAttempts = n;
+  }
+  if (backoffRaw) {
+    const arr = backoffRaw.split(",").map((s) => Number(String(s).trim())).filter((n) => Number.isFinite(n) && n >= 0);
+    if (arr.length) out.preludeRetryBackoffMs = arr;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function fillStreamCompatFormFields(form, streamCompat) {
+  if (!form) return;
+  const attempts = form.querySelector('[name="streamCompatAttempts"]');
+  const backoff = form.querySelector('[name="streamCompatBackoff"]');
+  if (!attempts || !backoff) return;
+  const sc = streamCompat || {};
+  attempts.value = sc.retryPreludeOnEof === false ? "0" : (sc.preludeRetryAttempts != null ? String(sc.preludeRetryAttempts) : "");
+  backoff.value = Array.isArray(sc.preludeRetryBackoffMs) ? sc.preludeRetryBackoffMs.join(", ") : "";
+}
+
 function collectProviderForm() {
   const form = document.getElementById("provider-form");
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
   const authMode = raw.authMode || "api_key";
   const retry = collectRetryFromRaw(raw);
+  const streamCompat = collectStreamCompatFromRaw(raw);
   const data = {
     id: raw.id?.trim(),
     name: raw.name?.trim(),
@@ -2644,6 +2673,7 @@ function collectProviderForm() {
     proxyUrl: raw.proxyUrl?.trim() || undefined,
     routingMode: raw.routingMode || "auto",
     ...(retry ? { retry } : {}),
+    ...(streamCompat ? { streamCompat } : { streamCompat: undefined }),
     allowedClients: collectClientScopeOptions("provider-visible-clients"),
     apiKeyEnv: raw.apiKeyEnv?.trim(),
     apiKey: raw.apiKey?.trim(),
@@ -2881,6 +2911,7 @@ function openProviderDialog(editId) {
     const cursorEnabled = document.getElementById("provider-cursor-subscription-enabled");
     if (cursorEnabled) cursorEnabled.checked = existing.providerType === "cursor_subscription" ? existing.enabled !== false : false;
     fillRetryFormFields(form, existing.retry);
+    fillStreamCompatFormFields(form, existing.streamCompat);
     renderAuthModeOptions(providerPresetById(existing.presetId), existing.authMode || "api_key");
     if (existing.poolKind) {
       const kindInput = document.getElementById("provider-pool-kind");
@@ -2923,6 +2954,7 @@ function openProviderDialog(editId) {
     const idNoteNew = document.getElementById("provider-id-rename-note");
     if (idNoteNew) idNoteNew.style.display = "none";
     fillRetryFormFields(form, null);
+    fillStreamCompatFormFields(form, null);
     renderAuthModeOptions(null, "api_key");
     syncProviderRiskNote(null);
     renderClientScopeOptions("provider-visible-clients", ["*"]);
@@ -3483,6 +3515,7 @@ function openModelDialog(editId) {
     form.querySelector('[name="visionFallbackModelId"]').value = existing.visionFallbackModelId || "";
     form.querySelector('[name="proxyUrl"]').value = existing.proxyUrl || "";
     fillRetryFormFields(form, existing.retry);
+    fillStreamCompatFormFields(form, existing.streamCompat);
     renderClientScopeOptions("model-visible-clients", existing.allowedClients || ["*"]);
     if (existing.capabilities) {
       form.querySelector('[name="cap-text"]').checked = !!existing.capabilities.text;
@@ -3500,6 +3533,7 @@ function openModelDialog(editId) {
   } else {
     renderClientScopeOptions("model-visible-clients", ["*"]);
     fillRetryFormFields(form, null);
+    fillStreamCompatFormFields(form, null);
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
     form.querySelector('[name="cap-reasoning"]').checked = false;
@@ -3519,6 +3553,7 @@ function collectModelForm() {
   const fd = new FormData(form);
   const raw = Object.fromEntries(fd.entries());
   const retry = collectRetryFromRaw(raw);
+  const streamCompat = collectStreamCompatFromRaw(raw);
   const priceInput = Number(raw.priceInput);
   const priceOutput = Number(raw.priceOutput);
   const pricing = (Number.isFinite(priceInput) && priceInput > 0) || (Number.isFinite(priceOutput) && priceOutput > 0)
@@ -3535,6 +3570,7 @@ function collectModelForm() {
     visionFallbackModelId: String(raw.visionFallbackModelId || "").trim() || undefined,
     proxyUrl: String(raw.proxyUrl || "").trim() || undefined,
     ...(retry ? { retry } : {}),
+    ...(streamCompat ? { streamCompat } : { streamCompat: undefined }),
     ...(pricing ? { pricing } : {}),
     allowedClients: collectClientScopeOptions("model-visible-clients"),
     agentScopeOverride: true,

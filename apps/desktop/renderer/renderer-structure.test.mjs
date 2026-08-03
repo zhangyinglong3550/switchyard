@@ -32,6 +32,19 @@ test('clients tab lists OpenCode and Grok with stable card order', () => {
   assert.match(js, /grok: \{ label: "Grok Build"/);
 });
 
+test('retry sections expose empty-stream retry (streamCompat) fields on both forms', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  assert.match(html, /name="streamCompatAttempts"/);
+  assert.match(html, /name="streamCompatBackoff"/);
+  assert.match(js, /function collectStreamCompatFromRaw\(raw\)/);
+  assert.match(js, /function fillStreamCompatFormFields\(form, streamCompat\)/);
+  assert.match(js, /preludeRetryAttempts/);
+  assert.match(js, /preludeRetryBackoffMs/);
+  assert.match(js, /retryPreludeOnEof/);
+  assert.match(js, /fillStreamCompatFormFields\(form, existing\.streamCompat\)/);
+});
+
 test('main flow has actionable setup and guarded gateway/provider saves', () => {
   const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
