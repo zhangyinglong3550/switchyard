@@ -207,11 +207,11 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.doesNotMatch(html, /id="voice-control"/);
   assert.match(html, /id="message-action-sheet"/);
   {
-    const notificationHelper = fs.readFileSync(path.resolve("apps/android/app/src/main/java/com/zhangyinglong/switchyard/notify/NotificationHelper.kt"), "utf8");
+    const androidSource = fs.readFileSync(path.resolve("apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
     const androidManifest = fs.readFileSync(path.resolve("apps/android/app/src/main/AndroidManifest.xml"), "utf8");
-    assert.match(notificationHelper, /fun notifyApproval\(/);
-    assert.match(notificationHelper, /fun notifyStatus\(/);
-    assert.match(notificationHelper, /fun ensureChannels\(/);
+    assert.match(androidSource, /shareText\(/);
+    assert.match(androidSource, /copyText\(/);
+    assert.match(androidSource, /showNotification\(/);
     assert.match(androidManifest, /android\.intent\.action\.SEND/);
   }
   assert.match(css, /\.composer \.runtime-shortcut\{[^}]*display:flex/);

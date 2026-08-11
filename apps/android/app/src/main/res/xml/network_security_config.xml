@@ -6,8 +6,4 @@
       <certificates src="system" />
     </trust-anchors>
   </base-config>
-  <!-- Android 模拟器访问宿主机 daemon 用 10.0.2.2（仅本机回环，非公网） -->
-  <domain-config cleartextTrafficPermitted="true">
-    <domain includeSubdomains="false">10.0.2.2</domain>
-  </domain-config>
 </network-security-config>
