@@ -18,15 +18,28 @@ function isValidOpenAiChatChunk(payload) {
   return Array.isArray(payload.choices);
 }
 
+// 提取 `data:` 后的 payload。兼容 `data: {...}`（带空格）与上游（如 KE 聚合商
+// 的 deepseek）返回的 `data:{...}`（不带空格）。不带空格时旧实现会把整行
+// （含 `data:` 前缀）当作 JSON 解析而失败，导致合法的 OpenAI chunk 被误吞成空流。
+function sseDataPayload(line) {
+  if (typeof line !== "string" || !line.startsWith("data:")) return null;
+  let rest = line.slice(5);
+  if (rest.startsWith(" ")) rest = rest.slice(1);
+  return rest;
+}
+
 function sanitizeStreamLine(line) {
-  const data = line.startsWith("data: ") ? line.slice(6) : line;
-  if (!data) return line;
+  const data = sseDataPayload(line);
+  // 非 `data:` 事件（注释 / ping / 空行）不属于 OpenAI chunk，原样透传，
+  // 避免把合法内容当自定义事件吞掉。
+  if (data == null) return line;
+  if (data === "") return line;
   if (data === "[DONE]") return line;
   let parsed;
   try {
     parsed = JSON.parse(data);
   } catch {
-    // 非 JSON 行（注释 / ping / 自定义事件）对 Grok 也没意义，直接吞掉。
+    // `data:` 但不是合法 JSON —— 这类行对 Grok 没意义，直接吞掉。
     return null;
   }
   if (!isValidOpenAiChatChunk(parsed)) return null;

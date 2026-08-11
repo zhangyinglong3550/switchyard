@@ -156,6 +156,9 @@ export function normalizeChatgptCodexResponsesBody(body) {
   next.input = next.input.map((item) => {
     if (!item || typeof item !== "object") return item;
     if (item.type === "reasoning" || item.type === "function_call" || item.type === "function_call_output") return item;
+    // ChatGPT Codex 后端不接受 Responses input 里的 system 角色，只接受 developer。
+    // Grok 等客户端会带 role: system，原生透传会被上游 400 拒绝（System messages are not allowed）。
+    if (item.role === "system") return { ...item, role: "developer" };
     const content = Array.isArray(item.content) ? item.content : [];
     const hasAssistantOutputContent = content.some((part) => (
       part &&

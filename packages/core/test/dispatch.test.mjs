@@ -1,4 +1,7 @@
 import { test } from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { dispatchChat, dispatchResponses, stripConflictingImageGenTools } from "../src/upstream/dispatch.mjs";
@@ -1159,4 +1162,57 @@ test("dispatchResponses → strips all conflicting image tools (any provider)", 
     received.tools.map((t) => t.name || t.type),
     ["shell"]
   );
+});
+
+test("dispatchChat captures the outbound request body including injected fields", async (t) => {
+  resetPatches();
+  registerBuiltinPatches();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-outbound-capture-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const up = await spawnUpstream((req, res, body) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x", object: "chat.completion", model: "claude-opus-4-8",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 }
+    }));
+  });
+  t.after(() => close(up));
+  const provider = {
+    id: "ke", presetId: "ke", apiFormat: "openai_chat",
+    baseUrl: `http://127.0.0.1:${up.address().port}/v1`,
+    keUserId: "1000000026034041"
+  };
+  const result = await dispatchChat(provider, "claude-opus-4-8", {
+    messages: [{ role: "user", content: "go" }]
+  }, {
+    requestBodyCapture: { enabled: true },
+    requestBodyCaptureBaseLogDir: tmp,
+    model: { id: "ke/claude-opus-4-8", providerId: "ke", upstreamModel: "claude-opus-4-8" }
+  });
+  assert.equal(result.kind, "json");
+  assert.ok(result.outboundRequestBodyRef, "outbound body ref should be attached");
+  const payload = JSON.parse(fs.readFileSync(
+    path.join(tmp, "request-bodies", `${result.outboundRequestBodyRef}.json`), "utf8"
+  ));
+  assert.equal(payload.body.user, "1000000026034041", "injected SSO system id present in captured outbound body");
+  assert.equal(payload.body.model, "claude-opus-4-8");
+});
+
+test("dispatchChat does not capture outbound body when disabled", async (t) => {
+  resetPatches();
+  const up = await spawnUpstream((req, res, body) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x", object: "chat.completion", model: "u-model",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "ke", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1`, keUserId: "u1" };
+  const result = await dispatchChat(provider, "u-model", { messages: [{ role: "user", content: "go" }] }, {
+    model: { id: "ke/u-model", providerId: "ke" }
+  });
+  assert.equal(result.kind, "json");
+  assert.equal(result.outboundRequestBodyRef, undefined);
 });

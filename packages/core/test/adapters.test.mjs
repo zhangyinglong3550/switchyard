@@ -149,6 +149,18 @@ test("Anthropic thinking history survives Chat to Codex Responses conversion", (
   assert.equal(responses.input[1].call_id, "toolu_1");
 });
 
+test("normalizeChatgptCodexResponsesBody maps system role to developer for Codex backend", () => {
+  const normalized = normalizeChatgptCodexResponsesBody({
+    input: [
+      { type: "message", role: "system", content: [{ type: "input_text", text: "You are Grok" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }
+    ]
+  });
+  assert.equal(normalized.input[0].role, "developer");
+  assert.equal(normalized.input[0].content[0].text, "You are Grok");
+  assert.equal(normalized.input[1].role, "user");
+});
+
 test("normalizeChatgptCodexResponsesBody preserves reasoning items and requests encrypted reasoning", () => {
   const normalized = normalizeChatgptCodexResponsesBody({
     input: [

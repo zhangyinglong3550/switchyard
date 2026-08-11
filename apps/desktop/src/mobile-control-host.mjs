@@ -130,6 +130,27 @@ export async function startMobileControl({
 } = {}) {
   if (instance?.server) return mobileControlStatus();
   if (startPromise) return startPromise;
+  // 复用外部 Session-Core daemon：如果目标端口已有独立 daemon（status 端点通），
+  // 不再启动进程内服务。避免两个实例各自 spawn grok ACP，触发 grok 的
+  // active_sessions 单实例锁冲突（表现为手机续聊写错会话 / CPU 风暴）。
+  try {
+    const probe = await fetch(`http://127.0.0.1:${port}/mobile/v1/status`, { signal: AbortSignal.timeout(1500) });
+    if (probe.ok) {
+      const external = await probe.json();
+      if (external?.ok) {
+        console.error(`[mobile-control-host] 复用外部 Session-Core daemon（port ${port}），跳过进程内实例。`);
+        return {
+          running: true,
+          host: DEFAULT_HOST,
+          port,
+          url: `http://127.0.0.1:${port}`,
+          configuredPort: port,
+          root: mobileRoot(),
+          external: true
+        };
+      }
+    }
+  } catch {}
   startPromise = (async () => {
     if (host !== DEFAULT_HOST) {
       throw new Error("移动控制服务仅允许监听 127.0.0.1");

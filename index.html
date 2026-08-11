@@ -1,0 +1,1495 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Switchyard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div class="screen app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-header toolbar" style="padding:6px 8px; gap:8px; border:none; background:transparent; flex-wrap:wrap;">
+      <span class="brand"><span class="logo">SY</span><span>Switchyard</span></span>
+      <label class="ui-density-toggle" title="关闭=简化版（仅总览/供应商/模型/客户端）；打开=详细版（全部功能）">
+        <input type="checkbox" id="ui-density-detailed" />
+        <span class="ui-density-slider" aria-hidden="true"></span>
+        <span class="ui-density-label" id="ui-density-label">简化</span>
+      </label>
+    </div>
+    <div class="sidebar-scroll">
+      <div>
+        <div class="group-title">工作区</div>
+        <nav class="nav" id="primary-nav">
+          <a data-tab="overview" data-nav-tier="core" class="active"><span class="icon-square">⌂</span>总览</a>
+          <a data-tab="providers" data-nav-tier="core"><span class="icon-square">⇄</span>供应商 <span class="badge" id="nav-providers-count">0</span></a>
+          <a data-tab="models" data-nav-tier="core"><span class="icon-square">▤</span>模型 <span class="badge" id="nav-models-count">0</span></a>
+          <a data-tab="clients" data-nav-tier="core"><span class="icon-square">◉</span>客户端</a>
+          <a data-tab="diagnostics" data-nav-tier="detailed"><span class="icon-square">◎</span>诊断中心</a>
+          <a data-tab="sensitive" data-nav-tier="detailed"><span class="icon-square">⊘</span>敏感信息</a>
+        </nav>
+      </div>
+      <div id="tools-nav-block" data-nav-tier="detailed">
+        <div class="group-title">工具</div>
+        <nav class="nav" id="tools-nav">
+          <a data-tab="usage" data-nav-tier="detailed"><span class="icon-square">▥</span>用量</a>
+          <a data-tab="traces" data-nav-tier="detailed"><span class="icon-square">⌁</span>请求日志</a>
+          <a data-tab="skills" data-nav-tier="detailed"><span class="icon-square">✎</span>Skills</a>
+          <a data-tab="mobile-control" data-nav-tier="detailed"><span class="icon-square">▣</span>手机控制</a>
+          <a data-tab="settings" data-nav-tier="detailed"><span class="icon-square">⚙</span>偏好设置</a>
+        </nav>
+      </div>
+    </div>
+    <div class="sidebar-footer">
+      <div class="group-title">服务</div>
+      <div class="sidebar-service-card">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <span class="status-pill stopped" id="service-pill"><span class="dot"></span><span id="service-state">未启动</span></span>
+          <span class="tiny muted" id="service-port">-</span>
+        </div>
+        <div class="tiny muted mono" style="margin-top:6px;" id="service-endpoint">-</div>
+        <div style="display:flex; gap:4px; margin-top:8px;">
+          <button class="btn" id="btn-start" style="flex:1; justify-content:center;">启动</button>
+          <button class="btn" id="btn-stop" style="flex:1; justify-content:center;">停止</button>
+          <button class="btn" id="btn-restart" style="flex:1; justify-content:center;">重启</button>
+        </div>
+      </div>
+      <div id="version-bar" class="sidebar-version-bar">
+        <span class="tiny muted" id="app-version">v-</span>
+        <button id="btn-update" class="btn primary" style="display:none; font-size:11px; padding:2px 8px;">⬆ 更新</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="app-main">
+    <!-- Overview -->
+    <section class="tab-panel active" id="panel-overview">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div class="page-title">总览</div>
+          <div class="tiny muted" id="overview-subtitle">本机 LLM 控制台</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-reload">重载配置</button>
+        <button class="btn" id="btn-open-logs">打开日志目录</button>
+        <button class="btn" id="btn-import">从 cc-switch 导入…</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>服务状态</h3><span class="sub" id="overview-uptime">-</span></div>
+            <div class="bd">
+              <dl class="kv">
+                <dt>运行</dt><dd id="ov-running">未启动</dd>
+                <dt>监听</dt><dd class="mono" id="ov-endpoint">-</dd>
+                <dt>配置文件</dt><dd class="mono" id="ov-config">-</dd>
+                <dt>供应商数</dt><dd id="ov-providers">0</dd>
+                <dt>模型数</dt><dd id="ov-models">0</dd>
+              </dl>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>客户端接入</h3><span class="sub">点击复制</span></div>
+            <div class="bd" id="ov-endpoints"></div>
+          </div>
+        </div>
+        <div class="card setup-card" id="overview-setup-card">
+          <div class="hd"><h3>配置进度</h3><span class="sub" id="overview-setup-summary">-</span></div>
+          <div class="bd">
+            <div class="setup-progress" id="overview-setup-progress"></div>
+            <div class="setup-next-step" id="overview-next-step"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>自检</h3><button class="btn" id="btn-doctor">运行自检</button></div>
+          <div class="bd"><pre class="log-pane" id="doctor-output" style="background:#0f1014; min-height:140px;"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Providers -->
+    <section class="tab-panel" id="panel-providers">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div class="page-title">供应商</div>
+          <div class="tiny muted" id="providers-subtitle">-</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-provider-import">从 cc-switch 导入…</button>
+        <button class="btn" id="btn-provider-export-bundle">导出配置…</button>
+        <button class="btn" id="btn-provider-import-bundle">导入配置…</button>
+        <button class="btn primary" id="btn-provider-add">+ 新增供应商</button>
+      </div>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="table-scroll tall">
+            <table class="data" id="providers-table">
+              <thead><tr><th data-col-width="120">标识</th><th data-col-width="120">名称</th><th data-col-width="180">协议</th><th data-col-width="280">Base URL</th><th data-col-width="120">API Key</th><th data-col-width="160">余额/用量</th><th data-col-width="72">模型数</th><th data-col-width="100"></th></tr></thead>
+              <tbody id="providers-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Models -->
+    <section class="tab-panel" id="panel-models">
+      <div class="toolbar">
+        <div style="display:flex; flex-direction:column; gap:2px;">
+          <div class="page-title">模型</div>
+          <div class="tiny muted" id="models-subtitle">-</div>
+        </div>
+        <div style="flex:1;"></div>
+        <input class="field" id="models-search" placeholder="搜索模型 id / 别名 / 上游名…" style="min-width:260px;">
+        <button class="btn primary" id="btn-model-add">+ 新增模型</button>
+      </div>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="table-scroll tall">
+            <table class="data" id="models-table">
+              <thead><tr><th data-col-width="220">模型 ID</th><th data-col-width="120">供应商</th><th data-col-width="200">上游</th><th data-col-width="160">别名</th><th data-col-width="100"></th></tr></thead>
+              <tbody id="models-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clients -->
+    <section class="tab-panel" id="panel-clients">
+      <div class="toolbar">
+        <div class="page-title">客户端</div>
+        <div class="tiny muted">一键写入 / 恢复 Codex、Claude Code、Hermes、OpenCode、Grok Build 配置；每次写入自动备份原文件</div>
+        <div style="flex:1;"></div>
+      </div>
+      <div class="page-scroll">
+        <div class="grid two" id="clients-grid"></div>
+      </div>
+    </section>
+
+    <!-- Diagnostics -->
+    <section class="tab-panel" id="panel-diagnostics">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">诊断中心</div>
+          <div class="tiny muted">提供启发式定位：模型不可用、客户端配置漂移、能力声明不准和失败请求草稿</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-provider-health-refresh">刷新健康/余额</button>
+        <button class="btn primary" id="btn-diagnostics-run">运行诊断</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="grid three" id="diagnostics-client-grid"></div>
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>供应商诊断</h3><span class="sub" id="diagnostics-provider-summary">启发式建议</span></div>
+            <div class="bd diagnostics-list" id="diagnostics-providers"></div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>最近失败</h3><span class="sub" id="diagnostics-error-summary">草稿回放</span></div>
+            <div class="bd diagnostics-list" id="diagnostics-errors"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>模型能力校准</h3><span class="sub" id="diagnostics-model-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact" id="diagnostics-models-table">
+              <thead><tr><th data-col-width="200">模型</th><th data-col-width="120">供应商</th><th data-col-width="180">能力</th><th data-col-width="120">客户端可见</th><th data-col-width="100"></th></tr></thead>
+              <tbody id="diagnostics-models-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>探针结果</h3><span class="sub">探针是启发式建议，确认后才写配置</span><button class="btn primary" id="btn-diagnostics-apply-capabilities" style="display:none;">应用到模型配置</button></div>
+          <div class="bd"><pre class="log-pane xlarge" id="diagnostics-output"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sensitive Guard -->
+    <section class="tab-panel" id="panel-sensitive">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">敏感信息</div>
+          <div class="tiny muted">出站脱敏、组织词表、规则测试与发送审计（默认记录完整命中原文）</div>
+        </div>
+        <div style="flex:1;"></div>
+        <span class="sub" id="sensitive-audit-summary">含原文</span>
+        <button class="btn" type="button" id="btn-sensitive-audit-refresh">刷新审计</button>
+        <button class="btn" type="button" id="btn-sensitive-audit-clear">清空审计</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>过滤规则</h3><span class="sub">发送前脱敏 · 不拦截请求</span></div>
+          <div class="bd page-stack" style="gap:16px;">
+            <div class="callout compact">审计默认记录<strong>完整命中原文</strong>（本机 <code>~/.switchyard/logs/sensitive-audit.jsonl</code>，权限 0600）。清空前请勿分享该文件。</div>
+
+            <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="checkbox" id="sensitive-guard-enabled">
+              <span>
+                <strong>发送前脱敏敏感信息</strong>
+                <div class="tiny muted">识别手机号、身份证、银行卡、邮箱、常见 API Key / Token、内网 IP 等，替换为占位符后再发给上游（含 Cursor 订阅）。</div>
+              </span>
+            </label>
+            <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="checkbox" id="sensitive-guard-audit-original" checked>
+              <span>
+                <strong>审计记录完整原文</strong>
+                <div class="tiny muted">关闭后只记类型与次数；开启后可在下方表格直接看到发出/命中过的敏感串。</div>
+              </span>
+            </label>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:8px;">按客户端开关（勾选即保存；关闭后该客户端出站不再脱敏，但仍会审计命中原文）</div>
+              <div id="sensitive-guard-clients" class="row" style="flex-wrap:wrap; gap:10px 16px;"></div>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:8px;">内置规则开关（勾选即保存；排查网络时可关掉「内网 IP」）</div>
+              <div id="sensitive-guard-builtin-rules" class="row" style="flex-wrap:wrap; gap:10px 16px;"></div>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">组织词表（每行一条，子串匹配）</div>
+              <textarea class="field" id="sensitive-guard-keywords" rows="3" placeholder="例如：内部项目代号&#10;机密代号"></textarea>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">自定义正则（JSON 数组：id / label / pattern / flags / type）</div>
+              <textarea class="field mono" id="sensitive-guard-patterns" rows="3" placeholder='[{"id":"ticket","label":"工单号","pattern":"TKT-\\\\d{6,}","flags":"g","type":"ticket"}]'></textarea>
+            </div>
+
+            <div>
+              <div class="tiny muted" style="margin-bottom:6px;">白名单（只填额外项；内置含 13800138000、example.com、TEST_ 等）</div>
+              <div class="row" style="gap:10px; align-items:stretch;">
+                <label style="flex:1;">手机号
+                  <textarea class="field" id="sensitive-guard-wl-phones" rows="2" placeholder="13800138000"></textarea>
+                </label>
+                <label style="flex:1;">邮箱
+                  <textarea class="field" id="sensitive-guard-wl-emails" rows="2" placeholder="test@example.com"></textarea>
+                </label>
+              </div>
+              <div class="row" style="gap:10px; align-items:stretch; margin-top:8px;">
+                <label style="flex:1;">邮箱域名
+                  <textarea class="field" id="sensitive-guard-wl-domains" rows="2" placeholder="example.com"></textarea>
+                </label>
+                <label style="flex:1;">子串
+                  <textarea class="field" id="sensitive-guard-wl-substrings" rows="2" placeholder="TEST_"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="btn primary" type="button" id="btn-sensitive-guard-save">保存词表 / 白名单 / 正则</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid two">
+          <div class="card">
+            <div class="hd"><h3>规则测试箱</h3><span class="sub">只预览，不写审计</span></div>
+            <div class="bd page-stack" style="gap:10px;">
+              <textarea class="field" id="sensitive-guard-preview-input" rows="4" placeholder="粘贴一段文本，预览脱敏结果…"></textarea>
+              <div class="actions">
+                <button class="btn" type="button" id="btn-sensitive-guard-preview">预览脱敏</button>
+                <span class="tiny muted" id="sensitive-guard-preview-summary"></span>
+              </div>
+              <pre class="mono tiny" id="sensitive-guard-preview-output" style="white-space:pre-wrap; max-height:180px; overflow:auto;"></pre>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>会话放行</h3><span class="sub">内存有效，重启清空</span></div>
+            <div class="bd page-stack" style="gap:10px;">
+              <div class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                <label>客户端
+                  <select class="field" id="sensitive-guard-bypass-client">
+                    <option value="*">全部</option>
+                    <option value="codex">Codex</option>
+                    <option value="claude-code">Claude Code</option>
+                    <option value="hermes">Hermes</option>
+                    <option value="opencode">OpenCode</option>
+                    <option value="grok">Grok</option>
+                    <option value="generic-openai">Generic OpenAI</option>
+                  </select>
+                </label>
+                <label style="flex:1; min-width:160px;">会话 / Thread ID
+                  <input class="field" id="sensitive-guard-bypass-session" placeholder="x-codex-thread-id 或 conversation_id">
+                </label>
+                <label>分钟
+                  <input class="field" id="sensitive-guard-bypass-minutes" type="number" min="1" max="1440" value="30" style="width:88px;">
+                </label>
+              </div>
+              <div class="actions">
+                <button class="btn" type="button" id="btn-sensitive-guard-bypass-allow">放行</button>
+                <button class="btn" type="button" id="btn-sensitive-guard-bypass-refresh">刷新</button>
+              </div>
+              <ul class="tiny muted" id="sensitive-guard-bypass-list" style="margin:0; padding-left:18px;"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><h3>发送审计</h3><span class="sub">原文 + 出站预览</span></div>
+          <div class="bd">
+            <div class="tiny muted" style="margin-bottom:8px;">「原文」是命中串；「出站预览」是实际发给上游的片段。会话/调用可视化仍显示进站明文，请以出站预览为准。</div>
+            <div class="table-scroll tall">
+              <table class="data compact" id="sensitive-audit-table">
+                <thead><tr><th>时间</th><th>客户端</th><th>模型</th><th>动作</th><th>命中</th><th>原文</th><th>出站预览</th></tr></thead>
+                <tbody id="sensitive-audit-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Test Console -->
+    <section class="tab-panel" id="panel-test">
+      <div class="toolbar">
+        <div class="page-title">测试台</div>
+        <div class="tiny muted">验证 Agent、协议、模型、流式和视觉兜底是否真的可用</div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-test-run">发送</button>
+        <button class="btn" id="btn-test-batch">批量验证</button>
+        <button class="btn" id="btn-test-vision">视觉兜底</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card test-request-card">
+          <div class="hd"><h3>请求</h3></div>
+          <div class="bd">
+            <div class="row">
+              <label>Agent
+                <select class="field" id="test-agent">
+                  <option value="generic-openai">通用 OpenAI</option>
+                  <option value="codex">Codex</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
+</select>
+              </label>
+              <label>协议
+                <select class="field" id="test-protocol">
+                  <option value="openai_chat">OpenAI Chat</option>
+                  <option value="openai_responses">OpenAI Responses</option>
+                  <option value="anthropic_messages">Anthropic Messages</option>
+                  <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
+          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <label>模型 <select class="field" id="test-model"></select></label>
+              <label>批量数量 <input class="field" id="test-batch-count" type="number" min="1" max="20" value="10"></label>
+            </div>
+            <div class="row">
+              <label>Temperature <input class="field" id="test-temperature" type="number" min="0" max="2" step="0.1" placeholder="默认"></label>
+              <label>最大输出 Token <input class="field" id="test-max-tokens" type="number" min="1" max="200000" value="512"></label>
+            </div>
+            <div class="row" style="align-items:center;">
+              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-stream"> 启用 stream</label>
+              <label class="capabilities" style="flex-direction:row; gap:8px;"><input type="checkbox" id="test-image"> 附带测试图片</label>
+              <span class="tiny muted">视觉兜底会向当前模型发送 1x1 红色图片，验证非视觉模型是否能借助兜底模型理解图片。</span>
+            </div>
+            <div class="actions" style="justify-content:flex-start;">
+              <button class="btn" type="button" id="btn-test-sample">多轮示例</button>
+              <button class="btn" type="button" id="btn-test-clear">清空消息</button>
+            </div>
+            <label>消息（支持 system / user / assistant / tool 多轮）
+              <textarea class="field" id="test-prompt" rows="10" style="width:100%;">user: 你好，请用一句话简短自我介绍。</textarea>
+            </label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>原始请求</h3><span class="sub">发送前后都会显示脱敏后的请求体</span></div>
+          <div class="bd"><pre class="log-pane medium" id="test-request-preview" style="background:#0f1014;">尚未发送</pre></div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>响应</h3></div>
+          <div class="bd"><pre class="log-pane xlarge" id="test-output" style="background:#0f1014;"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Usage -->
+    <section class="tab-panel" id="panel-usage">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">用量统计</div>
+          <div class="tiny muted">按 Agent 和模型查看调用次数、成功率、失败、Token、缓存命中（来自上游 usage）与延迟</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="usage-agent-filter" style="min-width:160px;">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+<option value="grok">Grok Build</option>
+<option value="generic-openai">通用 OpenAI</option>
+          <option value="model-test">模型测试</option>
+        </select>
+        <input class="field" id="usage-model-filter" placeholder="按模型筛选…" style="min-width:180px;">
+        <select class="field" id="usage-range-preset" style="min-width:120px;" title="统计时间范围">
+          <option value="24h">近 24 小时</option>
+          <option value="3d">近 3 天</option>
+          <option value="7d">近 7 天</option>
+          <option value="30d" selected>近 30 天</option>
+          <option value="custom">自由选择</option>
+        </select>
+        <select class="field" id="usage-granularity" style="min-width:100px;" title="时间轴聚合维度">
+          <option value="hour">按小时</option>
+          <option value="day" selected>按日</option>
+          <option value="week">按周</option>
+          <option value="month">按月</option>
+        </select>
+        <span class="usage-custom-range" id="usage-custom-range" style="display:none; gap:8px; align-items:center;">
+          <input class="field" id="usage-since" type="date" title="开始日期">
+          <span class="tiny muted">至</span>
+          <input class="field" id="usage-until" type="date" title="结束日期">
+        </span>
+        <span class="tiny muted" id="usage-range-summary">-</span>
+        <button class="btn" id="btn-usage-refresh">刷新统计</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>用量趋势</h3><span class="sub" id="usage-daily-summary">-</span></div>
+          <div class="bd">
+            <div class="usage-chart" id="usage-daily-chart"></div>
+          </div>
+        </div>
+        <div class="page-stack">
+          <div class="card">
+            <div class="hd"><h3>模型用量</h3><span class="sub" id="usage-summary">-</span></div>
+            <div class="table-scroll medium">
+              <table class="data compact" id="usage-model-table">
+                <thead><tr><th>Agent</th><th>模型</th><th>供应商</th><th>调用</th><th>成功</th><th>失败</th><th>成功率</th><th>Token</th><th>缓存命中</th><th>缓存写入</th><th>命中率</th><th>成本</th><th>均延迟</th></tr></thead>
+                <tbody id="usage-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>最近请求</h3><span class="sub" id="request-log-summary">-</span></div>
+            <div class="table-scroll medium">
+              <table class="data compact">
+                <thead><tr><th>时间</th><th>客户端</th><th>模型</th><th>状态</th><th>耗时</th><th></th></tr></thead>
+                <tbody id="request-log-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section class="tab-panel" id="panel-logs">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">日志</div>
+          <div class="tiny muted">按行展示 gateway.log 尾部；详细用量请看“用量统计”</div>
+        </div>
+        <div style="flex:1;"></div>
+        <button class="btn" id="btn-logs-refresh-file">刷新日志</button>
+        <button class="btn" id="btn-logs-open">打开日志目录</button>
+      </div>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="hd"><h3>日志文件尾部</h3><span class="sub" id="log-file-summary">-</span></div>
+          <div class="bd"><div class="log-file-list" id="logs-output"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sessions -->
+    <section class="tab-panel" id="panel-sessions">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">Agent 会话</div>
+          <div class="tiny muted">可为会话自定义名称（写入 Switchyard 覆盖层；Hermes / OpenCode / Grok 尽量同步原生标题）</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="session-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
+</select>
+        <button class="btn" id="btn-sessions-refresh">刷新</button>
+      </div>
+      <div class="page-scroll">
+        <div class="card">
+          <div class="hd"><h3>本机会话文件</h3><span class="sub" id="sessions-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact">
+              <thead><tr><th>Agent</th><th>名称</th><th>路径</th><th>大小</th><th>更新时间</th><th></th></tr></thead>
+              <tbody id="sessions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 请求日志：内部两个模块 —— 请求日志（体） / 调用透视（CC-Viewer 风格拆解） -->
+    <section class="tab-panel" id="panel-traces">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">请求日志</div>
+          <div class="tiny muted">同一入口：请求日志看原始收发；调用透视学系统提示 / Skill / 工具怎么发出去</div>
+        </div>
+        <div style="flex:1;"></div>
+        <div class="module-tabs" id="observe-module-tabs">
+          <button type="button" class="module-tab on" data-observe-module="request-log">请求日志</button>
+          <button type="button" class="module-tab" data-observe-module="call-view">调用透视</button>
+        </div>
+        <label class="inline-check" title="默认开启：只看用户新发言；关闭可看工具续跑">
+          <input type="checkbox" id="trace-user-turns-only" checked>
+          <span>仅用户发言</span>
+        </label>
+        <label class="inline-check" title="开启后把脱敏完整请求体写入 logs/request-bodies/，详情可看真实请求体">
+          <input type="checkbox" id="trace-capture-body">
+          <span>落盘完整请求体</span>
+        </label>
+        <select class="field" id="trace-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
+          <option value="generic-openai">通用 OpenAI</option>
+          <option value="model-test">模型测试</option>
+        </select>
+        <input class="field observe-only-request-log" id="call-log-model-filter" placeholder="按模型筛选…" style="min-width:160px;">
+        <select class="field observe-only-request-log" id="call-log-limit" style="min-width:100px;">
+          <option value="50">最近 50</option>
+          <option value="100" selected>最近 100</option>
+          <option value="200">最近 200</option>
+          <option value="500">最近 500</option>
+        </select>
+        <button class="btn" id="btn-traces-refresh">刷新</button>
+      </div>
+
+      <!-- 模块 A：请求日志 —— 列表 + 请求体/响应体 -->
+      <div class="page-scroll call-log-layout" id="observe-module-request-log">
+        <div class="card call-log-table-card">
+          <div class="hd"><h3>请求列表</h3><span class="sub" id="call-log-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact call-log-table" id="call-log-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>客户端</th>
+                  <th>模型</th>
+                  <th>耗时</th>
+                  <th>Tokens</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="call-log-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card call-log-detail-card">
+          <div class="hd">
+            <h3 id="call-log-detail-title">请求 / 响应</h3>
+            <span class="sub" id="call-log-detail-subtitle">选择左侧一条请求</span>
+            <button class="btn" id="btn-call-log-open-trace" style="display:none;">在调用透视中打开</button>
+          </div>
+          <div class="bd">
+            <div id="call-log-meta" class="trace-params-bar"></div>
+            <div id="call-log-detail" class="call-log-detail">
+              <div class="empty-state">选择一条请求，查看请求体与响应体</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模块 B：调用透视 —— CC-Viewer 风格上下文拆解 -->
+      <div class="page-scroll" id="observe-module-call-view" style="display:none; grid-template-columns:minmax(320px, 420px) minmax(0, 1fr); gap:12px;">
+        <div class="card">
+          <div class="hd"><h3>调用列表</h3><span class="sub" id="traces-summary">-</span></div>
+          <div class="bd trace-list" id="trace-list"></div>
+        </div>
+        <div class="trace-detail-stack">
+          <div class="card trace-detail-card">
+            <div class="hd">
+              <h3 id="trace-title">上下文拆解</h3>
+              <span class="sub" id="trace-subtitle">参考 CC-Viewer：拆开 system / messages / tools 看 Agent 如何发包</span>
+              <button class="btn" id="btn-trace-copy-params" style="display:none;">复制 params</button>
+              <button class="btn" id="btn-trace-copy-user" style="display:none;">复制用户消息</button>
+              <button class="btn" id="btn-trace-copy-body" style="display:none;">复制完整请求体</button>
+              <button class="btn" id="btn-trace-reveal-body" style="display:none;">打开请求体文件</button>
+              <button class="btn" id="btn-trace-issue-bundle" style="display:none;">复制问题包</button>
+              <button class="btn" id="btn-trace-issue-export" style="display:none;">导出问题包</button>
+              <button class="btn" id="btn-trace-replay" style="display:none;">草稿回放到测试台</button>
+            </div>
+            <div class="bd">
+              <div id="trace-params-bar" class="trace-params-bar"></div>
+              <div class="trace-tabs" id="trace-tabs" style="display:none;">
+                <button type="button" class="trace-tab on" data-trace-tab="timeline">上下文拆解</button>
+                <button type="button" class="trace-tab" data-trace-tab="raw">原始 JSON</button>
+              </div>
+              <div id="trace-timeline" class="trace-timeline"><div class="empty-state">选择左侧一条调用，拆解用户消息 / 系统提示 / Skill / 工具 / 返回</div></div>
+              <pre id="trace-raw" class="trace-raw" style="display:none;"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Skills -->
+    <section class="tab-panel" id="panel-skills">
+      <div class="toolbar">
+        <div class="page-title">Agent Skills</div>
+        <div style="flex:1;"></div>
+        <select class="field" id="skill-agent-filter">
+          <option value="">全部 Agent</option>
+          <option value="codex">Codex</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
+</select>
+        <button class="btn" id="btn-skills-refresh">刷新</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>本地 Skill</h3><span class="sub" id="skills-summary">-</span></div>
+          <div class="table-scroll tall">
+            <table class="data compact">
+              <thead><tr><th>Agent</th><th>Skill</th><th>状态</th><th>路径</th><th>更新时间</th><th></th></tr></thead>
+              <tbody id="skills-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd">
+            <h3>SkillHub</h3>
+            <span class="sub">搜索 skillhub.cn，可下载 zip 或直接安装到指定 Agent</span>
+          </div>
+          <div class="bd">
+            <div class="row">
+              <label>搜索 <input class="field" id="skillhub-search" placeholder="搜索 skill 名称、描述，例如 codex / 文档 / 浏览器"></label>
+              <button class="btn" id="btn-skillhub-search">搜索</button>
+            </div>
+            <div class="tiny muted" id="skillhub-summary" style="margin:8px 0;">尚未搜索</div>
+            <div class="table-scroll medium">
+              <table class="data compact">
+                <thead><tr><th>Skill</th><th>说明</th><th>数据</th><th></th></tr></thead>
+                <tbody id="skillhub-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plugins -->
+    <section class="tab-panel" id="panel-plugins">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">Agent 插件</div>
+          <div class="tiny muted">读取 Claude Code 插件源、marketplace 和本机已安装插件</div>
+        </div>
+        <div style="flex:1;"></div>
+        <select class="field" id="plugin-agent-filter">
+          <option value="claude-code">Claude Code</option>
+        </select>
+        <button class="btn" id="btn-plugins-refresh">刷新</button>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>添加插件源</h3><span class="sub">本地 marketplace 路径或 JSON URL</span></div>
+          <div class="bd">
+            <div class="responsive-form-grid plugin-source-grid">
+              <label>名称 <input class="field" id="plugin-source-name" placeholder="例：团队插件源"></label>
+              <label>本地路径 <input class="field" id="plugin-source-path" placeholder="例：~/.claude/plugins/marketplaces/team"></label>
+              <label>JSON URL <input class="field" id="plugin-source-url" placeholder="https://example.com/marketplace.json"></label>
+              <div style="display:flex; align-items:end;"><button class="btn primary" id="btn-plugin-source-add">添加源</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="page-stack plugin-tables-stack">
+          <div class="card">
+            <div class="hd"><h3>插件源</h3><span class="sub" id="plugin-sources-summary">-</span></div>
+            <div class="table-scroll page-flow">
+              <table class="data compact">
+                <thead><tr><th>来源</th><th>名称</th><th>插件数</th><th></th></tr></thead>
+                <tbody id="plugin-sources-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>已安装插件</h3><span class="sub" id="installed-plugins-summary">-</span></div>
+            <div class="table-scroll page-flow">
+              <table class="data compact">
+                <thead><tr><th>插件</th><th>能力</th><th>路径</th></tr></thead>
+                <tbody id="installed-plugins-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>可用插件</h3><span class="sub" id="available-plugins-summary">-</span></div>
+          <div class="table-scroll page-flow plugin-available-scroll">
+            <table class="data compact">
+              <thead><tr><th>插件</th><th>说明</th><th>分类</th><th>来源</th></tr></thead>
+              <tbody id="available-plugins-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Mobile Control -->
+    <section class="tab-panel" id="panel-mobile-control">
+      <div class="toolbar">
+        <div>
+          <div class="page-title">手机控制</div>
+          <div class="tiny muted">通过一次性配对链接，在手机上安全查看和管理 Switchyard 会话。</div>
+        </div>
+        <div style="flex:1;"></div>
+        <span class="status-pill stopped" id="mobile-control-status"><span class="dot"></span><span id="mobile-control-status-text">未启用</span></span>
+      </div>
+      <div class="page-scroll page-stack">
+        <div class="card" id="mobile-control-card">
+          <div class="hd"><h3>连接与配对</h3><span class="sub">仅本机监听</span></div>
+          <div class="bd mobile-control-grid">
+            <div>
+              <dl class="kv">
+                <dt>本机地址</dt><dd class="mono" id="mobile-control-url">http://127.0.0.1:17889</dd>
+                <dt>网络边界</dt><dd>仅监听 127.0.0.1，不开放局域网或公网端口。</dd>
+              </dl>
+              <dl class="kv mobile-tailscale-health">
+                <dt>Tailscale</dt><dd id="mobile-tailscale-status">检测中…</dd>
+                <dt>安全地址</dt><dd class="mono" id="mobile-tailscale-url">-</dd>
+              </dl>
+              <label class="mobile-tailscale-base">Tailscale HTTPS 地址
+                <input class="field mono" id="mobile-tailscale-base" placeholder="自动检测，也可手动填写">
+                <span class="tiny muted">仅用于生成手机配对链接；服务仍只监听本机。请不要使用 Funnel。</span>
+              </label>
+              <div class="actions mobile-control-actions">
+                <button class="btn primary" id="btn-mobile-control-toggle" type="button">启用手机端</button>
+                <button class="btn" id="btn-mobile-pair" type="button" disabled>生成配对链接</button>
+                <button class="btn" id="btn-mobile-tailscale-repair" type="button">修复安全连接</button>
+              </div>
+            </div>
+            <div class="callout compact">
+              <div class="callout-title">Tailscale Serve 安全连接</div>
+              <div class="callout-body">
+                Switchyard 会检测并恢复 <code>127.0.0.1:17889</code> 的 Tailscale HTTPS 转发。手机需加入同一 Tailnet；不会开放局域网端口，也不会启用 Funnel。
+              </div>
+            </div>
+            <div class="mobile-pairing" id="mobile-pairing" hidden>
+              <div class="tiny muted">一次性配对链接（10 分钟有效）</div>
+              <div class="input-with-button">
+                <input class="field mono" id="mobile-pairing-url" readonly>
+                <button class="btn" id="btn-mobile-pair-copy" type="button">复制</button>
+              </div>
+              <div class="tiny muted" id="mobile-pairing-hint">
+                已使用上方 Tailscale HTTPS 地址自动生成；若未填写则显示本机链接，仅可在电脑本机使用。
+              </div>
+            </div>
+            <div>
+              <div class="mobile-devices-head">
+                <strong>已配对设备</strong>
+                <button class="btn" id="btn-mobile-devices-refresh" type="button">刷新</button>
+              </div>
+              <div id="mobile-devices" class="mobile-device-list">
+                <div class="empty-state">启用后可管理配对设备</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab-panel" id="panel-settings">
+      <div class="toolbar"><div class="page-title">偏好设置</div></div>
+      <div class="page-scroll page-stack">
+        <div class="card">
+          <div class="hd"><h3>配置文件</h3></div>
+          <div class="bd">
+            <dl class="kv">
+              <dt>路径</dt><dd class="mono" id="settings-config-path">-</dd>
+              <dt>说明</dt><dd>所有 Provider / Model 都存在此文件。可导出给同事导入；默认不含密钥。</dd>
+            </dl>
+            <div class="actions" style="margin-top:12px;">
+              <button class="btn" type="button" id="btn-config-bundle-export">导出配置…</button>
+              <button class="btn" type="button" id="btn-config-bundle-import">导入配置…</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd">
+            <h3>Agent 核心文件</h3>
+            <span class="sub" id="core-files-summary">-</span>
+          </div>
+          <div class="bd">
+            <div class="row">
+              <label>Agent
+                <select class="field" id="core-agent-filter">
+                  <option value="codex">Codex</option>
+                  <option value="claude-code">Claude Code</option>
+                  <option value="hermes">Hermes</option>
+          <option value="opencode">OpenCode</option>
+          <option value="grok">Grok Build</option>
+</select>
+              </label>
+              <label>文件
+                <select class="field" id="core-file-select"></select>
+              </label>
+            </div>
+            <div class="tiny muted mono" id="core-file-path" style="margin:8px 0;">-</div>
+            <textarea class="field code-editor" id="core-file-editor" spellcheck="false" style="min-height:420px;"></textarea>
+            <div class="actions">
+              <button class="btn" id="btn-core-file-refresh">重新读取</button>
+              <button class="btn primary" id="btn-core-file-save">保存文件</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="dialog-overlay" id="text-viewer-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="text-viewer-title">查看</h2>
+    <div class="tiny muted mono" id="text-viewer-path" style="margin-bottom:10px;"></div>
+    <textarea class="field code-editor" id="text-viewer-content" spellcheck="false"></textarea>
+    <div class="actions">
+      <button class="btn" type="button" data-close="text-viewer-wrap">关闭</button>
+      <button class="btn primary" type="button" id="btn-text-viewer-save" style="display:none;">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="session-viewer-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="session-viewer-title">会话</h2>
+    <div class="tiny muted mono" id="session-viewer-path" style="margin-bottom:10px;"></div>
+    <div class="segmented">
+      <button class="btn primary" type="button" id="btn-session-view-conversation">对话</button>
+      <button class="btn" type="button" id="btn-session-view-raw">原始 JSON</button>
+    </div>
+    <div class="conversation-view" id="session-conversation"></div>
+    <textarea class="field code-editor" id="session-raw" spellcheck="false" style="display:none;"></textarea>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-viewer-wrap">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="session-rename-wrap">
+  <div class="dialog">
+    <h2>会话命名</h2>
+    <div class="tiny muted" id="session-rename-meta">-</div>
+    <label>名称
+      <input class="field" id="session-rename-title" placeholder="自定义显示名" maxlength="200" autocomplete="off">
+    </label>
+    <div class="callout compact">写入 Switchyard 覆盖层；留空并保存可清除自定义名。Hermes / OpenCode / Grok 会尽量同步原生标题。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-rename-wrap">取消</button>
+      <button class="btn" type="button" id="btn-session-rename-clear">清除名称</button>
+      <button class="btn primary" type="button" id="btn-session-rename-confirm">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="session-handoff-wrap">
+  <div class="dialog">
+    <h2>接力到 Codex</h2>
+    <div class="tiny muted" id="session-handoff-meta">-</div>
+    <label>Codex 会话名称
+      <input class="field" id="session-handoff-title" maxlength="200" autocomplete="off">
+    </label>
+    <div class="callout compact">
+      这是复制接力：Claude Code 原会话不会被修改，仍可继续使用。Codex 会创建一个独立的新会话分支，后续不会与 Claude 自动同步。
+    </div>
+    <div class="tiny muted" id="session-handoff-summary"></div>
+    <div class="callout compact" id="session-handoff-warning" style="display:none;"></div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="session-handoff-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-session-handoff-confirm">创建 Codex 会话</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skill-link-wrap">
+  <div class="dialog">
+    <h2>复制 Skill 到其他 Agent</h2>
+    <div class="tiny muted" id="skill-link-source">-</div>
+    <label>目标 Agent
+      <select class="field" id="skill-link-target">
+        <option value="codex">Codex</option>
+        <option value="claude-code">Claude Code</option>
+        <option value="hermes">Hermes</option>
+        <option value="opencode">OpenCode</option>
+        <option value="grok">Grok Build</option>
+      </select>
+    </label>
+    <label>目标 Skill 名称 <input class="field" id="skill-link-name"></label>
+    <div class="callout compact">会创建软链接，不复制文件内容。后续编辑源 Skill 时，软链接目标会同步看到变化。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skill-link-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-skill-link-confirm">创建软链接</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skillhub-detail-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="skillhub-detail-title">SkillHub 详情</h2>
+    <div class="tiny muted mono" id="skillhub-detail-slug">-</div>
+    <div class="chip-row" id="skillhub-detail-tags" style="margin:12px 0;"></div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">说明</div>
+        <div id="skillhub-detail-description" class="detail-text">-</div>
+      </div>
+      <div>
+        <div class="detail-label">数据</div>
+        <div class="chip-row" id="skillhub-detail-metrics"></div>
+      </div>
+    </div>
+    <dl class="kv compact" style="margin-top:14px;">
+      <dt>作者</dt><dd id="skillhub-detail-owner">-</dd>
+      <dt>版本</dt><dd id="skillhub-detail-version">-</dd>
+      <dt>来源</dt><dd id="skillhub-detail-source">-</dd>
+      <dt>网页</dt><dd class="mono" id="skillhub-detail-homepage">-</dd>
+    </dl>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skillhub-detail-wrap">关闭</button>
+      <button class="btn" type="button" id="btn-skillhub-detail-open">浏览器打开</button>
+      <button class="btn" type="button" id="btn-skillhub-detail-download">下载</button>
+      <button class="btn primary" type="button" id="btn-skillhub-detail-install">安装</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="skillhub-install-wrap">
+  <div class="dialog">
+    <h2>安装 SkillHub Skill</h2>
+    <div class="tiny muted" id="skillhub-install-source">-</div>
+    <label>安装到 Agent
+      <select class="field" id="skillhub-install-target">
+        <option value="codex">Codex</option>
+        <option value="claude-code">Claude Code</option>
+        <option value="hermes">Hermes</option>
+        <option value="opencode">OpenCode</option>
+        <option value="grok">Grok Build</option>
+      </select>
+    </label>
+    <label>Skill 名称 <input class="field" id="skillhub-install-name"></label>
+    <label class="checkbox-line"><input type="checkbox" id="skillhub-install-overwrite"> 覆盖已存在的同名 Skill</label>
+    <div class="callout compact">安装会把 Skill 内容复制到目标 Agent 的 skills 目录；本地 Agent 读取后即可使用。</div>
+    <div class="actions">
+      <button class="btn" type="button" data-close="skillhub-install-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-skillhub-install-confirm">安装</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="provider-dialog-wrap">
+  <div class="dialog dialog-xwide">
+    <h2 id="provider-dialog-title">新增供应商</h2>
+    <form id="provider-form" autocomplete="off">
+      <div class="row">
+        <label>供应商模板
+          <select class="field" name="presetId" id="provider-preset-select">
+            <option value="">自定义供应商</option>
+          </select>
+        </label>
+        <label>认证方式
+          <select class="field" name="authMode" id="provider-auth-mode">
+            <option value="api_key">API Key</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>标识
+          <input class="field" name="id" required placeholder="例：kimi">
+          <span class="tiny muted" id="provider-id-rename-note" style="display:none;">修改标识会同步更新该供应商下所有模型的引用</span>
+        </label>
+        <label>名称 <input class="field" name="name" placeholder="显示名"></label>
+      </div>
+      <label>协议
+        <select class="field" name="apiFormat">
+          <option value="openai_chat">OpenAI Chat Completions（最通用）</option>
+          <option value="openai_responses">OpenAI Responses（Codex / 新版 OpenAI）</option>
+          <option value="anthropic_messages">Anthropic Messages（Claude / Claude Code）</option>
+          <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
+          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
+        </select>
+      </label>
+      <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
+      <label>Provider 代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890；所有模型默认继承"></label>
+      <details class="callout-details compact" open>
+        <summary class="callout-title">网关重试（供应商级 · 对 Agent 透明）</summary>
+        <div class="callout-body">
+          调用该供应商下模型失败时，网关<strong>先在本地重试可恢复错误</strong>，成功后再把结果返回给 Agent；不会把中间失败立刻甩给客户端。
+          默认最多 3 次（网络失败 / 429 / 5xx）；流式仅在尚未写出内容前重试。下方模型可单独覆盖本设置。
+        </div>
+        <div class="row">
+          <label>启用重试
+            <select class="field" name="retryEnabled">
+              <option value="default">默认（开）</option>
+              <option value="on">强制开启</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="默认 3"></label>
+        </div>
+      </details>
+      <label>高级：路由策略
+        <select class="field" name="routingMode">
+          <option value="auto">自动（协议一致时原生透传）</option>
+          <option value="gateway">强制转换（排障/兼容）</option>
+          <option value="native">强制原生（协议不匹配时报错）</option>
+        </select>
+      </label>
+      <div class="callout compact">
+        <div class="callout-title">可见 Agent</div>
+        <div class="callout-body">默认对全部 Agent 可见；选择特定 Agent 后，该供应商下的模型只会出现在这些 Agent 的模型列表里。</div>
+        <div class="capabilities client-scope-grid" id="provider-visible-clients"></div>
+      </div>
+      <div class="row" id="provider-key-fields">
+        <label>API Key 环境变量名 <input class="field" name="apiKeyEnv" placeholder="例：KIMI_API_KEY"></label>
+        <label>Inline Key（本机保存）
+          <span class="input-with-button">
+            <input class="field" name="apiKey" id="provider-api-key-input" type="password" autocomplete="new-password" placeholder="给自己本机用时可直接保存">
+            <button class="btn" type="button" id="btn-provider-key-toggle">显示</button>
+          </span>
+        </label>
+      </div>
+      <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
+      <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-sub2api-panel" style="display:none;">
+        <div class="callout-title">Sub2API 账号备份导入</div>
+        <div class="callout-body">
+          直接把 <span class="mono">sub2api-data</span> 备份导入到 Switchyard 的本机 Codex 账号池，由 Switchyard 自己轮询、故障换号并调用模型。
+          <strong>不需要安装或运行 Sub2API，也不需要 API 地址、普通 API Key 或 Admin API Key。</strong>
+        </div>
+        <details class="callout-details compact" open style="margin-top:12px;">
+          <summary class="callout-title">批量导入 Sub2API 账号备份</summary>
+          <div class="callout-body">
+            选择一个或多个 JSON 后先在本机合并校验，再写入 <code>~/.switchyard/pools/</code>。
+            凭据不会写入供应商配置、请求日志或页面预览；支持 OpenAI OAuth 和 Agent Identity 账号。
+          </div>
+          <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+            <button class="btn" type="button" id="btn-sub2api-data-import-select">选择备份 JSON…</button>
+            <button class="btn" type="button" id="btn-sub2api-data-import-reselect" style="display:none;">重新选择</button>
+          </div>
+          <div class="import-summary" id="sub2api-data-import-summary"></div>
+          <div class="tiny muted">
+            导入后保存当前供应商即可。从 Sub2API 导出的代理配置不会被复用；如需代理，请在本供应商的「代理地址」单独配置。
+          </div>
+          <pre class="log-pane import-run-output" id="sub2api-data-import-output">尚未选择备份文件</pre>
+          <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+            <button class="btn primary" type="button" id="btn-sub2api-data-import-apply" disabled>导入到 Switchyard 账号池</button>
+          </div>
+        </details>
+      </div>
+      <div class="callout" id="provider-codex-oauth-panel" style="display:none;">
+        <div class="callout-title">Codex OAuth（本机 ChatGPT 登录）</div>
+        <div class="callout-body">
+          复用本机 <code>~/.codex/auth.json</code>（由 <code>codex login</code> / ChatGPT OAuth 写入）。
+          状态检测看的是<strong>有效登录</strong>，不是只看文件在不在：
+          access_token 未过期，或已过期但有可用 refresh_token 可自动续期，才算已登录。
+        </div>
+        <div id="provider-codex-oauth-status" style="margin-top:10px;" class="tiny">检查登录状态…</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-codex-oauth-login">登录 Codex</button>
+          <button class="btn" type="button" id="btn-codex-oauth-refresh-status">刷新状态</button>
+          <button class="btn" type="button" id="btn-codex-oauth-refresh-token">尝试续期</button>
+        </div>
+        <details style="margin-top:12px;">
+          <summary class="tiny muted">高级：粘贴 refresh_token 写入 ~/.codex/auth.json</summary>
+          <label style="margin-top:8px;">refresh_token
+            <input class="field" id="provider-codex-refresh-token" type="password" autocomplete="off" placeholder="ChatGPT / Codex refresh token">
+          </label>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px;">
+            <button class="btn" type="button" id="btn-codex-oauth-import">导入并换取 access_token</button>
+          </div>
+          <div class="tiny muted" style="margin-top:6px;">会调用官方 token 端点换取 access，并回写 <code>~/.codex/auth.json</code>。请勿把 token 发到聊天或日志。</div>
+        </details>
+      </div>
+      <div class="callout" id="provider-anthropic-oauth-panel" style="display:none;">
+        <div class="callout-title">Claude Official（对齐 CC Switch）</div>
+        <div class="callout-body">
+          与 CC Switch「Claude Official」相同：优先读取本机 <strong>Claude Code 登录态</strong>
+          （macOS Keychain <code>Claude Code-credentials</code>，或 <code>~/.claude/.credentials.json</code> 中的 <code>claudeAiOauth</code>）。
+          请求走官方 <code>api.anthropic.com</code>，使用 <code>Authorization: Bearer</code> + <code>anthropic-beta: oauth-2025-04-20</code>。
+        </div>
+        <div class="callout-body" style="margin-top:8px;">
+          若未检测到登录：在终端执行 <code>claude</code> 按提示登录后点「刷新状态」。
+        </div>
+        <div id="provider-anthropic-oauth-status" style="margin-top:10px;" class="tiny">检查登录状态…</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-anthropic-oauth-refresh-status">刷新状态</button>
+          <button class="btn" type="button" id="btn-anthropic-oauth-logout">清除 Switchyard 缓存凭证</button>
+        </div>
+        <details style="margin-top:12px;">
+          <summary class="tiny muted">高级：浏览器 OAuth / 粘贴 refresh_token（不改 Claude Code 原登录）</summary>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px; flex-wrap:wrap; gap:8px;">
+            <button class="btn" type="button" id="btn-anthropic-oauth-login">浏览器登录 Claude</button>
+          </div>
+          <label style="margin-top:8px;">refresh_token
+            <input class="field" id="provider-anthropic-refresh-token" type="password" autocomplete="off" placeholder="官方 refresh token">
+          </label>
+          <div class="actions" style="justify-content:flex-start; margin-top:8px;">
+            <button class="btn" type="button" id="btn-anthropic-oauth-import">导入并换取 access_token</button>
+          </div>
+          <div class="tiny muted" style="margin-top:6px;">高级凭证写入 <code>~/.switchyard/oauth/</code>，不会覆盖 Claude Code 的 Keychain / .credentials.json。</div>
+        </details>
+      </div>
+      <div class="callout" id="provider-cursor-subscription-panel" style="display:none;">
+        <div class="callout-title">Cursor 订阅桥接</div>
+        <div class="callout-body">仅个人本机使用。普通文本对话优先调用本机 Cursor Agent CLI（官方客户端路径、只读 Ask 模式），工具调用仍使用兼容桥接；凭据不会写入配置或日志。不要共享账号、不要远程暴露。</div>
+        <label style="margin-top:10px;"><input type="checkbox" name="cursorSubscriptionEnabled" id="provider-cursor-subscription-enabled" checked> 启用订阅桥接</label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-cursor-subscription-import-local">从本机已登录 Cursor 自动导入</button>
+          <span id="provider-cursor-local-status" class="tiny muted">正在检测本机 Cursor 登录态…</span>
+        </div>
+        <details style="margin-top:10px;"><summary class="tiny muted">无法自动导入？手动填写凭据</summary><div class="row" style="margin-top:8px;">
+          <label>访问凭据 <input class="field" id="provider-cursor-access-token" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
+          <label>本机标识 <input class="field" id="provider-cursor-machine-id" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
+        </div></details>
+        <div class="row">
+          <label>并发请求数<input class="field" name="maxConcurrentRequests" type="number" min="1" max="3" value="2"></label>
+          <label>流静默超时（毫秒）<input class="field" name="streamIdleTimeoutMs" type="number" min="60000" value="90000"></label>
+        </div>
+        <div id="provider-cursor-subscription-status" class="tiny muted" style="margin-top:8px;">未配置</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-cursor-subscription-connect">连接并安全保存</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-test">测试连接</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-show-creds">显示凭据</button>
+          <button class="btn" type="button" id="btn-cursor-subscription-clear">清除凭据</button>
+        </div>
+      </div>
+      <div class="callout" id="provider-account-pool-panel" style="display:none;">
+        <div class="callout-title" id="provider-pool-title">账号池</div>
+        <div class="callout-body" id="provider-pool-body">
+          凭证保存在本机 <code>~/.switchyard/pools/</code>，不会写入 config.json。
+        </div>
+        <input type="hidden" name="poolKind" id="provider-pool-kind" value="xai_oauth" />
+        <div class="row" style="margin-top:10px;">
+          <label>调度策略
+            <select class="field" name="poolStrategy" id="provider-pool-strategy">
+              <option value="weighted_round_robin">加权轮询</option>
+              <option value="least_recently_used">最久未用</option>
+              <option value="lowest_error_rate">最低错误率</option>
+            </select>
+          </label>
+          <label class="tiny muted" style="align-self:end;" id="provider-pool-count">0 个账号</label>
+        </div>
+        <label style="margin-top:8px;" id="provider-pool-import-text-wrap">粘贴导入
+          <textarea class="field" id="provider-pool-import-text" rows="4" placeholder="粘贴导入内容"></textarea>
+        </label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn" type="button" id="btn-pool-import-text">导入粘贴内容</button>
+          <button class="btn primary" type="button" id="btn-pool-import-files">选择 JSON 文件…</button>
+          <button class="btn" type="button" id="btn-pool-import-dir">选择文件夹…</button>
+          <button class="btn" type="button" id="btn-pool-import-cpa">从本机默认路径导入</button>
+          <button class="btn" type="button" id="btn-pool-refresh-quota">刷新额度</button>
+          <button class="btn" type="button" id="btn-pool-refresh">刷新列表</button>
+        </div>
+        <div class="tiny muted" style="margin-top:8px;" id="provider-pool-access-hint">
+          「状态」= 健康度（健康/降级/冷却）；「额度」= 套餐剩余窗口（Codex 为 5h/周）；
+          「Access」= <strong>OAuth 访问令牌</strong>过期时间，不是订阅日。鼠标悬停状态可看上次错误。
+        </div>
+        <div class="account-pool-table-wrap" style="margin-top:12px; max-height:280px; overflow:auto;">
+          <table class="data" id="provider-pool-table">
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>状态</th>
+                <th>权重</th>
+                <th>额度</th>
+                <th>Access（非订阅）</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="provider-pool-tbody">
+              <tr><td colspan="6" class="tiny muted">尚未导入账号</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <details class="callout-details">
+        <summary class="callout-title">用量查询配置</summary>
+        <div class="callout-body">可跟随预设，也可为自定义供应商配置余额/套餐查询接口。API Key 与请求地址留空时自动使用供应商配置。</div>
+        <div class="row">
+          <label>查询模板
+            <select class="field" name="usageTemplateType">
+              <option value="">跟随预设 / 不启用</option>
+              <option value="custom">自定义脚本</option>
+              <option value="balance">余额 API</option>
+              <option value="user_info">用户信息接口</option>
+              <option value="coding_plan">Token Plan / Coding Plan</option>
+              <option value="subscription">官方订阅</option>
+            </select>
+          </label>
+          <label>供应商解析器
+            <select class="field" name="usageProvider">
+              <option value="">通用 JSON Path</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="siliconflow">SiliconFlow</option>
+              <option value="stepfun">StepFun</option>
+              <option value="novita">Novita AI</option>
+              <option value="kimi">Kimi Token Plan</option>
+              <option value="zhipu">智谱 / Z.AI Token Plan</option>
+              <option value="minimax">MiniMax Token Plan</option>
+              <option value="volcengine">火山方舟 Plan</option>
+              <option value="zenmux">ZenMux Token Plan</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label>API Key（可选） <input class="field" name="usageApiKey" type="password" autocomplete="new-password" placeholder="留空则使用供应商 Key"></label>
+          <label>请求地址（可选） <input class="field" name="usageBaseUrl" placeholder="留空则使用 Base URL"></label>
+        </div>
+        <div class="row">
+          <label>请求路径 <input class="field" name="usagePath" placeholder="例：/v1/usage"></label>
+          <label>请求方法
+            <select class="field" name="usageMethod">
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label>余额字段 JSON Path <input class="field" name="usageExtractPath" placeholder="例：data.balance"></label>
+          <label>单位 <input class="field" name="usageUnit" placeholder="USD / CNY / tokens / %"></label>
+        </div>
+        <div class="row">
+          <label>套餐名称 <input class="field" name="usagePlanName" placeholder="例：默认余额"></label>
+          <label>自动查询间隔（分钟） <input class="field" name="usageAutoQueryInterval" type="number" min="0" placeholder="0 表示不自动查询"></label>
+        </div>
+        <label>提取器代码（可选，ccswitch 风格）
+          <textarea class="field" name="usageCode" rows="8" placeholder='({
+  request: {
+    url: "{{baseUrl}}/v1/usage",
+    method: "GET",
+    headers: { Authorization: "Bearer {{apiKey}}" }
+  },
+  extractor(response) {
+    return { remaining: response.balance, unit: "USD", isValid: response.is_active ?? true };
+  }
+})'></textarea>
+        </label>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+          <button class="btn" type="button" id="btn-provider-balance-test">测试余额/用量</button>
+        </div>
+      </details>
+      <div class="callout">
+        <div class="callout-title">连接验证</div>
+        <div class="callout-body">先点“测试连接”确认地址和密钥有效，再点“查询模型”把上游模型拉下来，勾选后直接生成本地模型。</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px;">
+          <button class="btn" type="button" id="btn-provider-test">测试连接</button>
+          <button class="btn" type="button" id="btn-provider-discover">查询模型</button>
+        </div>
+        <pre class="inline-console" id="provider-test-output">尚未测试</pre>
+      </div>
+      <div class="callout">
+        <div class="callout-title">待添加模型</div>
+        <div class="callout-body">查询到的模型会出现在这里。可以设置别名、思考、多模态和工具能力，然后和供应商一起保存。</div>
+        <div class="discovery-toolbar">
+          <label class="discovery-search">搜索模型 <input class="field" id="provider-discovery-search" placeholder="输入模型名、别名、能力"></label>
+          <span class="tiny muted" id="provider-discovery-count">0 个模型</span>
+          <button class="btn" type="button" id="btn-discovery-select-all">全选</button>
+          <button class="btn" type="button" id="btn-discovery-deselect-all">取消全选</button>
+          <button class="btn" type="button" id="btn-discovery-add-manual">手动添加</button>
+        </div>
+        <div id="provider-discovered-models" class="discovery-list">
+          <div class="empty-state">还没有查询模型</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="model-dialog-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="model-dialog-title">新增模型</h2>
+    <form id="model-form" autocomplete="off">
+      <div class="row">
+        <label>模型 ID <input class="field" name="id" required placeholder="provider/model"></label>
+        <label>供应商
+          <select class="field" name="providerId" id="model-provider-select"></select>
+        </label>
+      </div>
+      <div class="row">
+        <label>上游模型名 <input class="field" name="upstreamModel" required></label>
+        <label>显示名 <input class="field" name="displayName"></label>
+      </div>
+      <label>别名（英文逗号分隔） <input class="field" name="aliases" placeholder="alias-1, alias-2"></label>
+      <div class="row">
+        <label>上下文窗口 <input class="field" name="contextWindow" type="number" min="0" placeholder="例：128000"></label>
+        <label>最大输出 Token <input class="field" name="maxOutputTokens" type="number" min="0" placeholder="例：8192"></label>
+      </div>
+      <details class="callout-details compact">
+        <summary class="callout-title">计费（可选，用于用量成本估算）</summary>
+        <div class="callout-body">按每百万 Token 计价，填后「用量统计」会估算成本。留空则不计。</div>
+        <div class="row">
+          <label>输入价格 / 1M <input class="field" name="priceInput" type="number" min="0" step="0.0001" placeholder="例：0.5"></label>
+          <label>输出价格 / 1M <input class="field" name="priceOutput" type="number" min="0" step="0.0001" placeholder="例：1.5"></label>
+          <label>币种
+            <select class="field" name="priceCurrency">
+              <option value="USD">USD</option>
+              <option value="CNY">CNY</option>
+            </select>
+          </label>
+        </div>
+      </details>
+      <label>视觉兜底模型（可选）
+        <select class="field" name="visionFallbackModelId" id="model-vision-fallback-select">
+          <option value="">不启用</option>
+        </select>
+      </label>
+      <label>代理 URL（可选） <input class="field" name="proxyUrl" placeholder="例：http://127.0.0.1:7890"></label>
+      <details class="callout-details compact">
+        <summary class="callout-title">网关重试（模型级 · 覆盖供应商）</summary>
+        <div class="callout-body">
+          与供应商级相同：失败先在网关重试，成功后再回给 Agent。此处可覆盖该模型所属供应商的重试设置；默认继承供应商 / 全局（最多 3 次）。
+        </div>
+        <div class="row">
+          <label>启用重试
+            <select class="field" name="retryEnabled">
+              <option value="default">继承供应商（默认开）</option>
+              <option value="on">强制开启</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label>最大尝试次数 <input class="field" name="retryMaxAttempts" type="number" min="1" max="10" placeholder="继承供应商 / 默认 3"></label>
+        </div>
+      </details>
+      <div class="callout compact">
+        <div class="callout-title">可见 Agent</div>
+        <div class="callout-body">未单独配置时继承供应商范围；在此选择后以模型范围为准，可覆盖供应商设置。</div>
+        <div class="capabilities client-scope-grid" id="model-visible-clients"></div>
+      </div>
+      <div class="capabilities">
+        <label><input type="checkbox" name="cap-text" checked> 文本</label>
+        <label><input type="checkbox" name="cap-tools" checked> 工具调用</label>
+        <label><input type="checkbox" name="cap-reasoning"> 思考</label>
+        <label><input type="checkbox" name="cap-images"> 图片</label>
+        <label><input type="checkbox" name="cap-stream" checked> 流式</label>
+        <label><input type="checkbox" name="cap-multimodal"> 多模态</label>
+      </div>
+      <div class="callout" style="margin-top:8px;">
+        <div class="callout-title">模型测试</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:6px;">
+          <button class="btn" type="button" id="btn-model-test">测试此模型</button>
+          <button class="btn" type="button" id="btn-model-probe">能力校准</button>
+          <button class="btn primary" type="button" id="btn-model-apply-capabilities" style="display:none;">应用建议能力</button>
+        </div>
+        <pre class="inline-console" id="model-test-output" style="min-height:160px; max-height:min(46vh, 460px);">尚未测试</pre>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" data-close>取消</button>
+        <button class="btn primary" type="submit">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="config-bundle-export-wrap">
+  <div class="dialog dialog-wide">
+    <h2>导出 Switchyard 配置</h2>
+    <div class="tiny muted" style="margin-bottom:10px;">选择要分享的供应商；会自动带上对应模型。默认不导出密钥。</div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-bottom:8px;">
+      <button class="btn" type="button" id="btn-bundle-export-select-all">全选</button>
+      <button class="btn" type="button" id="btn-bundle-export-select-none">全不选</button>
+    </div>
+    <div class="import-preview" id="config-bundle-export-list" style="max-height:min(46vh,420px); overflow:auto;"></div>
+    <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start; margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:8px;">
+      <input type="checkbox" id="bundle-export-include-secrets">
+      <span>
+        <strong>包含凭证（高级）</strong>
+        <div class="tiny muted">写入 API Key / 账号池 token。仅用于可信本机备份；导出会二次确认。</div>
+      </span>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" data-close="config-bundle-export-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-bundle-export-confirm">导出 JSON…</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="config-bundle-import-wrap">
+  <div class="dialog dialog-wide">
+    <h2>导入 Switchyard 配置</h2>
+    <div class="tiny muted" id="config-bundle-import-meta" style="margin-bottom:10px;">选择同事导出的配置包。</div>
+    <div class="import-preview" id="config-bundle-import-preview" style="max-height:min(50vh,460px); overflow:auto;"></div>
+    <label class="import-provider-check" id="bundle-import-secrets-row" hidden style="display:flex; gap:8px; align-items:flex-start; margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:8px;">
+      <input type="checkbox" id="bundle-import-apply-secrets" checked>
+      <span>
+        <strong>同时写入凭证</strong>
+        <div class="tiny muted">仅当配置包本身包含密钥时可用；已存在的同名供应商会跳过凭证。</div>
+      </span>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" data-close="config-bundle-import-wrap">取消</button>
+      <button class="btn primary" type="button" id="btn-bundle-import-apply">合并到配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="import-dialog-wrap">
+  <div class="dialog dialog-xwide">
+    <h2>从 cc-switch 导入</h2>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">将合并到当前 Switchyard 配置，已存在的同名 provider/model 会被跳过；同机自用时会把 cc-switch 里的密钥一并带入本机配置。</div>
+    <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+      <button class="btn" type="button" id="btn-import-select-all">全选</button>
+      <button class="btn" type="button" id="btn-import-select-none" style="margin-left:6px;">全不选</button>
+      <button class="btn" type="button" id="btn-import-toggle-keys">显示明文密钥</button>
+    </div>
+    <div class="import-preview" id="import-preview"></div>
+    <pre class="log-pane import-run-output" id="import-run-output">等待导入</pre>
+    <div class="actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" id="btn-import-apply">合并到配置</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="profile-dialog-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="profile-dialog-title">预览配置文件</h2>
+    <div class="tiny muted" id="profile-dialog-meta" style="margin-bottom:8px;"></div>
+    <pre class="log-pane large" id="profile-dialog-body" style="background:#0f1014;"></pre>
+    <div class="actions">
+      <button class="btn" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="backup-dialog-wrap">
+  <div class="dialog dialog-wide">
+    <h2 id="backup-dialog-title">恢复配置备份</h2>
+    <div class="tiny muted" id="backup-dialog-meta" style="margin-bottom:8px;"></div>
+    <label>备份版本
+      <select class="field" id="backup-dialog-select"></select>
+    </label>
+    <pre class="log-pane" id="backup-dialog-preview" style="background:#0f1014; min-height:120px;"></pre>
+    <div class="actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn primary" id="btn-backup-restore">恢复选中备份</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script type="module" src="./renderer.js"></script>
+</body>
+</html>

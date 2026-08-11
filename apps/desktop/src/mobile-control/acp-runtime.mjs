@@ -231,11 +231,22 @@ export function createAcpRuntime({
     await ensureConnected();
     const sid = String(sessionId);
     const cwd = await sessionCwd(sid);
-    const result = await client.request("session/load", {
-      sessionId: sid,
-      cwd,
-      mcpServers: []
-    }, 60_000);
+    const params = { sessionId: sid, cwd, mcpServers: [] };
+    // Grok ACP 只实现 session/resume（sessionCapabilities.resume），没有 session/load；
+    // 其他 ACP agent 用 session/load。先试 load，-32601 时降级 resume，避免续聊落到错误会话。
+    let result;
+    try {
+      result = await client.request("session/load", params, 60_000);
+    } catch (error) {
+      const code = Number(error?.code);
+      if (code === -32601 || /method\s+not\s+found/i.test(String(error?.message || ""))) {
+        console.error(`[acp:${id}] session/load 不可用，降级 session/resume sid=${String(sid).slice(0, 8)}`);
+        result = await client.request("session/resume", params, 60_000);
+      } else {
+        throw error;
+      }
+    }
+    console.error(`[acp:${id}] loadSession OK sid=${String(sid).slice(0, 8)} cwd=${cwd}`);
     loadedSessions.add(sid);
     return { result, cwd };
   };
@@ -265,10 +276,16 @@ export function createAcpRuntime({
 
   const createSession = async ({ cwd, model } = {}) => {
     await ensureConnected();
-    const result = await client.request("session/new", {
-      cwd: String(cwd || process.cwd()),
-      mcpServers: []
-    }, 60_000);
+    let result;
+    try {
+      result = await client.request("session/new", {
+        cwd: String(cwd || process.cwd()),
+        mcpServers: []
+      }, 60_000);
+    } catch (error) {
+      console.error(`[acp:${id}] session/new 失败 cwd=${cwd || process.cwd()}: ${error?.message || JSON.stringify(error)}`);
+      throw error;
+    }
     const sessionId = String(result?.sessionId || "");
     if (!sessionId) throw new Error(`${label || id} 未返回 session id`);
     loadedSessions.add(sessionId);
@@ -284,16 +301,27 @@ export function createAcpRuntime({
       archived: false,
       capabilities: { ...capabilities }
     });
-    if (model) await client.request("session/set_model", { sessionId, modelId: String(model) });
+    if (model) {
+      // 模型切换是可选增强：set_model 失败不应阻塞会话创建（模型下轮生效可再设）。
+      try {
+        await client.request("session/set_model", { sessionId, modelId: String(model) });
+      } catch (error) {
+        console.error(`[acp:${id}] set_model 失败（忽略）: ${error?.message || error}`);
+      }
+    }
     return { sessionId };
   };
 
   const sendMessage = async (sessionId, { text, messageId, attachments = [] } = {}) => {
+    console.error(`[acp:${id}] sendMessage 进入 sid=${String(sessionId).slice(0, 8)}`);
     await ensureConnected();
+    console.error(`[acp:${id}] sendMessage ensureConnected 完成`);
     const sid = String(sessionId);
     // ACP agents keep resume state in their process. A mobile request can arrive
     // after the service restarted, so reload the shared CLI session before prompt.
-    if (!loadedSessions.has(sid)) await loadSession(sid);
+    // Grok 的 active 会话是进程级状态：任何 readSession/resume 都会切换它，
+    // 因此发送前必须无条件 resume，否则 prompt 会落到当前 active 会话（错误会话）。
+    await loadSession(sid);
     // messageId 只用于 Switchyard 端幂等；不要传给 session/prompt。
     // Grok 对未知字段会在流式结束后回 -32603 Internal error，导致手机先看到回答再报错。
     void messageId;
@@ -317,6 +345,7 @@ export function createAcpRuntime({
         ...attachments.filter((attachment) => attachment.kind === "image").map((attachment) => ({ type: "image", data: attachment.data, mimeType: attachment.mimeType }))
       ]
     }, 24 * 60 * 60 * 1000);
+    console.error(`[acp:${id}] sendMessage prompt sid=${String(sid).slice(0, 8)} text=${String(text || "").slice(0, 40)}`);
     pendingPrompts.set(sid, prompt);
     streamedDuringPrompt.delete(sid);
     prompt.then((result) => {

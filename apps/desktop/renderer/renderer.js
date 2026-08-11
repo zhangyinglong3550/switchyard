@@ -841,6 +841,52 @@ async function refreshCodexOauthStatus({ tryRefresh = true } = {}) {
   }
 }
 
+function isKeProviderForm() {
+  const form = document.getElementById("provider-form");
+  const presetId = document.getElementById("provider-preset-select")?.value || "";
+  const id = form?.querySelector?.('[name="id"]')?.value?.trim() || "";
+  const baseUrl = form?.querySelector?.('[name="baseUrl"]')?.value?.trim() || "";
+  try {
+    return presetId === "ke" || id === "ke" || new URL(baseUrl).hostname === "openapi-ait.ke.com";
+  } catch {
+    return presetId === "ke" || id === "ke";
+  }
+}
+
+function formatKeSsoStatusHtml(status) {
+  if (status?.loggedIn && status?.userId) {
+    return `<span class="chip good">已登录</span> 系统号：<span class="mono">${escapeHtml(String(status.userId))}</span>`;
+  }
+  return `<span class="chip warn">登录态已失效</span> <span class="tiny muted">${escapeHtml(status?.reason || "请重新登录 KE")}</span>`;
+}
+
+async function refreshKeSsoStatus() {
+  const statusEl = document.getElementById("provider-ke-sso-status");
+  if (!statusEl || !isKeProviderForm()) return null;
+  statusEl.innerHTML = `<span class="tiny muted">正在检测登录态…</span>`;
+  try {
+    const status = await invoke("ke-sso:status");
+    const form = document.getElementById("provider-form");
+    if (status?.loggedIn && status?.userId && form) {
+      form._keUserId = String(status.userId);
+      form._clearKeUserId = false;
+    }
+    statusEl.innerHTML = formatKeSsoStatusHtml(status);
+    return status;
+  } catch (err) {
+    statusEl.innerHTML = `<span class="chip bad">状态读取失败</span> <span class="tiny muted">${escapeHtml(err?.message || String(err))}</span>`;
+    return null;
+  }
+}
+
+function syncKeSsoPanel() {
+  const panel = document.getElementById("provider-ke-sso-panel");
+  if (!panel) return;
+  const visible = isKeProviderForm();
+  panel.style.display = visible ? "" : "none";
+  if (visible) refreshKeSsoStatus().catch(() => {});
+}
+
 function syncProviderAuthControls() {
   const mode = document.getElementById("provider-auth-mode")?.value || "api_key";
   const preset = providerPresetById(document.getElementById("provider-preset-select")?.value);
@@ -903,6 +949,7 @@ function syncProviderAuthControls() {
       refreshCursorSubscriptionModelCatalog().catch(() => {});
     }
   }
+  syncKeSsoPanel();
   syncProviderRiskNote();
 }
 
@@ -2679,6 +2726,10 @@ function collectProviderForm() {
     apiKey: raw.apiKey?.trim(),
     usage_check: usageCheckFromForm(raw)
   };
+  if (isKeProviderForm()) {
+    if (form._clearKeUserId) data.keUserId = null;
+    else if (form._keUserId) data.keUserId = String(form._keUserId);
+  }
   if (authMode === "account_pool") {
     data.providerType = "account_pool";
     data.poolKind = raw.poolKind || document.getElementById("provider-pool-kind")?.value || currentPoolKind();
@@ -2890,6 +2941,8 @@ function openProviderDialog(editId) {
   const title = document.getElementById("provider-dialog-title");
   const form = document.getElementById("provider-form");
   form.reset();
+  form._keUserId = "";
+  form._clearKeUserId = false;
   resetSub2ApiDataImportPanel();
   const existing = editId ? state.config.providers.find((p) => p.id === editId) : null;
   resetProviderDiscovery();
@@ -2908,6 +2961,7 @@ function openProviderDialog(editId) {
     form.querySelector('[name="routingMode"]').value = existing.routingMode || "auto";
     form.querySelector('[name="apiKeyEnv"]').value = existing.apiKeyEnv || "";
     form.querySelector('[name="apiKey"]').value = existing.apiKey || "";
+    form._keUserId = existing.keUserId || "";
     const cursorEnabled = document.getElementById("provider-cursor-subscription-enabled");
     if (cursorEnabled) cursorEnabled.checked = existing.providerType === "cursor_subscription" ? existing.enabled !== false : false;
     fillRetryFormFields(form, existing.retry);
@@ -2965,6 +3019,7 @@ function openProviderDialog(editId) {
   renderProviderDiscovery();
   wrap.classList.add("open");
   form._editId = editId || null;
+  syncKeSsoPanel();
 }
 document.getElementById("btn-provider-add").addEventListener("click", () => openProviderDialog(null));
 document.getElementById("provider-preset-select").addEventListener("change", (e) => {
@@ -2979,6 +3034,43 @@ document.getElementById("provider-preset-select").addEventListener("change", (e)
 document.getElementById("provider-auth-mode").addEventListener("change", () => {
   syncProviderAuthControls();
   syncProviderRiskNote(state.config.providers.find((p) => p.id === document.getElementById("provider-form")._editId) || null);
+});
+document.getElementById("btn-ke-sso-login")?.addEventListener("click", async () => {
+  const button = document.getElementById("btn-ke-sso-login");
+  if (button) { button.disabled = true; button.textContent = "登录中…"; }
+  try {
+    const status = await invoke("ke-sso:login");
+    const form = document.getElementById("provider-form");
+    if (status?.loggedIn && status?.userId && form) {
+      form._keUserId = String(status.userId);
+      form._clearKeUserId = false;
+      toast("KE 登录成功；保存供应商后生效");
+    } else {
+      toast(status?.reason || "KE 登录未完成", "error");
+    }
+    await refreshKeSsoStatus();
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "登录 KE"; }
+  }
+});
+document.getElementById("btn-ke-sso-refresh")?.addEventListener("click", () => {
+  refreshKeSsoStatus().catch((err) => toast(err?.message || String(err), "error"));
+});
+document.getElementById("btn-ke-sso-logout")?.addEventListener("click", async () => {
+  try {
+    await invoke("ke-sso:logout");
+    const form = document.getElementById("provider-form");
+    if (form) {
+      form._keUserId = "";
+      form._clearKeUserId = true;
+    }
+    await refreshKeSsoStatus();
+    toast("已退出 KE 登录；保存供应商后会移除系统号");
+  } catch (err) {
+    toast(err?.message || String(err), "error");
+  }
 });
 document.getElementById("btn-codex-oauth-login")?.addEventListener("click", async () => {
   const form = document.getElementById("provider-form");
@@ -3405,9 +3497,9 @@ document.getElementById("btn-provider-discover").addEventListener("click", async
       allowedClients: ["*"],
       capabilities: {
         text: true,
-        tools: item.capabilities?.tools !== false,
-        reasoning: !!item.capabilities?.reasoning,
-        images: !!item.capabilities?.images,
+        tools: true,
+        reasoning: true,
+        images: true,
         stream: true,
         multimodal: !!item.capabilities?.multimodal
       }
@@ -3434,7 +3526,7 @@ document.getElementById("btn-discovery-add-manual")?.addEventListener("click", (
     contextWindow: undefined,
     maxOutputTokens: undefined,
     allowedClients: ["*"],
-    capabilities: { text: true, tools: true, reasoning: false, images: false, stream: true, multimodal: false }
+    capabilities: { text: true, tools: true, reasoning: true, images: true, stream: true, multimodal: false }
   };
   state.providerDiscovery.push(newModel);
   renderProviderDiscovery();
@@ -3536,8 +3628,8 @@ function openModelDialog(editId) {
     fillStreamCompatFormFields(form, null);
     form.querySelector('[name="cap-text"]').checked = true;
     form.querySelector('[name="cap-tools"]').checked = true;
-    form.querySelector('[name="cap-reasoning"]').checked = false;
-    form.querySelector('[name="cap-images"]').checked = false;
+    form.querySelector('[name="cap-reasoning"]').checked = true;
+    form.querySelector('[name="cap-images"]').checked = true;
     form.querySelector('[name="cap-stream"]').checked = true;
     form.querySelector('[name="cap-multimodal"]').checked = false;
   }
@@ -4823,29 +4915,10 @@ async function refreshObservePanel() {
   }
   renderCallLogTable();
   renderTraceList();
-  if (state.callLog.selectedId != null) {
-    const selected = state.callLog.rows.find((row) => Number(row.id) === Number(state.callLog.selectedId));
-    if (selected) openCallLogRow(selected, { silent: true });
-  } else if (state.traces.module === "request-log") {
-    clearCallLogDetail();
-  }
 }
 
 async function refreshCallLog() {
   await refreshObservePanel();
-}
-
-function clearCallLogDetail() {
-  const title = document.getElementById("call-log-detail-title");
-  const subtitle = document.getElementById("call-log-detail-subtitle");
-  const meta = document.getElementById("call-log-meta");
-  const detail = document.getElementById("call-log-detail");
-  const openTrace = document.getElementById("btn-call-log-open-trace");
-  if (title) title.textContent = "请求 / 响应";
-  if (subtitle) subtitle.textContent = "选择左侧一条请求";
-  if (meta) meta.innerHTML = "";
-  if (detail) detail.innerHTML = '<div class="empty-state">选择一条请求，查看请求体与响应体</div>';
-  if (openTrace) openTrace.style.display = "none";
 }
 
 function buildRequestBodyFromSummary(row, request) {
@@ -4900,7 +4973,7 @@ function prettyJson(value) {
   }
 }
 
-async function renderRequestResponseBodies(row, hostId = "call-log-detail") {
+async function renderRequestResponseBodies(row, hostId = "call-log-modal-detail", { skills } = {}) {
   const host = document.getElementById(hostId);
   if (!host || !row) return;
   const request = parseSummary(row.request_summary);
@@ -4920,14 +4993,33 @@ async function renderRequestResponseBodies(row, hostId = "call-log-detail") {
     }
   }
   if (requestBody == null) requestBody = buildRequestBodyFromSummary(row, request);
+  let outboundBody = null;
+  let outboundLabel = "";
+  const outRef = traceOutboundBodyRef(row);
+  if (outRef) {
+    try {
+      const result = await invoke("request-body:read", { ref: outRef });
+      if (result?.ok && result.payload != null) {
+        outboundBody = result.payload?.body ?? result.payload;
+        outboundLabel = result.payload?.truncated ? "完整落盘（有截断）" : "完整落盘";
+      }
+    } catch {
+      // 出站体读取失败不阻断展示
+    }
+  }
   const responseBody = buildResponseBodyFromSummary(row, response);
   const status = Number(row.status || 0);
   const statusCls = status >= 400 || status === 0 ? "warn" : "good";
   const requestText = prettyJson(requestBody);
   const responseText = responseBody ? prettyJson(responseBody) : "";
+  const skillNames = Array.isArray(skills?.names) ? skills.names : [];
+  const skillsLine = skillNames.length
+    ? `<div class="call-log-skills"><strong>本请求携带技能（${skillNames.length}）</strong><span>${escapeHtml(skillNames.slice(0, 40).join("、") + (skillNames.length > 40 ? "…" : ""))}</span></div>`
+    : "";
 
   host.innerHTML = `
-    <div class="body-split">
+    ${skillsLine}
+    <div class="body-split${outboundBody ? " has-outbound" : ""}">
       <section class="body-pane">
         <div class="body-pane-hd">
           <strong>请求体</strong>
@@ -4938,6 +5030,15 @@ async function renderRequestResponseBodies(row, hostId = "call-log-detail") {
           ? `<pre class="body-pane-pre" data-body-text="request">${escapeHtml(requestText)}</pre>`
           : `<div class="body-pane-empty"><span>📄</span><span>暂无请求数据</span></div>`}
       </section>
+      ${outboundBody ? `
+      <section class="body-pane">
+        <div class="body-pane-hd">
+          <strong>出站请求体</strong>
+          <span class="chip muted">${escapeHtml(outboundLabel || "上游实际发出")}</span>
+          <button class="btn" type="button" data-copy-body="outbound">复制</button>
+        </div>
+        <pre class="body-pane-pre" data-body-text="outbound">${escapeHtml(prettyJson(outboundBody))}</pre>
+      </section>` : ""}
       <section class="body-pane">
         <div class="body-pane-hd">
           <strong>响应体</strong>
@@ -4953,12 +5054,31 @@ async function renderRequestResponseBodies(row, hostId = "call-log-detail") {
   host.querySelectorAll("[data-copy-body]").forEach((button) => {
     button.addEventListener("click", async () => {
       const kind = button.dataset.copyBody;
-      const text = kind === "request" ? requestText : responseText;
+      const text = kind === "request" ? requestText : kind === "outbound" ? prettyJson(outboundBody) : responseText;
       if (!text) return toast("没有可复制的内容");
       await navigator.clipboard.writeText(text);
       toast(kind === "request" ? "已复制请求体" : "已复制响应体");
     });
   });
+}
+
+/** 汇总一条请求携带的技能：优先摘要，有完整落盘体时用完整请求体重新提取。 */
+async function skillSummaryForRow(row) {
+  if (!row) return { count: 0, names: [] };
+  const request = parseSummary(row.request_summary || row.requestSummary);
+  let source = request;
+  const ref = traceBodyRef(row);
+  if (ref) {
+    try {
+      const result = await invoke("request-body:read", { ref });
+      const body = result?.payload?.body ?? result?.payload;
+      if (body && typeof body === "object") source = mergeSummaryFromChatBody(request || {}, body);
+    } catch {
+      // 保留摘要
+    }
+  }
+  const names = Array.isArray(source?.messages?.skills) ? source.messages.skills : [];
+  return { count: names.length, names };
 }
 
 function renderCallLogTable() {
@@ -4974,7 +5094,7 @@ function renderCallLogTable() {
       : `${rows.length} 条`;
   }
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无请求记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无请求记录</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map((row) => {
@@ -5015,7 +5135,6 @@ function renderCallLogTable() {
           </div>
         </td>
         <td class="call-log-tokens mono" title="prompt / completion">${escapeHtml(formatTokenPair(row.prompt_tokens, row.completion_tokens))}</td>
-        <td><button class="btn" type="button" data-call-log-open="${escapeHtml(row.id)}">查看</button></td>
       </tr>
     `;
   }).join("");
@@ -5023,44 +5142,44 @@ function renderCallLogTable() {
     tr.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
       const row = rows.find((item) => Number(item.id) === Number(tr.dataset.callLogId));
-      if (row) openCallLogRow(row);
-    });
-  });
-  tbody.querySelectorAll("[data-call-log-open]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const row = rows.find((item) => Number(item.id) === Number(button.dataset.callLogOpen));
-      if (row) openCallLogRow(row);
+      if (row) openCallLogModal(row).catch((err) => toast(`加载请求/响应失败：${err.message}`));
     });
   });
 }
 
-function openCallLogRow(row, { silent = false } = {}) {
+async function openCallLogModal(row) {
   if (!row) return;
   state.callLog.selectedId = row.id;
-  if (!silent) renderCallLogTable();
-  const title = document.getElementById("call-log-detail-title");
-  const subtitle = document.getElementById("call-log-detail-subtitle");
-  const meta = document.getElementById("call-log-meta");
-  const openTrace = document.getElementById("btn-call-log-open-trace");
+  renderCallLogTable();
+  const wrap = document.getElementById("call-log-modal-wrap");
+  if (!wrap) return;
+  const title = document.getElementById("call-log-modal-title");
+  const subtitle = document.getElementById("call-log-modal-subtitle");
+  const meta = document.getElementById("call-log-modal-meta");
   if (title) title.textContent = `请求 / 响应 · ${agentLabel(row.client_id)}`;
-  if (subtitle) subtitle.textContent = `${row.model_id || row.requested_model || "-"} · ${formatDate(row.ts)}`;
+  if (subtitle) subtitle.textContent = `${row.model_id || row.requested_model || "-"} · ${formatDate(row.ts)} · ${row.method || "POST"} ${row.path || "-"}`;
+  const skillInfo = await skillSummaryForRow(row);
   if (meta) {
     const status = Number(row.status || 0);
     const statusCls = status >= 400 || status === 0 ? "warn" : "good";
-    const hasFullBody = Boolean(traceBodyRef(row));
     meta.innerHTML = [
       `<span class="chip ${statusCls}">${escapeHtml(status || "-")}</span>`,
       row.provider_id ? `<span class="chip">${escapeHtml(row.provider_id)}</span>` : "",
       `<span class="chip">${escapeHtml(formatCallLatency(row.latency_ms))}</span>`,
       `<span class="chip mono">${escapeHtml(formatTokenPair(row.prompt_tokens, row.completion_tokens))} tokens</span>`,
       callLogStreamLabel(row) ? `<span class="chip">${escapeHtml(callLogStreamLabel(row))}</span>` : "",
-      hasFullBody ? '<span class="chip good">完整请求体</span>' : '<span class="chip muted">摘要请求体</span>',
+      skillInfo.count > 0 ? `<span class="chip key">skills ${escapeHtml(skillInfo.count)}</span>` : "",
       row.error ? `<span class="chip warn">${escapeHtml(row.error)}</span>` : ""
     ].filter(Boolean).join("");
   }
-  renderRequestResponseBodies(row, "call-log-detail").catch((err) => toast(`加载请求/响应失败：${err.message}`));
-  if (openTrace) openTrace.style.display = "";
+  const detail = document.getElementById("call-log-modal-detail");
+  if (detail) detail.innerHTML = '<div class="empty-state">正在加载请求体 / 响应体…</div>';
+  wrap.classList.add("open");
+  try {
+    await renderRequestResponseBodies(row, "call-log-modal-detail", { skills: skillInfo });
+  } catch (err) {
+    if (detail) detail.innerHTML = `<div class="empty-state">加载请求/响应失败：${escapeHtml(err.message)}</div>`;
+  }
 }
 
 function traceUserTurnKey(row) {
@@ -5188,19 +5307,49 @@ function summarizeToolsFromBody(tools) {
   }).filter((tool) => tool.name);
 }
 
+/** 定位系统提示里的 "### Available skills" 清单段（到下一个 Markdown 标题为止）。 */
+function extractSkillSectionFromText(systemText) {
+  const text = String(systemText || "");
+  const match = /(?:#{1,6}\s*)?(?:Available\s+[Ss]kills?|可用\s*技能|技能列表)/.exec(text);
+  if (!match) return "";
+  const rest = text.slice(match.index);
+  const nextHeading = rest.search(/\n#{1,6}\s+\S/);
+  return nextHeading > 0 ? rest.slice(0, nextHeading) : rest.slice(0, 40000);
+}
+
+// `skill: <name>` 兜底时过滤掉明显不是技能名的通用词（防止 "description" 这类误报）
+const GENERIC_SKILL_WORDS = new Set([
+  "description", "name", "type", "skill", "skills", "file", "path", "usage",
+  "parameters", "required", "properties", "summary", "detail", "list"
+]);
+
 function extractSkillNamesFromText(systemText) {
   const text = String(systemText || "");
-  if (!/(skill|skills|技能|能力|SKILL\.md)/i.test(text)) return [];
   const names = new Set();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    const match = /^(?:[-*]\s*)?`?([A-Za-z0-9_.:@/-]{2,80})`?\s*(?:[:：-]|—)\s+/.exec(trimmed);
-    if (match && /skill|技能|能力/i.test(trimmed)) names.add(match[1]);
-    const bullet = /^(?:[-*]\s+)(?:Skill\s+)?`([A-Za-z0-9_.:@/-]{2,80})`/i.exec(trimmed);
-    if (bullet) names.add(bullet[1]);
+
+  // 1) Codex 等会在系统提示里给出 "### Available skills" 清单：
+  //    `- name: 描述 (file: …/SKILL.md)`。只解析这一段，避免把 Skill roots
+  //    （`- r0 = …`）或插件说明（`- Relevance: …`）误当成 Skill。
+  const section = extractSkillSectionFromText(text);
+  if (section) {
+    for (const line of section.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      const match = /^[-*]\s+([A-Za-z0-9_.:@/-]{2,120}?)(?::|：)\s+/.exec(trimmed);
+      if (match) names.add(match[1]);
+    }
   }
-  for (const match of text.matchAll(/(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) names.add(match[1]);
-  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) names.add(match[1]);
+
+  // 2) 兜底：显式 "skill: name" / "技能: name" 标记
+  for (const match of text.matchAll(/(?:^|\s)(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) {
+    if (!GENERIC_SKILL_WORDS.has(match[1].toLowerCase())) names.add(match[1]);
+  }
+
+  // 3) 兜底：`skills/<name>` 路径（跳过路径里目录名恰为 "skills" 的段）
+  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) {
+    if (match[1] === "skills") continue;
+    names.add(match[1]);
+  }
+
   return Array.from(names).slice(0, 80);
 }
 
@@ -5381,6 +5530,12 @@ function traceBodyRef(row) {
   if (row.requestBodyRef) return String(row.requestBodyRef);
   const request = parseSummary(row.request_summary || row.requestSummary);
   return String(request?.requestBodyCapture?.ref || "");
+}
+
+function traceOutboundBodyRef(row) {
+  if (!row) return "";
+  const request = parseSummary(row.request_summary || row.requestSummary);
+  return String(request?.outboundRequestBodyCapture?.ref || "");
 }
 
 function traceLastUserMessage(row) {
@@ -5638,7 +5793,9 @@ function renderRequestLogDetail(row, request, response, { hostId = "trace-timeli
     title: `③ Skill${request?.messages?.skills?.length ? ` · ${request.messages.skills.length}` : ""}`,
     text: request?.messages?.skills?.length
       ? request.messages.skills.map((name, index) => `${index + 1}. ${name}`).join("\n")
-      : "（未从系统提示中解析到 Skill 名称，或本轮未携带）",
+      : request?.enrichedFromBody
+        ? "（该请求的完整请求体中没有技能清单；部分 Agent 的技能是按需加载的，不会注入系统提示）"
+        : "（摘要未保留技能清单；开启「落盘完整请求体」后重新发起，可在完整请求体中看到技能列表）",
     collapseDefault: false
   });
   sections.push({
@@ -5815,9 +5972,10 @@ document.getElementById("call-log-model-filter")?.addEventListener("input", () =
     refreshObservePanel().catch((err) => toast(`刷新失败：${err.message}`));
   }, 250);
 });
-document.getElementById("btn-call-log-open-trace")?.addEventListener("click", () => {
+document.getElementById("btn-call-log-modal-open-trace")?.addEventListener("click", () => {
   const row = (state.callLog.rows || []).find((item) => Number(item.id) === Number(state.callLog.selectedId));
   if (!row) return toast("请先选择一条请求");
+  document.getElementById("call-log-modal-wrap")?.classList.remove("open");
   setObserveModule("call-view");
   state.traces.selected = { type: "request", row };
   openTraceItem({ type: "request", row });

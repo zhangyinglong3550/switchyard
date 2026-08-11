@@ -1,0 +1,97 @@
+<h2>思考档位调研：Codex vs GPT API vs 主流供应商</h2>
+<p class="muted">数据截至 2026-08-02，来源：OpenAI / DeepSeek / OpenRouter / Anthropic / Qwen 官方文档 + 本机 ~/.codex/models_cache.json</p>
+
+<div class="cards">
+  <div class="card" data-vote="codex-api-same">
+    <h3>核心结论</h3>
+    <p><strong>不完全一样。</strong>重叠档（low/medium/high/xhigh）是同一字段、同一取值；但 Codex 目录与 GPT-5.6 API 全集不对齐，且 Codex 另有 <code>ultra</code>（编排）/ API 另有 <code>none</code>、<code>pro mode</code>。</p>
+  </div>
+  <div class="card" data-vote="need-capability-table">
+    <h3>推荐做法</h3>
+    <p>逻辑档位全集 + 每模型能力表 + 出站映射；可视化同时显示「请求档 → 上游档」。</p>
+  </div>
+</div>
+
+<h3>1. OpenAI / GPT-5.6</h3>
+<table>
+  <thead><tr><th>面</th><th>字段</th><th>支持档</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Responses API（官方文档）</td>
+      <td><code>reasoning.effort</code></td>
+      <td><code>none, low, medium, high, xhigh, max</code></td>
+      <td>默认常为 medium；另有独立 <code>reasoning.mode: pro</code></td>
+    </tr>
+    <tr>
+      <td>Chat Completions</td>
+      <td><code>reasoning_effort</code></td>
+      <td>同上（model-dependent）；部分路径 <code>max</code> 可能 400</td>
+      <td>推荐仍用 Responses</td>
+    </tr>
+    <tr>
+      <td>Codex CLI 配置</td>
+      <td><code>model_reasoning_effort</code></td>
+      <td>按模型目录</td>
+      <td>出站仍变成 Responses 的 <code>reasoning.effort</code></td>
+    </tr>
+    <tr>
+      <td>本机 Switchyard 写入的 models_cache（gpt-5.6-*）</td>
+      <td>supported_reasoning_levels</td>
+      <td><code>low, medium, high, xhigh</code> only</td>
+      <td><strong>缺 none / max / ultra</strong></td>
+    </tr>
+    <tr>
+      <td>上游 Codex 社区目录（较新）</td>
+      <td>同上</td>
+      <td>Sol/Terra: +max +ultra；Luna: +max</td>
+      <td><code>ultra</code> 偏 Codex 编排，不等于 API effort</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>2. 其它有名供应商（出站形态）</h3>
+<table>
+  <thead><tr><th>供应商</th><th>字段形态</th><th>档位 / 能力</th><th>相对 OpenAI 逻辑档</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>DeepSeek V4</td>
+      <td><code>thinking.type</code> + <code>reasoning_effort</code></td>
+      <td>官方：<code>low, high, max</code>（默认 high）；关思考用 thinking.disabled。<br>兼容：medium/xhigh→high；Pro 暂可能把 low→high、xhigh→max</td>
+      <td>有损映射：多档压成 2–3 档</td>
+    </tr>
+    <tr>
+      <td>OpenRouter</td>
+      <td><code>reasoning.effort</code></td>
+      <td>网关层：<code>none, minimal, low, medium, high, xhigh, max</code>；按模型 <code>supported_efforts</code> 再钳</td>
+      <td>最接近 OpenAI 全集</td>
+    </tr>
+    <tr>
+      <td>Anthropic / Claude</td>
+      <td><code>output_config.effort</code>（+ thinking）</td>
+      <td>常见 <code>low, medium, high, xhigh, max</code>（按模型子集）</td>
+      <td>名称相近，语义是 Claude effort，不是 GPT</td>
+    </tr>
+    <tr>
+      <td>Qwen / DashScope</td>
+      <td><code>enable_thinking</code> + 可选 <code>thinking_budget</code></td>
+      <td>开关 + token 预算；<code>reasoning_effort</code> 会被<strong>静默忽略</strong></td>
+      <td>无多档枚举，只能近似映射</td>
+    </tr>
+    <tr>
+      <td>MiniMax 等</td>
+      <td>如 <code>reasoning_split</code> / thinking 对象</td>
+      <td>多为 on/off</td>
+      <td>Switchyard 现有启发式：effort→开关</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>3. Codex 里选 High，和直接调 GPT-5.6 API 一样吗？</h3>
+<ol>
+  <li><strong>字段：一样。</strong>最终都是 Responses <code>reasoning: { effort: "high" }</code>（你本地日志已证实）。</li>
+  <li><strong>取值集合：不完全一样。</strong>API 有 <code>none/max</code>；Codex UI/目录可能没有；Codex 可能有 <code>ultra</code>，API 没有同名字段（接近 multi-agent / 编排）。</li>
+  <li><strong>默认档：可能不同。</strong>API 文档默认常 medium；你本机 cache 里若干 gpt-5.6 默认是 low。</li>
+  <li><strong>Pro：</strong>API 用 <code>reasoning.mode: "pro"</code>；Codex 未必暴露，和 effort 正交。</li>
+</ol>
+
+<p class="muted">点上面两张卡表示赞同方向；下一步我会据此出 Switchyard 对齐设计。</p>

@@ -1,5 +1,5 @@
 // Electron main process for Switchyard.
-import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, session } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -180,12 +180,79 @@ let providerHealthMonitor = null;
 let codexArtifactTimer = null;
 const sub2apiDataImportSessions = new Map();
 const SUB2API_IMPORT_SESSION_TTL_MS = 10 * 60 * 1000;
+const KE_SSO_PARTITION = "persist:ke-sso";
+const KE_LOGIN_URL = "https://login.ke.com/login?service=https%3A%2F%2Fbella-openapi.ke.com%2Fconsole%2Fcas%3Fredirect%3Dhttps%3A%2F%2Fait.ke.com%2Foverview";
+const KE_USER_INFO_URL = "https://bella-openapi.ke.com/console/userInfo";
 // 托盘常驻 + 关窗保活：mainWindow 保留主窗口引用，tray 为系统托盘，
 // isQuitting 标记是否真正退出（区分“点叉隐藏”与“菜单/托盘退出”）。
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 registerBuiltinPatches();
+
+function keSsoSession() {
+  return session.fromPartition(KE_SSO_PARTITION);
+}
+
+async function keSsoStatus() {
+  let response;
+  try {
+    response = await keSsoSession().fetch(KE_USER_INFO_URL, {
+      headers: { Accept: "application/json" }
+    });
+  } catch (err) {
+    return { ok: false, loggedIn: false, reason: err?.message || String(err) };
+  }
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    return { ok: false, loggedIn: false, reason: "登录态已失效，请重新登录" };
+  }
+  const userId = payload?.data?.userId;
+  if (!response.ok || payload?.code !== 200 || userId == null || userId === "") {
+    return { ok: false, loggedIn: false, reason: payload?.message || "登录态已失效，请重新登录" };
+  }
+  return { ok: true, loggedIn: true, userId: String(userId) };
+}
+
+async function runKeSsoLogin() {
+  const win = new BrowserWindow({
+    width: 980,
+    height: 760,
+    parent: mainWindow || undefined,
+    modal: Boolean(mainWindow),
+    webPreferences: {
+      partition: KE_SSO_PARTITION,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (!win.isDestroyed()) win.close();
+      resolve(result);
+    };
+    const check = async () => {
+      const status = await keSsoStatus();
+      if (status.loggedIn) settle(status);
+    };
+    win.on("closed", async () => {
+      if (!settled) settle(await keSsoStatus());
+    });
+    win.webContents.on("did-navigate", check);
+    win.webContents.on("did-navigate-in-page", check);
+    win.loadURL(KE_LOGIN_URL).catch((err) => settle({
+      ok: false,
+      loggedIn: false,
+      reason: err?.message || String(err)
+    }));
+  });
+}
 
 // ── 自动更新检查 + 下载安装 ──────────────────────────────────
 let updateCheckTimer = null;
@@ -1413,6 +1480,14 @@ ipcMain.handle("app:open-release-page", async () => {
   const url = pendingUpdateInfo?.url || "https://github.com/zhangyinglong3550/switchyard/releases/latest";
   await shell.openExternal(url);
   return { ok: true, url };
+});
+
+// ── KE 单点登录（独立持久化 session；Cookie 不写入配置或日志）──────
+ipcMain.handle("ke-sso:status", () => keSsoStatus());
+ipcMain.handle("ke-sso:login", () => runKeSsoLogin());
+ipcMain.handle("ke-sso:logout", async () => {
+  await keSsoSession().clearStorageData();
+  return { ok: true };
 });
 
 // ── Anthropic 官方 OAuth ─────────────────────────────────────

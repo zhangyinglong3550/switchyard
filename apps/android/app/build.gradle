@@ -1,5 +1,7 @@
 plugins {
   id 'com.android.application'
+  id 'org.jetbrains.kotlin.android'
+  id 'org.jetbrains.kotlin.plugin.serialization'
 }
 
 def environmentOrProperty = { String name, String fallback = "" ->
@@ -8,8 +10,8 @@ def environmentOrProperty = { String name, String fallback = "" ->
   return value == null || value.toString().trim().isEmpty() ? fallback : value.toString().trim()
 }
 
-def androidVersionCode = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_CODE", "2002045").toInteger()
-def androidVersionName = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_NAME", "2.2.46")
+def androidVersionCode = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_CODE", "2002046").toInteger()
+def androidVersionName = environmentOrProperty("SWITCHYARD_ANDROID_VERSION_NAME", "2.3.0")
 def storeFilePath = environmentOrProperty("SWITCHYARD_ANDROID_STORE_FILE")
 def storePassword = environmentOrProperty("SWITCHYARD_ANDROID_STORE_PASSWORD")
 def keyAlias = environmentOrProperty("SWITCHYARD_ANDROID_KEY_ALIAS")
@@ -51,4 +53,46 @@ android {
       else signingConfig signingConfigs.debug
     }
   }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+  buildFeatures {
+    compose true
+  }
+  composeOptions {
+    kotlinCompilerExtensionVersion = '1.5.4'
+  }
+  packagingOptions {
+    resources.excludes += '/META-INF/{AL2.0,LGPL2.1}'
+  }
+}
+
+dependencies {
+  implementation 'androidx.core:core-ktx:1.12.0'
+  implementation 'androidx.activity:activity-compose:1.8.2'
+  implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+  implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0'
+
+  // Compose
+  implementation platform('androidx.compose:compose-bom:2024.02.02')
+  implementation 'androidx.compose.ui:ui'
+  implementation 'androidx.compose.ui:ui-tooling-preview'
+  implementation 'androidx.compose.material3:material3'
+  implementation 'androidx.compose.material:material-icons-extended'
+  debugImplementation 'androidx.compose.ui:ui-tooling'
+
+  // 网络
+  implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+  implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0'
+
+  // 测试
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3'
+  androidTestImplementation 'androidx.test.ext:junit:1.1.5'
 }

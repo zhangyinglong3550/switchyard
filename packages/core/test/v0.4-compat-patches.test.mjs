@@ -180,6 +180,19 @@ testPatch("deepseek-reasoning · strips reasoning_content from stream delta", ()
   assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
 });
 
+testPatch("deepseek-reasoning · fallback reasoning_content to content when no text", () => {
+  registerPatch(deepseekReasoningPatch.id, deepseekReasoningPatch);
+  const ctx = { provider: { id: "deepseek" }, model: { id: "deepseek/v4" } };
+  // 只有 reasoning_content、没有 content 的 delta 不应被剥成空而被下游吞掉，
+  // 应回填成 content，保证像 Grok Build 这样的纯 chat 客户端能收到正文。
+  const streamLine = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"thinking text here"}}]}';
+  const out = applyStreamLine(streamLine, ctx);
+  assert.notEqual(out, null, "reasoning-only delta must not be swallowed to a blank stream");
+  const parsed = JSON.parse(out.replace("data: ", ""));
+  assert.equal(parsed.choices[0].delta.content, "thinking text here");
+  assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
+});
+
 testPatch("deepseek-reasoning · does NOT affect non-DeepSeek providers", () => {
   registerPatch(deepseekReasoningPatch.id, deepseekReasoningPatch);
   const payload = { choices: [{ message: { content: "Hi", reasoning_content: "thinking" } }] };
@@ -203,6 +216,19 @@ testPatch("chat-reasoning · maps MiniMax reasoning_details into internal thinki
   const out = applyInbound(payload, { provider: { id: "minimax" }, model: { id: "minimax/MiniMax-M2.7" } });
   assert.equal(out.choices[0].message.reasoning_details, undefined);
   assert.equal(out.choices[0].message._switchyardAnthropicThinking[0].thinking, "Need to inspect code.");
+});
+
+testPatch("chat-reasoning · fallback reasoning-only stream delta to content (Grok Build)", () => {
+  registerPatch(chatReasoningPatch.id, chatReasoningPatch);
+  const ctx = { provider: { id: "ke" }, model: { id: "ke/deepseek-v4-flash" } };
+  // KE 中继的 deepseek 流式把正文放在 reasoning_content 里、无 content 字段，
+  // 剥离后 delta 为空会被吞成空流。应回填为 content，避免 Grok Build 无限重试。
+  const streamLine = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"思考正文"}}]}';
+  const out = applyStreamLine(streamLine, ctx);
+  assert.notEqual(out, null, "must not swallow reasoning-only delta into a blank stream");
+  const parsed = JSON.parse(out.replace("data: ", ""));
+  assert.equal(parsed.choices[0].delta.content, "思考正文");
+  assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
 });
 
 testPatch("reasoning-options · maps Codex reasoning to DashScope enable_thinking", () => {

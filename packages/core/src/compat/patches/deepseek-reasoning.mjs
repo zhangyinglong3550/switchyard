@@ -45,7 +45,10 @@ export const deepseekReasoningPatch = {
     return { ...payload, choices };
   },
   streamLine(line) {
-    const data = line.startsWith("data: ") ? line.slice(6) : line;
+    if (typeof line !== "string" || !line.startsWith("data:")) return line;
+    let payload = line.slice(5);
+    if (payload.startsWith(" ")) payload = payload.slice(1);
+    const data = payload;
     if (!data || data === "[DONE]") return line;
     try {
       const parsed = JSON.parse(data);
@@ -53,11 +56,21 @@ export const deepseekReasoningPatch = {
       if (!Array.isArray(choices)) return line;
       let changed = false;
       for (const c of choices) {
-        if (c?.delta?.reasoning_content !== undefined) {
-          const { reasoning_content, ...rest } = c.delta;
+        const d = c?.delta;
+        if (!d || d.reasoning_content === undefined) continue;
+        const text = typeof d.reasoning_content === "string" ? d.reasoning_content : "";
+        const content = d.content;
+        if ((content === null || content === undefined || content === "") && text) {
+          // 该 delta 只承载思考文本（例如 KE 中继的 deepseek 把正文也放在
+          // reasoning_content）。若直接剥掉会得到空 delta，被 chat-reasoning
+          // 吞成空流，导致严格 chat 客户端（Grok Build）收到 200 却无任何内容而无限重试。
+          // 回填成 content，保证客户端至少能收到正文。
+          c.delta = { content: text };
+        } else {
+          const { reasoning_content, ...rest } = d;
           c.delta = rest;
-          changed = true;
         }
+        changed = true;
       }
       if (changed) return "data: " + JSON.stringify(parsed);
       return line;

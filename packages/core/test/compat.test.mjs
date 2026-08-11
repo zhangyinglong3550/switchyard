@@ -132,6 +132,56 @@ test("compat registry automatically applies matching patches without persisted c
   resetPatches();
 });
 
+test("KE injects the SSO system ID and adapts Claude Opus 4.8 reasoning", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const out = applyOutbound(
+    {
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "high",
+      thinking: { type: "enabled" },
+      budget_tokens: 1234
+    },
+    {
+      provider: {
+        id: "ke",
+        presetId: "ke",
+        baseUrl: "https://openapi-ait.ke.com/v1",
+        keUserId: "test-user-id"
+      },
+      model: {
+        id: "ke/claude-opus-4-8",
+        providerId: "ke",
+        upstreamModel: "claude-opus-4-8"
+      }
+    }
+  );
+  assert.equal(out.user, "test-user-id");
+  assert.deepEqual(out.thinking, { type: "adaptive" });
+  assert.deepEqual(out.output_config, { effort: "high" });
+  assert.equal(out.reasoning_effort, undefined);
+  assert.equal(out.reasoning, undefined);
+  assert.equal(out.budget_tokens, undefined);
+  resetPatches();
+});
+
+test("KE compatibility does not affect other OpenAI-compatible providers", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  const out = applyOutbound(
+    { messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" },
+    {
+      provider: { id: "other", baseUrl: "https://example.com/v1", keUserId: "test-user-id" },
+      model: { id: "other/claude-opus-4-8", providerId: "other", upstreamModel: "claude-opus-4-8" }
+    }
+  );
+  assert.equal(out.user, undefined);
+  assert.equal(out.thinking, undefined);
+  assert.equal(out.output_config, undefined);
+  assert.equal(out.reasoning_effort, "high");
+  resetPatches();
+});
+
 test("provider presets activate their compatibility defaults automatically", () => {
   resetPatches();
   registerBuiltinPatches();

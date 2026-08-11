@@ -78,6 +78,7 @@ export function createMobileControlServer({
   if (!store || !registry) throw new Error("mobile control server 参数不完整");
   let server = null;
   let boundPort = null;
+  const startedAt = Date.now();
   const eventClients = new Set();
   const publicRoot = publicDir ? path.resolve(publicDir) : "";
 
@@ -121,6 +122,17 @@ export function createMobileControlServer({
     if (req.method === "GET" && serveStatic(pathname, res)) return;
 
     try {
+      // 配对开始：进程内创建 challenge（供手机 App / 自测脚本纯 HTTP 配对）。
+      // 与静态页面的 ?challenge= 流程等价，但不需要先访问网页。
+      if (req.method === "POST" && pathname === "/mobile/pair/begin") {
+        const body = await readJson(req).catch(() => ({}));
+        const ttlMs = Number(body.ttlMs) || 10 * 60 * 1000;
+        const challenge = store.createChallenge({ ttlMs });
+        return json(res, 201, {
+          ...challenge,
+          pairingPath: `/?challenge=${encodeURIComponent(challenge.secret)}`
+        });
+      }
       if (req.method === "POST" && pathname === "/mobile/pair/complete") {
         const body = await readJson(req);
         return json(res, 201, store.completePairing({
@@ -129,6 +141,16 @@ export function createMobileControlServer({
         }));
       }
       if (!pathname.startsWith("/mobile/v1/")) return json(res, 404, { error: "not_found" });
+      // 健康探测端点：不需要设备认证，供 daemon 探测 / Electron 探测 / 自测脚本使用。
+      if (req.method === "GET" && pathname === "/mobile/v1/status") {
+        return json(res, 200, {
+          ok: true,
+          version: 1,
+          port,
+          agents: registry.agents?.() || [],
+          uptimeMs: Date.now() - startedAt
+        });
+      }
       if (!originAllowed(req)) return json(res, 403, { error: "origin_not_allowed" });
       const device = authenticate(req);
 

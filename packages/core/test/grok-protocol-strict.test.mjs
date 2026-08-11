@@ -21,6 +21,13 @@ test("grok-protocol-strict · keeps [DONE] marker", () => {
   assert.equal(grokProtocolStrictPatch.streamLine("data: [DONE]"), "data: [DONE]");
 });
 
+test("grok-protocol-strict · keeps no-space data: chunk (KE/deepseek)", () => {
+  // KE 聚合商返回 `data:{...}`（`data:` 后无空格）。旧实现把整行当 JSON 解析
+  // 而失败，随后返回 null 把合法 OpenAI chunk 吞成空流，导致 Grok Build 无限重试。
+  const line = 'data:{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"好的"}}]}';
+  assert.equal(grokProtocolStrictPatch.streamLine(line), line);
+});
+
 test("grok-protocol-strict · drops chunk missing id", () => {
   const line = 'data: {"choices":[],"x-opencode-type":"inference-cost","cost":"0.00191610"}';
   assert.equal(grokProtocolStrictPatch.streamLine(line), null);

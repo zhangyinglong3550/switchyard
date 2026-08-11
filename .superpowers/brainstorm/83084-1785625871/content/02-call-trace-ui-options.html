@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>调用可视化 · UI 方案选择</title>
+  <style>
+    :root {
+      --bg: #f7f3eb;
+      --panel: #fcf9f3;
+      --border: #e8e0d2;
+      --text: #3d3833;
+      --muted: #857c71;
+      --faint: #a39a8e;
+      --accent: #b56b45;
+      --accent-soft: #f0e4d8;
+      --good: #557a5d;
+      --good-soft: #e8f0ea;
+      --warn: #9b7a42;
+      --warn-soft: #f2ead9;
+      --mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+      --font: -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+      --radius: 12px;
+      --shadow: 0 8px 28px rgba(61, 56, 51, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      color: var(--text);
+      background:
+        radial-gradient(900px 420px at 10% -10%, #fff8ef 0%, transparent 55%),
+        radial-gradient(700px 380px at 100% 0%, #f0e4d8 0%, transparent 50%),
+        var(--bg);
+      line-height: 1.5;
+      padding: 28px 24px 80px;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; }
+    h1 { font-size: 28px; letter-spacing: -0.03em; margin: 0 0 6px; }
+    .lead { color: var(--muted); margin: 0 0 22px; max-width: 70ch; }
+    .hint {
+      display: inline-flex; gap: 8px; align-items: center;
+      padding: 8px 12px; border-radius: 999px;
+      background: var(--accent-soft); color: var(--accent);
+      font-size: 13px; margin-bottom: 22px;
+    }
+    .options { display: grid; gap: 18px; }
+    .option {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      transition: border-color .15s, transform .15s;
+    }
+    .option:hover { border-color: #d8c8b4; }
+    .option.selected {
+      border-color: var(--accent);
+      outline: 2px solid rgba(181, 107, 69, 0.25);
+    }
+    .option-head {
+      display: flex; justify-content: space-between; gap: 16px; align-items: flex-start;
+      padding: 16px 18px 12px; border-bottom: 1px solid var(--border);
+    }
+    .option-head h2 { margin: 0 0 4px; font-size: 18px; }
+    .option-head p { margin: 0; color: var(--muted); font-size: 13px; max-width: 62ch; }
+    .badge {
+      flex: none; font-size: 12px; font-weight: 600;
+      padding: 4px 10px; border-radius: 999px;
+      background: #efe7db; color: var(--muted);
+    }
+    .badge.rec { background: var(--good-soft); color: var(--good); }
+    .mock {
+      padding: 14px;
+      background: linear-gradient(180deg, #f3eee5, #f7f3eb);
+      min-height: 320px;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 10px;
+      height: 300px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .list {
+      border-right: 1px solid var(--border);
+      background: #f8f4ec;
+      padding: 8px;
+      overflow: auto;
+    }
+    .list-item {
+      padding: 8px 9px; border-radius: 10px; margin-bottom: 6px;
+      border: 1px solid transparent; font-size: 12px;
+    }
+    .list-item.active {
+      background: #fff; border-color: var(--border); box-shadow: 0 1px 2px rgba(61,56,51,.04);
+    }
+    .list-item strong { display: block; font-size: 12px; }
+    .list-item small { color: var(--faint); font-family: var(--mono); font-size: 10px; }
+    .detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .params {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      padding: 10px 12px; border-bottom: 1px solid var(--border);
+      background: #fffdf8;
+    }
+    .chip {
+      font-size: 11px; padding: 3px 8px; border-radius: 999px;
+      background: #efe7db; color: var(--text); font-family: var(--mono);
+      white-space: nowrap;
+    }
+    .chip.key { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .chip.map { background: var(--warn-soft); color: var(--warn); }
+    .chip.ok { background: var(--good-soft); color: var(--good); }
+    .tabs {
+      display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--border);
+      background: #fcf9f3;
+    }
+    .tab {
+      font-size: 12px; padding: 7px 12px; border-radius: 10px 10px 0 0;
+      color: var(--muted); cursor: default;
+    }
+    .tab.on { background: #fff; color: var(--text); border: 1px solid var(--border); border-bottom-color: #fff; margin-bottom: -1px; }
+    .timeline { flex: 1; overflow: auto; padding: 10px 12px; }
+    .ev {
+      display: grid; grid-template-columns: 10px 1fr; gap: 8px; margin-bottom: 8px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 6px; }
+    .ev-card {
+      border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+      background: #fff; font-size: 12px;
+    }
+    .ev-card .meta { color: var(--faint); font-size: 10px; margin-top: 2px; }
+    .actions {
+      display: flex; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+    button.pick {
+      appearance: none; border: 1px solid var(--border); background: #fff;
+      color: var(--text); border-radius: 10px; padding: 9px 14px;
+      font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button.pick.primary {
+      background: var(--accent); border-color: var(--accent); color: #fff;
+    }
+    button.pick:hover { filter: brightness(0.98); }
+    .option.selected button.pick.primary { background: var(--good); border-color: var(--good); }
+    .foot {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      background: rgba(252,249,243,.92); backdrop-filter: blur(10px);
+      border-top: 1px solid var(--border); padding: 12px 24px;
+    }
+    .foot-inner {
+      max-width: 1180px; margin: 0 auto;
+      display: flex; justify-content: space-between; gap: 12px; align-items: center;
+      font-size: 13px; color: var(--muted);
+    }
+    .foot strong { color: var(--text); }
+    /* Option B: split params rail */
+    .shell-b { grid-template-columns: 200px 1fr 230px; }
+    .rail {
+      border-left: 1px solid var(--border); background: #fffdf8;
+      padding: 10px; overflow: auto; font-size: 11px;
+    }
+    .rail h4 { margin: 0 0 8px; font-size: 12px; }
+    .kv { display: grid; grid-template-columns: 72px 1fr; gap: 4px 6px; margin-bottom: 8px; }
+    .kv dt { color: var(--faint); }
+    .kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+    /* Option C: stacked cards current-like improved */
+    .stack { display: grid; grid-template-rows: auto 1fr; gap: 8px; height: 300px; }
+    .live-card, .hist-card {
+      border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow: hidden;
+    }
+    .live-card { min-height: 118px; }
+    .hist-card { min-height: 0; display: flex; flex-direction: column; }
+    .card-hd {
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; font-size: 12px;
+    }
+    .note {
+      margin-top: 18px; padding: 14px 16px; border-radius: 14px;
+      background: #fff; border: 1px dashed #d8c8b4; color: var(--muted); font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>调用可视化 · 选一个布局</h1>
+    <p class="lead">
+      目标：一眼看到「传了什么参数」（尤其思考档位 / 请求→上游映射），同时保留时间线。
+      点「选择此方案」即可；底部会显示你的选择。
+    </p>
+    <div class="hint">推荐先看方案 A（参数条置顶 + 时间线）——排查 effort 时路径最短</div>
+
+    <div class="options">
+
+      <!-- A -->
+      <section class="option" id="opt-a" data-choice="A">
+        <div class="option-head">
+          <div>
+            <h2>方案 A · 参数条置顶 + 时间线</h2>
+            <p>选中请求后，顶部始终显示模型 / effort / 请求→上游映射；下方是可折叠时间线。最适合你说的「看参数 + 看过程」。</p>
+          </div>
+          <span class="badge rec">推荐</span>
+        </div>
+        <div class="mock">
+          <div class="shell">
+            <aside class="list">
+              <div class="list-item active">
+                <strong>Codex · 200</strong>
+                <small>gpt-5.6-luna · 12s</small>
+              </div>
+              <div class="list-item">
+                <strong>Codex · 200</strong>
+                <small>deepseek-v4 · 8s</small>
+              </div>
+              <div class="list-item">
+                <strong>会话</strong>
+                <small>thread_abc…</small>
+              </div>
+            </aside>
+            <div class="detail">
+              <div class="params">
+                <span class="chip key">effort 请求 high</span>
+                <span class="chip ok">上游 high</span>
+                <span class="chip">model gpt-5.6-luna</span>
+                <span class="chip">provider codex</span>
+                <span class="chip">stream true</span>
+                <span class="chip">summary detailed</span>
+                <span class="chip">复制 params</span>
+              </div>
+              <div class="tabs">
+                <div class="tab on">时间线</div>
+                <div class="tab">原始 JSON</div>
+                <div class="tab">问题包</div>
+              </div>
+              <div class="timeline">
+                <div class="ev"><div class="dot"></div><div class="ev-card">用户消息<div class="meta">帮我改一下这个接口…</div></div></div>
+                <div class="ev"><div class="dot"></div><div class="ev-card">工具 · shell_command<div class="meta">rg "reasoning.effort"</div></div></div>
+                <div class="ev"><div class="dot"></div><div class="ev-card">响应 200 · 5497 tokens<div class="meta">finish=completed</div></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="pick primary" type="button" data-pick="A">选择方案 A</button>
+          <button class="pick" type="button" data-pick="A-notes">备注：也要「映射告警」chip</button>
+        </div>
+      </section>
+
+      <!-- B -->
+      <section class="option" id="opt-b" data-choice="B">
+        <div class="option-head">
+          <div>
+            <h2>方案 B · 右侧参数检查器</h2>
+            <p>中间纯时间线，右侧固定「请求参数 / 上游映射」面板。适合长时间盯时间线时仍能看见 effort，但横向更挤。</p>
+          </div>
+          <span class="badge">三栏</span>
+        </div>
+        <div class="mock">
+          <div class="shell shell-b">
+            <aside class="list">
+              <div class="list-item active"><strong>Codex · 200</strong><small>gpt-5.6-luna</small></div>
+              <div class="list-item"><strong>DeepSeek · 200</strong><small>v4-flash</small></div>
+            </aside>
+            <div class="detail">
+              <div class="tabs"><div class="tab on">时间线</div><div class="tab">原始 JSON</div></div>
+              <div class="timeline">
+                <div class="ev"><div class="dot"></div><div class="ev-card">用户消息</div></div>
+                <div class="ev"><div class="dot"></div><div class="ev-card">工具调用</div></div>
+                <div class="ev"><div class="dot"></div><div class="ev-card">响应</div></div>
+              </div>
+            </div>
+            <aside class="rail">
+              <h4>请求参数</h4>
+              <dl class="kv">
+                <dt>effort</dt><dd>high</dd>
+                <dt>summary</dt><dd>detailed</dd>
+                <dt>stream</dt><dd>true</dd>
+                <dt>tools</dt><dd>42</dd>
+              </dl>
+              <h4>上游映射</h4>
+              <dl class="kv">
+                <dt>wire</dt><dd>reasoning.effort</dd>
+                <dt>sent</dt><dd>high</dd>
+                <dt>note</dt><dd>透传 · 无钳制</dd>
+              </dl>
+              <div class="chip map" style="display:inline-block;margin-top:4px">若 DeepSeek：xhigh → max</div>
+            </aside>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="pick primary" type="button" data-pick="B">选择方案 B</button>
+        </div>
+      </section>
+
+      <!-- C -->
+      <section class="option" id="opt-c" data-choice="C">
+        <div class="option-head">
+          <div>
+            <h2>方案 C · 保留上下双卡，只强化参数</h2>
+            <p>改动最小：继续「实时调用 + 历史时间线」上下叠放，但在实时卡头部加上 effort 映射条，并去掉重复噪音区块。</p>
+          </div>
+          <span class="badge">最小改动</span>
+        </div>
+        <div class="mock">
+          <div class="stack" style="grid-template-columns: 220px 1fr; display:grid;">
+            <aside class="list" style="grid-row: span 2; border-right:1px solid var(--border); border-radius:12px 0 0 12px;">
+              <div class="list-item active"><strong>最近请求</strong><small>codex / luna</small></div>
+              <div class="list-item"><strong>会话</strong><small>…</small></div>
+            </aside>
+            <div class="live-card">
+              <div class="card-hd"><strong>实时调用</strong><span class="chip key">effort high → high</span></div>
+              <div class="params" style="border:0">
+                <span class="chip">temperature -</span>
+                <span class="chip">tool_choice auto</span>
+                <span class="chip">stream true</span>
+                <span class="chip">复制 params</span>
+              </div>
+            </div>
+            <div class="hist-card">
+              <div class="card-hd"><strong>历史时间线</strong><span style="color:var(--faint)">选中左侧对象</span></div>
+              <div class="timeline">
+                <div class="ev"><div class="dot"></div><div class="ev-card">系统 / 用户 / 工具 / 响应…</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="pick primary" type="button" data-pick="C">选择方案 C</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="note">
+      三个方案都包含：思考档位展示、请求→上游映射、一键复制 params JSON。
+      差别只在信息层级。选完告诉我字母（A/B/C），或点按钮后把底部结果发我。
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="foot-inner">
+      <div>当前选择：<strong id="choice">尚未选择</strong></div>
+      <div id="choice-detail">打开本文件后点「选择方案」</div>
+    </div>
+  </div>
+
+  <script>
+    const labels = {
+      A: "方案 A · 参数条置顶 + 时间线（推荐）",
+      "A-notes": "方案 A + 映射告警 chip",
+      B: "方案 B · 右侧参数检查器",
+      C: "方案 C · 上下双卡最小改动"
+    };
+    const choiceEl = document.getElementById("choice");
+    const detailEl = document.getElementById("choice-detail");
+    function select(key) {
+      document.querySelectorAll(".option").forEach((el) => {
+        el.classList.toggle("selected", el.dataset.choice === key || (key === "A-notes" && el.dataset.choice === "A"));
+      });
+      choiceEl.textContent = labels[key] || key;
+      detailEl.textContent = "已记录在本页。回到对话里回复这个字母即可：" + (key.startsWith("A") ? "A" : key);
+      try {
+        localStorage.setItem("switchyard-trace-ui-choice", key);
+      } catch {}
+    }
+    document.querySelectorAll("[data-pick]").forEach((btn) => {
+      btn.addEventListener("click", () => select(btn.dataset.pick));
+    });
+    try {
+      const saved = localStorage.getItem("switchyard-trace-ui-choice");
+      if (saved) select(saved);
+    } catch {}
+  </script>
+</body>
+</html>

@@ -27,6 +27,7 @@ import {
   clearAntigravityReplay
 } from "../antigravity-adapter.mjs";
 import { applyOutbound, applyInbound } from "../compat/index.mjs";
+import { captureRequestBody } from "../request-body-capture.mjs";
 import { rectifyUpstreamRequest } from "../compat/runtime-rectifier.mjs";
 import { transformOpenCodeTextToolCalls } from "../opencode-text-tool-calls.mjs";
 import {
@@ -162,7 +163,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
     runWithAccountPool(provider, poolOpts, (activeProvider, account) =>
       dispatchChatOnce(activeProvider, upstreamModel, chatBody, opts, account)
     )
-  );
+  ).then((result) => attachOutboundBodyRef(result, opts));
 }
 
 async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, account = null) {
@@ -170,6 +171,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
   const ctx = { provider, model: ctxModel, clientId: opts.clientId };
   const stream = Boolean(chatBody.stream);
   const outbound = applyOutbound(stripInternalFields({ ...chatBody, model: upstreamModel }), ctx);
+  maybeCaptureOutboundBody(opts, outbound);
   const apiFormat = provider.apiFormat || "openai_chat";
   const upstreamOpts = { ...opts, proxyUrl: effectiveProxyUrl(provider, opts.proxyUrl) };
   const requestOverrides = collectRequestOverrides(provider, ctxModel);
@@ -343,7 +345,7 @@ export async function dispatchResponses(provider, upstreamModel, responsesBody, 
     runWithAccountPool(provider, opts, (activeProvider, account) =>
       dispatchResponsesOnce(activeProvider, upstreamModel, responsesBody, opts, account)
     )
-  );
+  ).then((result) => attachOutboundBodyRef(result, opts));
 }
 
 async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opts = {}, account = null) {
@@ -356,6 +358,7 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
   let upstreamBody = applyBodyOverrides(stripInternalFields({ ...(responsesBody || {}), model: upstreamModel }), requestOverrides);
   // 通用：去掉 image_gen hosted/function 冲突工具，避免 upstream 400。
   upstreamBody = stripConflictingImageGenTools(upstreamBody);
+  maybeCaptureOutboundBody(opts, upstreamBody);
   const codexOAuth = isCodexOAuthProvider(provider);
   const clientRequestedStream = Boolean(responsesBody?.stream);
   if (codexOAuth) {
@@ -392,6 +395,29 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
   const rawResponses = await readJsonResponse(upstream);
   const chatLike = responsesToChatResponse(rawResponses, upstreamModel);
   return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+}
+
+
+function maybeCaptureOutboundBody(opts, body) {
+  if (!opts?.requestBodyCapture?.enabled || opts._outboundRequestBodyRef) return;
+  try {
+    const captured = captureRequestBody({
+      body,
+      captureConfig: opts.requestBodyCapture,
+      sensitiveGuard: opts.sensitiveGuard,
+      baseLogDir: opts.requestBodyCaptureBaseLogDir || undefined
+    });
+    if (captured?.ref) opts._outboundRequestBodyRef = captured.ref;
+  } catch {
+    // 落盘失败不阻断上游调用
+  }
+}
+
+function attachOutboundBodyRef(result, opts) {
+  if (result && typeof result === "object" && opts?._outboundRequestBodyRef && !result.outboundRequestBodyRef) {
+    return { ...result, outboundRequestBodyRef: opts._outboundRequestBodyRef };
+  }
+  return result;
 }
 
 function stripInternalFields(body) {

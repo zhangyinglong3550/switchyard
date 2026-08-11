@@ -1236,8 +1236,23 @@ test("grok profile · writes managed model blocks and preserves user config", ()
   assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:17888\/grok\/v1"/);
   assert.match(text, /api_backend = "chat_completions"/);
   assert.match(text, /api_key = "switchyard-local"/);
+  assert.match(text, /supports_reasoning_effort = true/);
+  assert.match(text, /reasoning_effort = "high"/);
   // 用户默认是官方 grok-4.5，不应被强制改掉
   assert.match(text, /default = "grok-4\.5"/);
+});
+
+test("grok profile · openai_responses upstream still uses chat_completions backend for Grok Build", () => {
+  // Grok Build 的 Responses 解析不兼容 ChatGPT Codex 后端（response.completed.output 为空，
+  // 触发 empty_response 重试），因此 Grok 侧必须写 chat_completions，由网关做 chat->Responses 转换。
+  const section = pw.renderGrokModelSection(
+    { id: "codex/gpt-5.6-terra", providerId: "codex", upstreamModel: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", providerName: "OpenAI Codex", apiFormat: "openai_responses" },
+    { host: "127.0.0.1", port: 17888 }
+  );
+  assert.match(section, /\[model\."sy-codex--gpt-5\.6-terra"\]/);
+  assert.match(section, /model = "codex\/gpt-5\.6-terra"/);
+  assert.match(section, /api_backend = "chat_completions"/);
+  assert.doesNotMatch(section, /api_backend = "responses"/);
 });
 
 test("grok profile · quoted table header parses as flat model key", () => {
@@ -1250,6 +1265,13 @@ test("grok profile · quoted table header parses as flat model key", () => {
   );
   assert.match(section, /\[model\."sy-ke--GLM-5\.2"\]/);
   assert.doesNotMatch(section, /^\[model\.sy-ke--GLM-5\.2\]$/m);
+  // 未勾选"思考"的模型不写思考等级参数
+  const plain = pw.renderGrokModelSection(
+    { id: "ke/nothink", displayName: "NoThink", providerName: "KE", capabilities: { reasoning: false } },
+    { host: "127.0.0.1", port: 17888 }
+  );
+  assert.match(plain, /\[model\."sy-ke--nothink"\]/);
+  assert.doesNotMatch(plain, /supports_reasoning_effort|reasoning_effort/);
 });
 
 test("grok profile · auto-refresh when managed; skip when not", () => {

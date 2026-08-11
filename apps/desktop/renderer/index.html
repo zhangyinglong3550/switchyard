@@ -571,10 +571,15 @@
         <button class="btn" id="btn-traces-refresh">刷新</button>
       </div>
 
-      <!-- 模块 A：请求日志 —— 列表 + 请求体/响应体 -->
+      <!-- 模块 A：请求日志 —— 全宽列表，点行弹窗看请求体/响应体 -->
       <div class="page-scroll call-log-layout" id="observe-module-request-log">
         <div class="card call-log-table-card">
-          <div class="hd"><h3>请求列表</h3><span class="sub" id="call-log-summary">-</span></div>
+          <div class="hd">
+            <h3>请求列表</h3>
+            <span class="sub" id="call-log-summary">-</span>
+            <span style="flex:1;"></span>
+            <span class="tiny muted">单击任意一行查看原始请求体 / 响应体</span>
+          </div>
           <div class="table-scroll tall">
             <table class="data compact call-log-table" id="call-log-table">
               <thead>
@@ -584,24 +589,10 @@
                   <th>模型</th>
                   <th>耗时</th>
                   <th>Tokens</th>
-                  <th>详情</th>
                 </tr>
               </thead>
               <tbody id="call-log-tbody"></tbody>
             </table>
-          </div>
-        </div>
-        <div class="card call-log-detail-card">
-          <div class="hd">
-            <h3 id="call-log-detail-title">请求 / 响应</h3>
-            <span class="sub" id="call-log-detail-subtitle">选择左侧一条请求</span>
-            <button class="btn" id="btn-call-log-open-trace" style="display:none;">在调用透视中打开</button>
-          </div>
-          <div class="bd">
-            <div id="call-log-meta" class="trace-params-bar"></div>
-            <div id="call-log-detail" class="call-log-detail">
-              <div class="empty-state">选择一条请求，查看请求体与响应体</div>
-            </div>
           </div>
         </div>
       </div>
@@ -1073,6 +1064,16 @@
       </div>
       <div class="callout compact" id="provider-auth-note" style="display:none;"></div>
       <div class="callout compact risk-callout hidden" id="provider-risk-note"></div>
+      <div class="callout" id="provider-ke-sso-panel" style="display:none;">
+        <div class="callout-title">KE 单点登录系统号</div>
+        <div class="callout-body">系统号只从 KE 单点登录获取。Switchyard 仅保存系统号到该供应商配置；登录 Cookie 仅保存在本机独立浏览器会话中，不写入配置或日志。</div>
+        <div id="provider-ke-sso-status" class="tiny" style="margin-top:10px;">正在检测登录态…</div>
+        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+          <button class="btn primary" type="button" id="btn-ke-sso-login">登录 KE</button>
+          <button class="btn" type="button" id="btn-ke-sso-refresh">刷新登录态</button>
+          <button class="btn" type="button" id="btn-ke-sso-logout">退出 KE 登录</button>
+        </div>
+      </div>
       <div class="callout" id="provider-sub2api-panel" style="display:none;">
         <div class="callout-title">Sub2API 账号备份导入</div>
         <div class="callout-body">
@@ -1495,6 +1496,19 @@
     <div class="actions">
       <button class="btn" type="button" data-close>取消</button>
       <button class="btn primary" id="btn-backup-restore">恢复选中备份</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="call-log-modal-wrap">
+  <div class="dialog dialog-xwide call-log-modal">
+    <h2 id="call-log-modal-title">请求 / 响应</h2>
+    <div class="tiny muted mono" id="call-log-modal-subtitle">-</div>
+    <div id="call-log-modal-meta" class="trace-params-bar"></div>
+    <div class="dialog-scroll-body" id="call-log-modal-detail"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="btn-call-log-modal-open-trace">在调用透视中打开</button>
+      <button class="btn primary" type="button" data-close>关闭</button>
     </div>
   </div>
 </div>

@@ -423,13 +423,19 @@ export function createSessionRegistry({
       for (const row of result.value) {
         const id = encodeMobileSessionId(runtime.id, row.id);
         const overlay = store.getOverlay(id);
-        const projected = projectMobileSession({
-          ...row,
-          id,
-          agentId: runtime.id,
-          model: overlay.model || defaultModelFor(runtime.id) || row.model,
-          capabilities: row.capabilities || runtime.capabilities
-        }, overlay);
+        let projected;
+        try {
+          projected = projectMobileSession({
+            ...row,
+            id,
+            agentId: runtime.id,
+            model: overlay.model || defaultModelFor(runtime.id) || row.model,
+            capabilities: row.capabilities || runtime.capabilities
+          }, overlay);
+        } catch (error) {
+          console.error(`[registry:${runtime.id}] 投影失败 id=${String(id).slice(0, 30)}: ${error.message}`);
+          continue;
+        }
         const directory = String(row.directory || row.cwd || "");
         if (directory) sessionDirectories.set(id, directory);
         if (["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(projected.state))) activeSessions.add(id);

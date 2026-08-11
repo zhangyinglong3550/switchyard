@@ -249,7 +249,8 @@ function jsonSummary(value, max = 12000) {
     continueSteps: compact?.continueSteps,
     lastAction: typeof compact?.lastAction === "string" ? compact.lastAction.slice(0, 400) : undefined,
     lastRole: compact?.lastRole || "",
-    requestBodyCapture: compact?.requestBodyCapture || null
+    requestBodyCapture: compact?.requestBodyCapture || null,
+    outboundRequestBodyCapture: compact?.outboundRequestBodyCapture || null
   };
   let fallback = JSON.stringify(envelope);
   if (fallback.length <= max) return fallback;
@@ -274,7 +275,8 @@ function jsonSummary(value, max = 12000) {
     continuation: envelope.continuation,
     lastAction: envelope.lastAction,
     streamDiagnostics: envelope.streamDiagnostics || null,
-    requestBodyCapture: envelope.requestBodyCapture || null
+    requestBodyCapture: envelope.requestBodyCapture || null,
+    outboundRequestBodyCapture: envelope.outboundRequestBodyCapture || null
   };
   fallback = JSON.stringify(minimal);
   return fallback.length <= max ? fallback : JSON.stringify({

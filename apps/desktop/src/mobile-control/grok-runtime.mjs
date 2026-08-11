@@ -3,6 +3,7 @@ import { createAcpRuntime } from "./acp-runtime.mjs";
 import { mergeTool, textValue, toolFrom, toolMessage } from "./message-parts.mjs";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { scanGrokSessions } from "./local-session-scan.mjs";
 
 function grokText(content) {
@@ -82,6 +83,21 @@ function grokSessionRows() {
   }));
 }
 
+function findGrokChatHistory(sid) {
+  const row = scanGrokSessions({ limit: 300 }).find((r) => String(r.sessionId) === String(sid));
+  if (!row?.filePath) return null;
+  return path.join(row.filePath, "chat_history.jsonl");
+}
+
+function statInfo(file) {
+  try {
+    const s = fs.statSync(file);
+    return { mtimeMs: s.mtimeMs, size: s.size };
+  } catch {
+    return null;
+  }
+}
+
 function assistantPlainText(messages = []) {
   return messages
     .filter((message) => message?.role === "assistant" && message.kind !== "thinking" && !message.tool)
@@ -147,6 +163,57 @@ export function createGrokRuntime({ client, overlay, command, env } = {}) {
   });
   return {
     ...runtime,
+    // Grok 的 ACP 是进程级单实例会话状态（active_sessions 锁）：长驻 ACP 进程
+    // resume 一个被其他 grok CLI 持有的会话时，prompt 会被路由到错误会话或
+    // 卡死。改用一次性 `grok --single --cwd <cwd> -r <session_id>` 进程发送：
+    // 每个消息一个独立进程，直接 resume 目标会话，消息可靠落盘到目标会话文件。
+    async sendMessage(sessionId, { text, messageId, attachments = [] } = {}) {
+      const sid = String(sessionId);
+      const row = grokSessionRows().find((r) => String(r.sessionId) === sid);
+      const cwd = row?.cwd || (await runtime.readSession(sid).catch(() => null))?.directory || process.cwd();
+      const binary = command || process.env.SWITCHYARD_GROK_BINARY || "grok";
+      const promptText = [String(text || ""), ...attachments
+        .filter((a) => a.kind !== "image")
+        .map((a) => `\n\n<attachment name="${a.name}">\n${a.text || `本地文件路径：${a.path || "不可用"}`}\n</attachment>`)]
+        .join("");
+      const args = ["--single", promptText, "--cwd", cwd, "-r", sid];
+      if (process.env.SWITCHYARD_GROK_DENY) args.push("--deny", process.env.SWITCHYARD_GROK_DENY);
+      // 记录发送前目标会话 chat_history 的 mtime+size：close 后对比判断消息是否
+      // 真正落盘。grok 的 active_sessions 单实例限制下，若目标会话正被电脑端
+      // CLI 活跃持有，--single -r 会静默路由到错误会话——此时需要明确报错。
+      const chatPath = findGrokChatHistory(sid);
+      const before = chatPath ? statInfo(chatPath) : null;
+      const child = spawn(binary, args, {
+        cwd,
+        env: { ...process.env, NO_COLOR: "1" },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let output = "";
+      child.stdout.on("data", (d) => { output += String(d); });
+      child.stderr.on("data", (d) => { output += String(d); });
+      child.on("error", (error) => {
+        console.error(`[grok-send] 启动失败: ${error.message}`);
+      });
+      child.on("close", (code) => {
+        // 等待文件写入（grok --single 退出前已 flush；加小延迟兜底）。
+        setTimeout(() => {
+          const after = chatPath ? statInfo(chatPath) : null;
+          const landed = after && before
+            ? (after.mtimeMs > before.mtimeMs || after.size > before.size)
+            : false;
+          console.error(`[grok-send] 完成 sid=${sid.slice(0, 8)} code=${code} landed=${landed} output=${output.slice(-120)}`);
+          if (!landed) {
+            console.error(`[grok-send] 警告：消息未写入目标会话（可能被电脑端活跃 CLI 持有）sid=${sid.slice(0, 8)}`);
+          }
+        }, 800);
+      });
+      return { accepted: true, state: "running" };
+    },
+    // 一次性进程方案不使用 ACP 长驻连接，setModel 直接 no-op（避免触发
+    // acp-runtime 的 ensureConnected/loadSession 卡在 active_sessions 锁）。
+    async setModel() {
+      return { ok: true };
+    },
     async readSession(sessionId) {
       const sid = String(sessionId);
       const local = localGrokMessages(sid);

@@ -42,7 +42,10 @@ function normalizeChoices(payload) {
 }
 
 function stripReasoningFromStreamLine(line) {
-  const data = line.startsWith("data: ") ? line.slice(6) : line;
+  if (typeof line !== "string" || !line.startsWith("data:")) return line;
+  let payload = line.slice(5);
+  if (payload.startsWith(" ")) payload = payload.slice(1);
+  const data = payload;
   if (!data || data === "[DONE]") return line;
   try {
     const parsed = JSON.parse(data);
@@ -53,7 +56,17 @@ function stripReasoningFromStreamLine(line) {
       if (!choice?.delta || typeof choice.delta !== "object") continue;
       const reasoning = extractReasoningFieldText(choice.delta);
       if (!reasoning) continue;
-      choice.delta = stripRawReasoningFields(choice.delta);
+      const stripped = stripRawReasoningFields(choice.delta);
+      // 剥离 reasoning 后 delta 变成空对象时，若本没有正文，则把思考文本回填成
+      // content：避免被下面吞成空 SSE 流，导致严格 chat 客户端（Grok Build）
+      // 收到 200 却无任何内容而无限重试。
+      const emptyAfter = typeof stripped === "object" && Object.keys(stripped || {}).length === 0;
+      const hasContent = typeof stripped?.content === "string" && stripped.content.trim() !== "";
+      if (emptyAfter && !hasContent) {
+        choice.delta = { content: reasoning };
+      } else {
+        choice.delta = stripped;
+      }
       changed = true;
     }
     if (!changed) return line;

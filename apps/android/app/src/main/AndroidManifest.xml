@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
   <!-- Android 11+ 包可见性：不声明 queries 时 resolveActivity(VIEW/https) 恒为 null，
        会误判「没有浏览器」。声明后才能正确拉起系统浏览器选择器。 -->
   <queries>
@@ -45,5 +49,16 @@
         <data android:mimeType="text/plain" />
       </intent-filter>
     </activity>
+
+    <!-- 审批快捷动作 -->
+    <receiver
+        android:name=".notify.ApprovalActionReceiver"
+        android:exported="false" />
+
+    <!-- 前台保活服务 -->
+    <service
+        android:name=".notify.ConnectivityService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
   </application>
 </manifest>

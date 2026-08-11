@@ -55,6 +55,7 @@ export const GROK_LOCAL_API_KEY = "switchyard-local";
 export const GROK_MANAGED_BEGIN = "# --- switchyard-managed-models begin ---";
 export const GROK_MANAGED_END = "# --- switchyard-managed-models end ---";
 export const GROK_MODEL_PREFIX = "sy-";
+export const GROK_DEFAULT_REASONING_EFFORT = "high";
 
 export function codexModelCatalogPath() {
   return process.env.SWITCHYARD_CODEX_MODEL_CATALOG || path.join(DEFAULT_HOME, "codex-model-catalog.json");
@@ -1315,7 +1316,12 @@ function grokContextWindow(model) {
 function grokApiBackend(model) {
   const format = String(model?.apiFormat || model?.providerApiFormat || "").toLowerCase();
   if (format === "anthropic_messages") return "messages";
-  if (format === "openai_responses") return "responses";
+  // Grok Build 的 Responses 解析器与 ChatGPT Codex 后端不兼容：上游
+  // response.completed.response.output 为空，Grok 判定 "empty response from
+  // model (no_visible_content)" 并重试最多 15 次。其 chat_completions 解析器
+  // 经 Switchyard 的 chat -> Responses 转换验证可用，所以 openai_responses
+  // 上游在 Grok 侧一律走 chat_completions，由网关按上游 apiFormat 转换。
+  if (format === "openai_responses") return "chat_completions";
   // 默认 chat_completions：与网关 /v1/chat/completions 对齐
   return "chat_completions";
 }
@@ -1332,6 +1338,11 @@ export function grokModelTableHeader(alias) {
   return `[model.${tomlString(name)}]`;
 }
 
+/** 模型是否声明支持思考（"思考"能力勾选）。缺省按 true 处理以匹配默认勾选行为。 */
+export function grokSupportsReasoning(model) {
+  return model?.capabilities?.reasoning !== false;
+}
+
 export function renderGrokModelSection(model, { host, port } = {}) {
   const id = String(model?.id || "").trim();
   if (!id) return "";
@@ -1346,6 +1357,12 @@ export function renderGrokModelSection(model, { host, port } = {}) {
     `api_backend = ${tomlString(grokApiBackend(model))}`,
     `context_window = ${grokContextWindow(model)}`
   ];
+  // 只有模型支持思考（模型配置里"思考"勾选）时，才写入思考等级控制参数；
+  // 未勾选思考的模型不写，避免向不支持推理的后端透传 reasoning_effort。
+  if (grokSupportsReasoning(model)) {
+    lines.push(`supports_reasoning_effort = true`);
+    lines.push(`reasoning_effort = ${tomlString(GROK_DEFAULT_REASONING_EFFORT)}`);
+  }
   return lines.join("\n");
 }
 

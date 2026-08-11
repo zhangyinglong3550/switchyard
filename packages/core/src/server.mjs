@@ -117,6 +117,7 @@ function dispatchOptsFromReq(req, base = {}, { config, onSensitiveAudit } = {}) 
     forwardClientHeaders: true,
     sessionKey: base.sessionKey || sensitiveSessionKeyFromReq(req),
     sensitiveGuard: config?.sensitiveGuard || { enabled: true, mode: "redact" },
+    requestBodyCapture: config?.requestBodyCapture || null,
     onSensitiveAudit
   };
 }
@@ -398,20 +399,49 @@ function summarizeTools(tools) {
   }).filter((tool) => tool.name);
 }
 
+/** 定位系统提示里的 "### Available skills" 清单段（到下一个 Markdown 标题为止）。 */
+function extractAvailableSkillsSection(systemText) {
+  const text = String(systemText || "");
+  const match = /(?:#{1,6}\s*)?(?:Available\s+[Ss]kills?|可用\s*技能|技能列表)/.exec(text);
+  if (!match) return "";
+  const rest = text.slice(match.index);
+  const nextHeading = rest.search(/\n#{1,6}\s+\S/);
+  return nextHeading > 0 ? rest.slice(0, nextHeading) : rest.slice(0, 40000);
+}
+
+// `skill: <name>` 兜底时过滤掉明显不是技能名的通用词（防止 "description" 这类误报）
+const GENERIC_SKILL_WORDS = new Set([
+  "description", "name", "type", "skill", "skills", "file", "path", "usage",
+  "parameters", "required", "properties", "summary", "detail", "list"
+]);
+
 function extractSkillNames(systemText) {
   const text = String(systemText || "");
-  if (!/(skill|skills|技能|能力|SKILL\.md)/i.test(text)) return [];
   const names = new Set();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    const match = /^(?:[-*]\s*)?`?([A-Za-z0-9_.:@/-]{2,80})`?\s*(?:[:：-]|—)\s+/.exec(trimmed);
-    if (match && /skill|技能|能力/i.test(trimmed)) names.add(match[1]);
-    // Claude Code / Agent Skills 常见列表行：`- skill-name: ...` 或纯反引号名
-    const bullet = /^(?:[-*]\s+)(?:Skill\s+)?`([A-Za-z0-9_.:@/-]{2,80})`/i.exec(trimmed);
-    if (bullet) names.add(bullet[1]);
+
+  // 1) Codex 等会在系统提示里给出 "### Available skills" 清单：
+  //    `- name: 描述 (file: …/SKILL.md)`。只解析这一段，避免把 Skill roots
+  //    （`- r0 = …`）或插件说明（`- Relevance: …`）误当成 Skill。
+  const section = extractAvailableSkillsSection(text);
+  if (section) {
+    for (const line of section.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      const match = /^[-*]\s+([A-Za-z0-9_.:@/-]{2,120}?)(?::|：)\s+/.exec(trimmed);
+      if (match) names.add(match[1]);
+    }
   }
-  for (const match of text.matchAll(/(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) names.add(match[1]);
-  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) names.add(match[1]);
+
+  // 2) 兜底：显式 "skill: name" / "技能: name" 标记
+  for (const match of text.matchAll(/(?:^|\s)(?:skill|技能)\s*[:：]\s*`?([A-Za-z0-9_.:@/-]{2,80})`?/gi)) {
+    if (!GENERIC_SKILL_WORDS.has(match[1].toLowerCase())) names.add(match[1]);
+  }
+
+  // 3) 兜底：`skills/<name>` 路径（跳过路径里目录名恰为 "skills" 的段）
+  for (const match of text.matchAll(/skills\/([A-Za-z0-9_.:@/-]{2,80})(?:\/SKILL\.md)?/gi)) {
+    if (match[1] === "skills") continue;
+    names.add(match[1]);
+  }
+
   return Array.from(names).slice(0, 80);
 }
 
@@ -431,6 +461,7 @@ function isUserLikeRole(role) {
 
 function summarizeMessages(messages) {
   const out = { system: [], user: [], assistant: [], tool: [], images: 0, roleCounts: {}, latestUser: null };
+  const systemFullTexts = [];
   const list = Array.isArray(messages) ? messages : [];
   let lastMeaningfulUserIndex = -1;
   let lastUserLikeIndex = -1;
@@ -447,6 +478,7 @@ function summarizeMessages(messages) {
     out.roleCounts[role] = (out.roleCounts[role] || 0) + 1;
     out.images += imageCount(message?.content);
     const content = contentToText(message?.content || "");
+    if (role === "system") systemFullTexts.push(content);
     // 最新真实用户消息用更大预算 + 头尾保留，便于调用可视化看到本轮增量
     let max = 1200;
     let strategy = "head-tail";
@@ -489,7 +521,8 @@ function summarizeMessages(messages) {
     }
   }
   if (!out.latestUser && out.user.length) out.latestUser = out.user[out.user.length - 1];
-  out.skills = extractSkillNames(out.system.map((item) => item.text).join("\n"));
+  // 用完整系统提示提取 Skill 名（存的是小清单；系统正文仍按截断保存，避免撑爆摘要上限）
+  out.skills = extractSkillNames(systemFullTexts.join("\n"));
   return out;
 }
 
@@ -912,6 +945,9 @@ function recordDispatchCompatibility(record, result) {
       record.requestSummary.dispatchRetryAttempts = result.retryAttempts;
     }
   }
+  if (result.outboundRequestBodyRef) {
+    record.requestSummary.outboundRequestBodyCapture = { ref: String(result.outboundRequestBodyRef) };
+  }
   if (result.accountId) {
     record.accountId = result.accountId;
     record.requestSummary.accountId = result.accountId;
@@ -1158,6 +1194,9 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
       return pipeRawStream(upstream, res, {
         protocol: "responses",
         model: body.model,
+        // Grok Build 的 Responses serde 强制要求 message item/content 带
+        // `annotations`；部分中转上游（如 good-gpt）省略，这里只对 grok 补字段。
+        injectAnnotations: clientId === "grok",
         idleTimeoutMs: streamIdleTimeoutMs(config, route),
         retryUpstream: streamCompatibility(config, route, "responses").retryPreludeOnEof
           ? async () => {
@@ -1598,6 +1637,50 @@ function publicStreamDiagnostics(diag, extra = {}) {
   };
 }
 
+// Grok Build 的 Responses SSE 被 Rust serde 严格校验：
+// message 输出项 / 内容 part 必须带 `annotations` 字段，否则报
+// `missing field annotations`。部分中转上游（如 good-gpt）省略该字段，
+// 这里在 grok 出口侧补上，避免 break 其它客户端。仅当 clientId==="grok" 时启用。
+function ensureAnnotationsField(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  let changed = false;
+  if (obj.type === "message" && !Object.prototype.hasOwnProperty.call(obj, "annotations")) {
+    obj.annotations = [];
+    changed = true;
+  }
+  if (Array.isArray(obj.content)) {
+    for (const part of obj.content) {
+      if (part && typeof part === "object" && !Object.prototype.hasOwnProperty.call(part, "annotations")) {
+        part.annotations = [];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function normalizeResponsesAnnotationLine(line) {
+  if (typeof line !== "string" || !line.startsWith("data:")) return line;
+  const rest = line.startsWith("data: ") ? line.slice(6) : line.slice(5);
+  if (!rest || rest === "[DONE]") return line;
+  let o;
+  try { o = JSON.parse(rest); } catch { return line; }
+  const type = o && o.type;
+  let changed = false;
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    if (ensureAnnotationsField(o.item)) changed = true;
+  } else if (type === "response.content_part.added" || type === "response.content_part.done") {
+    if (o.part && typeof o.part === "object" && !Object.prototype.hasOwnProperty.call(o.part, "annotations")) {
+      o.part.annotations = [];
+      changed = true;
+    }
+  } else if (type === "response.created" || type === "response.in_progress" || type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+    const output = o.response && Array.isArray(o.response.output) ? o.response.output : [];
+    for (const it of output) { if (ensureAnnotationsField(it)) changed = true; }
+  }
+  return changed ? "data: " + JSON.stringify(o) : line;
+}
+
 export async function pipeRawStream(upstream, res, {
   protocol = "",
   model = "",
@@ -1606,6 +1689,7 @@ export async function pipeRawStream(upstream, res, {
   retryUpstream = null,
   preludeRetryAttempts = 1,
   preludeRetryBackoffMs = [],
+  injectAnnotations = false,
   onStreamSummary = null
 } = {}) {
   writeRawStreamHeaders(res, upstream);
@@ -1625,6 +1709,17 @@ export async function pipeRawStream(upstream, res, {
   let pendingPreludeBytes = 0;
   const bufferResponsesPrelude = protocol === "responses";
   const preludeBufferLimit = 128 * 1024;
+  const annDecoder = new TextDecoder();
+  const annLineState = { buffer: "" };
+  const normalizeChunk = (chunk) => {
+    if (!injectAnnotations || protocol !== "responses") return chunk;
+    const text = typeof chunk === "string" ? chunk : annDecoder.decode(chunk, { stream: true });
+    const parts = [];
+    consumeSseLines(annLineState, text, { onLine: (ln) => {
+      parts.push(normalizeResponsesAnnotationLine(ln) + "\n");
+    } });
+    return parts.join("");
+  };
   const writeChunk = (chunk) => {
     if (bufferResponsesPrelude && !streamState.sawMeaningfulEvent && !streamState.sawTerminalEvent && pendingPreludeBytes < preludeBufferLimit) {
       pendingPreludeChunks.push(chunk);
@@ -1661,9 +1756,17 @@ export async function pipeRawStream(upstream, res, {
             streamDiagnostics.byteCount += chunk?.byteLength || chunk?.length || 0;
           }
           streamObserver.push(chunk);
-          writeChunk(chunk);
+          writeChunk(normalizeChunk(chunk));
         }
         streamObserver.flush();
+        if (injectAnnotations && protocol === "responses") {
+          const tail = annDecoder.decode();
+          if (tail) {
+            const parts = [];
+            consumeSseLines(annLineState, tail, { flush: true, onLine: (ln) => parts.push(normalizeResponsesAnnotationLine(ln) + "\n"), });
+            if (parts.length) writeChunk(parts.join(""));
+          }
+        }
         if ((protocol === "responses" || upstream?.switchyardRequireTerminal) && !streamState.sawTerminalEvent) {
           const incomplete = new Error(wroteUpstreamChunk
             ? "Responses stream disconnected before completion"
