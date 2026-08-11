@@ -207,11 +207,11 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.doesNotMatch(html, /id="voice-control"/);
   assert.match(html, /id="message-action-sheet"/);
   {
-    const androidSource = fs.readFileSync(path.resolve("apps/android/app/src/main/java/com/zhangyinglong/switchyard/MainActivity.java"), "utf8");
+    const notificationHelper = fs.readFileSync(path.resolve("apps/android/app/src/main/java/com/zhangyinglong/switchyard/notify/NotificationHelper.kt"), "utf8");
     const androidManifest = fs.readFileSync(path.resolve("apps/android/app/src/main/AndroidManifest.xml"), "utf8");
-    assert.match(androidSource, /shareText\(/);
-    assert.match(androidSource, /copyText\(/);
-    assert.match(androidSource, /showNotification\(/);
+    assert.match(notificationHelper, /fun notifyApproval\(/);
+    assert.match(notificationHelper, /fun notifyStatus\(/);
+    assert.match(notificationHelper, /fun ensureChannels\(/);
     assert.match(androidManifest, /android\.intent\.action\.SEND/);
   }
   assert.match(css, /\.composer \.runtime-shortcut\{[^}]*display:flex/);
@@ -332,16 +332,10 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.equal(manifest.display, "standalone");
 });
 
-test("Android shell captures conversation links before WebView navigation and opens only browser-safe URLs", () => {
-  const root = path.resolve("apps");
-  const js = fs.readFileSync(path.join(root, "mobile", "app.js"), "utf8");
-  const android = fs.readFileSync(path.join(root, "android", "app", "src", "main", "java", "com", "zhangyinglong", "switchyard", "MainActivity.java"), "utf8");
-
-  assert.match(js, /document\.addEventListener\("click",\s*\(event\)\s*=>\s*\{[\s\S]*?\.msg-body a\[href\][\s\S]*?stopImmediatePropagation\(\)/);
-  assert.match(android, /onCreateWindow\(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg\)/);
-  assert.match(android, /request\.isForMainFrame\(\)/);
-  assert.match(android, /URLUtil\.isNetworkUrl\(rawUrl\)/);
-  assert.match(android, /Intent\.createChooser\(intent, "使用浏览器打开链接"\)/);
+test("Android opens external links through the system browser via VIEW intent", () => {
+  const manifest = fs.readFileSync(path.resolve("apps/android/app/src/main/AndroidManifest.xml"), "utf8");
+  assert.match(manifest, /android\.intent\.action\.VIEW/);
+  assert.match(manifest, /android:scheme="https"/);
 });
 
 

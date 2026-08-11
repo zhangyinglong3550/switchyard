@@ -273,6 +273,7 @@ test("ACP runtime lists, loads, prompts, cancels, switches model, forks and dele
     "session/load",
     "session/new",
     "session/set_model",
+    "session/load",
     "session/prompt",
     "session/set_model",
     "session/cancel",
