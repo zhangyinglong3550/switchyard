@@ -472,6 +472,7 @@ function setActiveTab(tab) {
   document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${tab}`));
   if (tab === "logs") refreshLogTail().catch(() => {});
+  if (tab === "sessions") refreshAgentSessions().catch(() => {});
   if (tab === "traces") {
     renderLiveLogs();
     setObserveModule(state.traces.module || "request-log");

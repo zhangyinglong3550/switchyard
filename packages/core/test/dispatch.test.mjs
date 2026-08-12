@@ -1216,3 +1216,35 @@ test("dispatchChat does not capture outbound body when disabled", async (t) => {
   assert.equal(result.kind, "json");
   assert.equal(result.outboundRequestBodyRef, undefined);
 });
+
+test("dispatchChat strips empty assistant content so strict Bedrock upstreams accept tool-call turns", async (t) => {
+  resetPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x", object: "chat.completion", model: "u-model",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "ke", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  await dispatchChat(provider, "claude-opus-4-8", {
+    messages: [
+      { role: "user", content: "go" },
+      // 工具调用轮次：assistant 无正文（Codex 历史常见），必须不能带空 content 字段
+      { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "shell", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: "" },
+      // 纯空 assistant（既无正文也无工具调用）：应补占位而非留下空消息
+      { role: "assistant", content: "" }
+    ]
+  }, { model: { id: "ke/claude-opus-4-8", providerId: "ke" } });
+  const assistant = received.messages.find((m) => m.role === "assistant" && m.tool_calls);
+  const emptyAssistant = received.messages.find((m) => m.role === "assistant" && !m.tool_calls);
+  const tool = received.messages.find((m) => m.role === "tool");
+  assert.equal(Object.hasOwn(assistant, "content"), false, "empty assistant content must be dropped");
+  assert.ok(assistant.tool_calls, "tool_calls preserved");
+  assert.equal(tool.content, "(空)", "empty tool result gets a non-empty placeholder");
+  assert.equal(emptyAssistant.content, "(空)", "assistant with neither content nor tool_calls gets a placeholder");
+});

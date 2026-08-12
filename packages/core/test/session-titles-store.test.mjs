@@ -49,6 +49,7 @@ test("sessions UI · rename control and IPC channel present", () => {
   const renderer = fs.readFileSync(path.join(root, "apps/desktop/renderer/renderer.js"), "utf8");
   const main = fs.readFileSync(path.join(root, "apps/desktop/src/main.mjs"), "utf8");
   assert.match(html, /id="sessions-tbody"/);
+  assert.match(html, /data-tab="sessions"/, "sessions nav entry must stay (was removed once by nav cleanup)");
   assert.match(html, /自定义名称|命名/);
   assert.match(html, /id="session-rename-wrap"/);
   assert.match(html, /id="session-rename-title"/);

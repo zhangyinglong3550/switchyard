@@ -238,6 +238,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
     let upstreamBody = stripConflictingImageGenTools(
       applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides)
     );
+    upstreamBody = { ...upstreamBody, messages: sanitizeUpstreamMessages(upstreamBody.messages) };
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
     if (stream) {
       const rectifiedStream = await retryFailedStreamWithRectifier({
@@ -397,6 +398,37 @@ async function dispatchResponsesOnce(provider, upstreamModel, responsesBody, opt
   return withAccountMeta({ kind: "json", status: upstream.status, payload: applyInbound(chatLike, ctx), rawPayload: rawResponses, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
 }
 
+
+
+// 严格上游（KE→Bedrock 等）要求 messages 里不能有空 text block：assistant 工具调用
+// 轮次常见 content:""（Codex 历史），必须去掉该字段而非保留空串；tool 结果空则补占位。
+function isEmptyContent(value) {
+  if (value == null) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
+}
+
+function sanitizeUpstreamMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((msg) => {
+    if (!msg || typeof msg !== "object") return msg;
+    if (msg.role === "assistant" && isEmptyContent(msg.content)) {
+      const next = { ...msg };
+      if (Array.isArray(next.tool_calls) && next.tool_calls.length) {
+        delete next.content;
+      } else {
+        // 既无正文也无工具调用的空 assistant 会触发更严格上游的校验，补占位兜底。
+        next.content = "(空)";
+      }
+      return next;
+    }
+    if ((msg.role === "tool" || msg.role === "user") && isEmptyContent(msg.content)) {
+      return { ...msg, content: "(空)" };
+    }
+    return msg;
+  });
+}
 
 function maybeCaptureOutboundBody(opts, body) {
   if (!opts?.requestBodyCapture?.enabled || opts._outboundRequestBodyRef) return;
