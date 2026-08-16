@@ -17,6 +17,7 @@ export const SENSITIVE_GUARD_CLIENTS = [
   "hermes",
   "opencode",
   "grok",
+  "deepseek-harness",
   "generic-openai"
 ];
 

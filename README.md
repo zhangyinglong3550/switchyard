@@ -1,6 +1,6 @@
 # Switchyard
 
-**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build 里统一选择。
+**本机 LLM 控制台 + 网关**：多家供应商打平进一张模型表，在 Claude Code / Codex / Hermes / OpenCode / Grok Build / DeepSeek Harness 里统一选择。
 
 [![version](https://img.shields.io/badge/version-2.2.43-blue)]()
 [![license](https://img.shields.io/badge/license-MIT-blue)]()

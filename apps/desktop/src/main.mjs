@@ -98,7 +98,7 @@ import { mergeDiscoveredModelsIntoConfig } from "../../../packages/core/src/mode
 import {
   applyProfile, restoreProfile, restoreProfileBackup,
   profileTargets, listBackups,
-  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile, previewOpenCodeProfile, previewGrokProfile,
+  previewCodexProfile, previewClaudeCodeProfile, previewHermesProfile, previewOpenCodeProfile, previewGrokProfile, previewDeepSeekHarnessProfile,
   syncClientModelArtifacts,
   CODEX_ACCESS_MODES
 } from "../../../packages/core/src/profile-writer.mjs";
@@ -906,6 +906,7 @@ function syncCodexArtifacts(reason = "manual") {
     const claudeCodeModels = listModelsForClient(cfg, "claude-code");
     const openCodeModels = listModelsForClient(cfg, "opencode");
     const grokModels = listModelsForClient(cfg, "grok");
+    const deepSeekHarnessModels = listModelsForClient(cfg, "deepseek-harness");
     const status = statusFromServer();
     const host = status.running ? status.host : cfg.host;
     const port = status.running ? status.port : cfg.port;
@@ -918,7 +919,8 @@ function syncCodexArtifacts(reason = "manual") {
       openCodeModels: modelsForProfile(cfg, openCodeModels),
       openCodeDefaultModel: clientDefaultModel(cfg, "opencode", openCodeModels),
       grokModels: modelsForProfile(cfg, grokModels),
-      grokDefaultModel: clientDefaultModel(cfg, "grok", grokModels)
+      grokDefaultModel: clientDefaultModel(cfg, "grok", grokModels),
+      deepSeekHarnessModels: modelsForProfile(cfg, deepSeekHarnessModels)
     });
     const codexChanged = result.codex?.ok && (result.codex.catalogChanged || result.codex.cacheChanged);
     const claudeChanged = result.claudeCode?.ok && result.claudeCode.cacheChanged;
@@ -2441,7 +2443,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
     port: status.running ? status.port : cfg.port,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code", "opencode", "grok"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode", "grok", "deepseek-harness"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -2458,6 +2460,7 @@ ipcMain.handle("profile:apply", async (_e, { clientId, mode, providerId, modelId
   if (clientId === "codex" && profileMode === CODEX_ACCESS_MODES.SWITCHYARD_PROXY) syncCodexArtifacts("profile-apply");
   if (clientId === "opencode") syncCodexArtifacts("opencode-profile-apply");
   if (clientId === "grok") syncCodexArtifacts("grok-profile-apply");
+  if (clientId === "deepseek-harness") syncCodexArtifacts("deepseek-harness-profile-apply");
   appendLog({
     level: "info",
     msg: `profile applied: ${clientId}`,
@@ -2513,7 +2516,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
     port: status.running ? status.port : 17888,
     mode: profileMode,
     defaultModel: clientDefaultModel(cfg, clientId, visibleModels),
-    models: ["codex", "claude-code", "opencode", "grok"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
+    models: ["codex", "claude-code", "opencode", "grok", "deepseek-harness"].includes(clientId) ? modelsForProfile(cfg, visibleModels) : visibleModels,
     modelMapping: clientId === "claude-code" ? cfg.clients?.["claude-code"]?.modelMapping : undefined
   };
   if (profileMode === CODEX_ACCESS_MODES.PROVIDER_DIRECT) {
@@ -2532,6 +2535,7 @@ ipcMain.handle("profile:preview", (_e, { clientId, mode, providerId, modelId } =
   if (clientId === "hermes") return { text: previewHermesProfile(opts), path: profileTargets().hermes };
   if (clientId === "opencode") return { text: previewOpenCodeProfile(opts), path: profileTargets().opencode };
   if (clientId === "grok") return { text: previewGrokProfile(opts), path: profileTargets().grok };
+  if (clientId === "deepseek-harness") return { text: previewDeepSeekHarnessProfile(opts), path: profileTargets()["deepseek-harness"] };
   throw new Error(`Unknown client: ${clientId}`);
 });
 ipcMain.handle("test:chat", async (_e, { model, messages, stream, clientId = "generic-openai", protocol = "openai_chat", includeImage = false, temperature, maxTokens }) => {

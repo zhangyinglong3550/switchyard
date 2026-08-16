@@ -81,7 +81,8 @@ function targetUrls({ host = "127.0.0.1", port = 17888 } = {}) {
     claudeCode: `${origin}/claude-code`,
     hermes: `${origin}/hermes/v1`,
     opencode: `${origin}/opencode/v1`,
-    grok: `${origin}/grok/v1`
+    grok: `${origin}/grok/v1`,
+    deepSeekHarness: `${origin}/deepseek-harness/v1`
   };
 }
 
@@ -338,6 +339,15 @@ function detectOpenCodeConfig(settings, urls) {
   return statusResult("drifted", "OpenCode 配置未指向 Switchyard", { expected: urls.opencode });
 }
 
+function detectDeepSeekHarnessConfig(yamlText, urls) {
+  if (yamlText == null) return statusResult("missing", "未找到 DeepSeek Harness 配置", { expected: urls.deepSeekHarness });
+  const text = asText(yamlText);
+  const hasBase = text.includes(urls.deepSeekHarness) || text.includes(`${urls.origin}/deepseek-harness`);
+  const hasManaged = text.includes("managed-by-switchyard") && text.includes("llm-pi-ai:");
+  if (hasBase && hasManaged) return statusResult("ok", "DeepSeek Harness 已指向 Switchyard", { expected: urls.deepSeekHarness });
+  return statusResult("drifted", "DeepSeek Harness 配置未指向 Switchyard", { expected: urls.deepSeekHarness });
+}
+
 function detectGrokConfig(tomlText, urls) {
   if (tomlText == null) return statusResult("missing", "未找到 Grok Build 配置", { expected: urls.grok });
   const text = asText(tomlText);
@@ -362,7 +372,8 @@ export function doctorClientConfigContents(options = {}) {
     "claude-code": detectClaudeCodeConfig(options.claudeSettings, urls),
     hermes: detectHermesConfig(options.hermesYamlText, urls),
     opencode: detectOpenCodeConfig(options.openCodeSettings, urls),
-    grok: detectGrokConfig(options.grokTomlText, urls)
+    grok: detectGrokConfig(options.grokTomlText, urls),
+    "deepseek-harness": detectDeepSeekHarnessConfig(options.deepSeekHarnessYamlText, urls)
   };
 }
 
@@ -400,11 +411,16 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     ? String(process.env.GROK_HOME).trim()
     : path.join(home, ".grok");
   const grokPath = path.join(grokHome, "config.toml");
+  const dshHome = process.env.DSH_HOME && String(process.env.DSH_HOME).trim()
+    ? String(process.env.DSH_HOME).trim()
+    : path.join(home, ".dsh");
+  const deepSeekHarnessPath = path.join(dshHome, "settings.yaml");
   const codexText = readTextMaybe(codexPath);
   const claudeSettings = readJsonMaybe(claudePath);
   const hermesYamlText = readTextMaybe(hermesYamlPath);
   const openCodeSettings = readJsonMaybe(openCodePath);
   const grokTomlText = readTextMaybe(grokPath);
+  const deepSeekHarnessYamlText = readTextMaybe(deepSeekHarnessPath);
 
   const contents = doctorClientConfigContents({
     host,
@@ -413,7 +429,8 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
     claudeSettings: claudeSettings && !claudeSettings.unreadable ? claudeSettings : null,
     hermesYamlText: typeof hermesYamlText === "string" ? hermesYamlText : null,
     openCodeSettings: openCodeSettings && !openCodeSettings.unreadable ? openCodeSettings : null,
-    grokTomlText: typeof grokTomlText === "string" ? grokTomlText : null
+    grokTomlText: typeof grokTomlText === "string" ? grokTomlText : null,
+    deepSeekHarnessYamlText: typeof deepSeekHarnessYamlText === "string" ? deepSeekHarnessYamlText : null
   });
 
   return {
@@ -423,7 +440,8 @@ export function doctorClientConfigs({ host = "127.0.0.1", port = 17888, home = o
       "claude-code": claudePath,
       hermes: hermesYamlPath,
       opencode: openCodePath,
-      grok: grokPath
+      grok: grokPath,
+      "deepseek-harness": deepSeekHarnessPath
     },
     errors: [
       codexText?.unreadable && { client: "codex", ...codexText },

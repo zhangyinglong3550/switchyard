@@ -55,6 +55,9 @@ const CLIENT_PREFIXES = [
   { prefix: "/hermes", clientId: "hermes" },
   { prefix: "/opencode", clientId: "opencode" },
   { prefix: "/grok", clientId: "grok" },
+  // DeepSeek Harness uses its own OpenAI-compatible route so its client-level
+  // model visibility is independent from generic OpenAI clients.
+  { prefix: "/deepseek-harness", clientId: "deepseek-harness" },
   { prefix: "/openai", clientId: "generic-openai" },
   { prefix: "/anthropic", clientId: "generic-openai" }
 ];

@@ -619,6 +619,7 @@ function renderOverview() {
     ["Hermes", `${base}/hermes/v1`],
     ["OpenCode", `${base}/opencode/v1`],
     ["Grok Build", `${base}/grok/v1`],
+    ["DeepSeek Harness", `${base}/deepseek-harness/v1`],
     ["通用 OpenAI", `${base}/v1`]
   ];
   const copyAll = document.createElement("button");
@@ -1319,11 +1320,12 @@ const PROFILE_META = {
   "claude-code": { label: "Claude Code", file: "~/.claude/settings.json", entry: "/claude-code", note: "写入 env.ANTHROPIC_BASE_URL；ANTHROPIC_AUTH_TOKEN 读取 ${SWITCHYARD_KEY}" },
   hermes: { label: "Hermes", file: "~/.hermes/config.yaml", entry: "/hermes/v1", note: "写入 model.provider = switchyard 及 providers.switchyard（base_url + api_key + 模型清单）。Hermes 只读取 config.yaml。" },
   opencode: { label: "OpenCode", file: "~/.config/opencode/opencode.json", entry: "/opencode/v1", note: "写入 provider.switchyard（OpenAI 兼容 + 模型清单）。新增/改模型后会自动刷新 models；OpenCode 需重启或重新 /models 才能看到。" },
-  grok: { label: "Grok Build", file: "~/.grok/config.toml", entry: "/grok/v1", note: "写入托管块 [model.sy-*]（OpenAI chat_completions + base_url）。首次一键写入后，增/改/启模型会自动刷新；Grok 用 /model 或 Ctrl+M 切换，短 id 为 sy-…。" }
+  grok: { label: "Grok Build", file: "~/.grok/config.toml", entry: "/grok/v1", note: "写入托管块 [model.sy-*]（OpenAI chat_completions + base_url）。首次一键写入后，增/改/启模型会自动刷新；Grok 用 /model 或 Ctrl+M 切换，短 id 为 sy-…。" },
+  "deepseek-harness": { label: "DeepSeek Harness", file: "~/.dsh/settings.yaml", entry: "/deepseek-harness/v1", note: "写入 llm-pi-ai.providers.switchyard；模型的思考和图片能力依据 Switchyard 模型能力设置生成。" }
 };
 
-/** 客户端卡片固定顺序：一键写入类优先，OpenCode / Grok 紧随 Hermes，避免被挤到视口外 */
-const CLIENT_CARD_ORDER = ["codex", "claude-code", "hermes", "opencode", "grok", "generic-openai"];
+/** 客户端卡片固定顺序：一键写入类优先，OpenCode / Grok / DeepSeek Harness 紧随 Hermes */
+const CLIENT_CARD_ORDER = ["codex", "claude-code", "hermes", "opencode", "grok", "deepseek-harness", "generic-openai"];
 
 function orderedClientEntries(clients = {}) {
   const map = clients && typeof clients === "object" ? clients : {};
@@ -1644,7 +1646,8 @@ function renderDiagnostics() {
       ["claude-code", "Claude Code"],
       ["hermes", "Hermes"],
       ["opencode", "OpenCode"],
-      ["grok", "Grok Build"]
+      ["grok", "Grok Build"],
+      ["deepseek-harness", "DeepSeek Harness"]
     ];
     clientGrid.innerHTML = clients.map(([id, label]) => {
       const row = data.clients?.[id] || {};
@@ -1800,6 +1803,7 @@ const SENSITIVE_GUARD_CLIENT_LABELS = {
   hermes: "Hermes",
   opencode: "OpenCode",
   grok: "Grok",
+  "deepseek-harness": "DeepSeek Harness",
   "generic-openai": "Generic OpenAI"
 };
 
@@ -4804,6 +4808,7 @@ function agentLabel(clientId) {
     hermes: "Hermes",
     opencode: "OpenCode",
     grok: "Grok Build",
+    "deepseek-harness": "DeepSeek Harness",
     "generic-openai": "通用 OpenAI",
     "model-test": "模型测试"
   };

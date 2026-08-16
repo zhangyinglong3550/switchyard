@@ -4,6 +4,7 @@ export const CLIENT_SCOPE_OPTIONS = [
   ["hermes", "Hermes"],
   ["opencode", "OpenCode"],
   ["grok", "Grok Build"],
+  ["deepseek-harness", "DeepSeek Harness"],
   ["generic-openai", "通用 OpenAI"]
 ];
 

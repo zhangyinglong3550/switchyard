@@ -26,6 +26,8 @@
     "claude-code": { "enabled": true, "allowedModels": ["*"] },
     "hermes": { "enabled": true, "allowedModels": ["*"] },
     "opencode": { "enabled": true, "allowedModels": ["*"] },
+    "grok": { "enabled": true, "allowedModels": ["*"] },
+    "deepseek-harness": { "enabled": true, "allowedModels": ["*"] },
     "generic-openai": { "enabled": true, "allowedModels": ["*"] }
   }
 }

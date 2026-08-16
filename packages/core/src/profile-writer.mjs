@@ -7,6 +7,7 @@ import path from "node:path";
 import { backupDir, ensureDir, nowIso, DEFAULT_HOME, atomicWriteFileSync } from "./utils.mjs";
 import { claudeCodeDiscoveryModelId } from "./config.mjs";
 import crypto from "node:crypto";
+import yaml from "js-yaml";
 
 export function codexConfigPath() {
   return path.join(os.homedir(), ".codex", "config.toml");
@@ -49,6 +50,14 @@ export function grokConfigPath() {
   return path.join(home, "config.toml");
 }
 
+/** DeepSeek Harness user configuration (DSH_HOME may override ~/.dsh). */
+export function deepSeekHarnessConfigPath() {
+  const home = process.env.DSH_HOME && String(process.env.DSH_HOME).trim()
+    ? String(process.env.DSH_HOME).trim()
+    : path.join(os.homedir(), ".dsh");
+  return path.join(home, "settings.yaml");
+}
+
 export const OPENCODE_PROVIDER_ID = "switchyard";
 export const OPENCODE_LOCAL_API_KEY = "switchyard-local";
 export const GROK_LOCAL_API_KEY = "switchyard-local";
@@ -79,7 +88,8 @@ export function profileTargets() {
     "claude-code": claudeCodeConfigPath(),
     hermes: hermesYamlConfigPath(),
     opencode: openCodeConfigPath(),
-    grok: grokConfigPath()
+    grok: grokConfigPath(),
+    "deepseek-harness": deepSeekHarnessConfigPath()
   };
 }
 
@@ -928,9 +938,11 @@ export function syncClientModelArtifacts({
   openCodeDefaultModel,
   grokModels = [],
   grokDefaultModel,
+  deepSeekHarnessModels = [],
   forceCodex = false,
   forceOpenCode = false,
-  forceGrok = false
+  forceGrok = false,
+  forceDeepSeekHarness = false
 } = {}) {
   return {
     codex: syncCodexModelArtifacts({
@@ -958,6 +970,12 @@ export function syncClientModelArtifacts({
       models: grokModels,
       defaultModel: grokDefaultModel,
       force: forceGrok
+    }),
+    deepSeekHarness: syncDeepSeekHarnessModelArtifacts({
+      host,
+      port,
+      models: deepSeekHarnessModels,
+      force: forceDeepSeekHarness
     })
   };
 }
@@ -1280,6 +1298,113 @@ export function syncOpenCodeModelArtifacts({
     capabilityPlugin,
     modelCount: Object.keys(merged.provider?.[OPENCODE_PROVIDER_ID]?.models || {}).length
   };
+}
+
+// ---------- DeepSeek Harness (YAML) ----------
+
+export const DEEPSEEK_HARNESS_PROVIDER_ID = "switchyard";
+export const DEEPSEEK_HARNESS_MARKER = "managed-by-switchyard";
+
+function deepSeekHarnessBaseUrl({ host, port } = {}) {
+  return `http://${host || "127.0.0.1"}:${port || 17888}/deepseek-harness/v1`;
+}
+
+function modelSupportsImages(model) {
+  return Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || model?.visionFallbackModelId);
+}
+
+function modelSupportsReasoning(model) {
+  return Boolean(model?.capabilities?.reasoning);
+}
+
+/** DSH's pi-ai adapter accepts a per-model capability declaration. */
+export function deepSeekHarnessModelFrom(model) {
+  const id = String(model?.id || "").trim();
+  if (!id) return null;
+  const out = {
+    id,
+    name: String(model?.displayName || model?.upstreamModel || id).trim() || id,
+    input: modelSupportsImages(model) ? ["text", "image"] : ["text"]
+  };
+  if (modelSupportsReasoning(model)) {
+    // Switchyard currently exposes a boolean reasoning capability. DSH's
+    // native effort picker needs concrete wire values; use the common
+    // OpenAI-compatible spellings while still omitting the field entirely
+    // for non-reasoning models.
+    out.reasoningEfforts = { off: null, high: "high", max: "max" };
+  }
+  return out;
+}
+
+export function renderDeepSeekHarnessProvider({ host, port, models = [], existing = {} } = {}) {
+  const current = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
+  const next = {
+    ...current,
+    displayName: "Switchyard",
+    api: "openai-completions",
+    baseURL: deepSeekHarnessBaseUrl({ host, port }),
+    [DEEPSEEK_HARNESS_MARKER]: true,
+    models: distinctModels(models).map(deepSeekHarnessModelFrom).filter(Boolean)
+  };
+  // A normal DSH API key is optional for Switchyard's local gateway. Preserve
+  // an existing credential reference, but do not manufacture a missing one.
+  if (!current.apiKeyEnv) delete next.apiKeyEnv;
+  return next;
+}
+
+/**
+ * Merge only the Switchyard-owned DSH provider. All other Harness settings,
+ * plugins, credentials, and third-party providers are retained verbatim after
+ * YAML parse/serialize.
+ */
+export function mergeDeepSeekHarnessProfile(existing, opts = {}) {
+  const next = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...existing } : {};
+  const llm = next["llm-pi-ai"] && typeof next["llm-pi-ai"] === "object" && !Array.isArray(next["llm-pi-ai"])
+    ? { ...next["llm-pi-ai"] }
+    : {};
+  const providers = llm.providers && typeof llm.providers === "object" && !Array.isArray(llm.providers)
+    ? { ...llm.providers }
+    : {};
+  providers[DEEPSEEK_HARNESS_PROVIDER_ID] = renderDeepSeekHarnessProvider({
+    ...opts,
+    existing: providers[DEEPSEEK_HARNESS_PROVIDER_ID]
+  });
+  llm.providers = providers;
+  next["llm-pi-ai"] = llm;
+  return next;
+}
+
+function readYamlSafe(file) {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    const parsed = yaml.load(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function yamlText(value) {
+  return yaml.dump(value, { noRefs: true, lineWidth: 120, sortKeys: false });
+}
+
+export function previewDeepSeekHarnessProfile(target = {}) {
+  return yamlText(mergeDeepSeekHarnessProfile(readYamlSafe(deepSeekHarnessConfigPath()), target));
+}
+
+/** Refresh only after the user has explicitly enabled the managed provider. */
+export function syncDeepSeekHarnessModelArtifacts({ host, port, models = [], force = false } = {}) {
+  const file = deepSeekHarnessConfigPath();
+  const existing = readYamlSafe(file);
+  const managed = Boolean(existing?.["llm-pi-ai"]?.providers?.[DEEPSEEK_HARNESS_PROVIDER_ID]?.[DEEPSEEK_HARNESS_MARKER]);
+  if (!force && !managed) return { ok: true, skipped: true, reason: "not-managed", path: file, modelCount: 0 };
+  const merged = mergeDeepSeekHarnessProfile(existing, { host, port, models });
+  const nextText = yamlText(merged);
+  let prevText = "";
+  try { prevText = fs.readFileSync(file, "utf8"); } catch {}
+  if (prevText === nextText) return { ok: true, path: file, changed: false, modelCount: merged["llm-pi-ai"].providers[DEEPSEEK_HARNESS_PROVIDER_ID].models.length };
+  const result = writeText(file, nextText);
+  return { ok: true, path: result.path, backup: result.backup || null, changed: true, modelCount: merged["llm-pi-ai"].providers[DEEPSEEK_HARNESS_PROVIDER_ID].models.length };
 }
 
 // ---------- Grok Build (TOML) ----------
@@ -2087,6 +2212,20 @@ export function applyOpenCode({ host, port, defaultModel, models, dryRun } = {})
   };
 }
 
+export function applyDeepSeekHarness({ host, port, models, dryRun } = {}) {
+  const file = deepSeekHarnessConfigPath();
+  const existing = readYamlSafe(file);
+  const merged = mergeDeepSeekHarnessProfile(existing, { host, port, models });
+  const text = yamlText(merged);
+  if (dryRun) return { path: file, preview: text, existing: yamlText(existing) };
+  const result = writeText(file, text);
+  return {
+    ...result,
+    modelCount: merged["llm-pi-ai"].providers[DEEPSEEK_HARNESS_PROVIDER_ID].models.length,
+    baseURL: deepSeekHarnessBaseUrl({ host, port })
+  };
+}
+
 export function applyGrok({ host, port, defaultModel, models, dryRun } = {}) {
   const file = grokConfigPath();
   const existing = readText(file);
@@ -2110,6 +2249,7 @@ export function applyProfile(id, opts = {}) {
   if (id === "claude-code") return applyClaudeCode(opts);
   if (id === "hermes") return applyHermes(opts);
   if (id === "opencode") return applyOpenCode(opts);
+  if (id === "deepseek-harness") return applyDeepSeekHarness(opts);
   if (id === "grok") return applyGrok(opts);
   throw new Error(`Unknown profile id: ${id}`);
 }
@@ -2119,6 +2259,7 @@ export function restoreProfile(id) {
   if (id === "claude-code") return restoreLatest(claudeCodeConfigPath());
   if (id === "hermes") return restoreLatest(hermesYamlConfigPath());
   if (id === "opencode") return restoreLatest(openCodeConfigPath());
+  if (id === "deepseek-harness") return restoreLatest(deepSeekHarnessConfigPath());
   if (id === "grok") return restoreLatest(grokConfigPath());
   throw new Error(`Unknown profile id: ${id}`);
 }
@@ -2128,6 +2269,7 @@ export function restoreProfileBackup(id, backupName) {
   if (id === "claude-code") return restoreBackup(claudeCodeConfigPath(), backupName);
   if (id === "hermes") return restoreBackup(hermesConfigPath(), backupName);
   if (id === "opencode") return restoreBackup(openCodeConfigPath(), backupName);
+  if (id === "deepseek-harness") return restoreBackup(deepSeekHarnessConfigPath(), backupName);
   if (id === "grok") return restoreBackup(grokConfigPath(), backupName);
   throw new Error(`Unknown profile id: ${id}`);
 }

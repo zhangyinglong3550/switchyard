@@ -1304,6 +1304,43 @@ test("grok profile · auto-refresh when managed; skip when not", () => {
   assert.match(text, /default = "sy-a--m1"/);
 });
 
+test("deepseek harness profile · writes capability-aware managed provider without losing other settings", () => {
+  const previous = process.env.DSH_HOME;
+  const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-dsh-"));
+  process.env.DSH_HOME = dshHome;
+  try {
+    const file = pw.deepSeekHarnessConfigPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "ui-theme:\n  preference: dark\nllm-pi-ai:\n  providers:\n    other:\n      baseURL: https://example.test/v1\n", "utf8");
+    const result = pw.applyDeepSeekHarness({
+      host: "127.0.0.1",
+      port: 17888,
+      models: [
+        { id: "vision/model", displayName: "Vision", capabilities: { reasoning: true, images: true } },
+        { id: "text/model", displayName: "Text", capabilities: { reasoning: false } }
+      ]
+    });
+    assert.equal(result.modelCount, 2);
+    const text = fs.readFileSync(file, "utf8");
+    assert.match(text, /preference: dark/);
+    assert.match(text, /other:/);
+    assert.match(text, /baseURL: http:\/\/127\.0\.0\.1:17888\/deepseek-harness\/v1/);
+    assert.match(text, /managed-by-switchyard: true/);
+    assert.match(text, /input:\n\s+- text\n\s+- image/);
+    assert.match(text, /reasoningEfforts:/);
+    const sync = pw.syncDeepSeekHarnessModelArtifacts({
+      host: "127.0.0.1",
+      port: 17888,
+      models: [{ id: "text/model", displayName: "Text" }]
+    });
+    assert.equal(sync.changed, true);
+    assert.equal(sync.modelCount, 1);
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+  }
+});
+
 test("codex profile · reads the active Switchyard model for deleted-task recovery", () => {
   const file = pw.codexConfigPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
