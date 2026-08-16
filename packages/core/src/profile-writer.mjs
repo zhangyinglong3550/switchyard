@@ -1323,8 +1323,9 @@ const DSH_REASONING_LEVELS_BY_FAMILY = Object.freeze({
   gpt: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
   // DeepSeek's Codex integration documents low/high/max; keep the native three tiers.
   deepseek: ["off", "low", "high", "max"],
-  // Claude effort is adaptive and documented as low/medium/high; no xhigh/max wire tier.
-  claude: ["off", "low", "medium", "high"],
+  // Switchyard's Anthropic adapter supports low/medium/high and maps xhigh/max
+  // to the provider's maximum effort/budget representation.
+  claude: ["off", "low", "medium", "high", "xhigh", "max"],
   // xAI documents low/high effort for Grok reasoning models.
   grok: ["off", "low", "high"],
   // GLM thinking is an on/off mode in the documented Chat API.

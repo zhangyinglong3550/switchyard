@@ -1308,7 +1308,7 @@ test("deepseek harness profile · maps reasoning levels by model family", () => 
   const cases = [
     ["deepseek/deepseek-v4", "deepseek", ["off", "low", "high", "max"]],
     ["openai/gpt-5.2", "gpt", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]],
-    ["anthropic/claude-opus", "claude", ["off", "low", "medium", "high"]],
+    ["anthropic/claude-opus", "claude", ["off", "low", "medium", "high", "xhigh", "max"]],
     ["xai/grok-4", "grok", ["off", "low", "high"]],
     ["zhipu/glm-5", "glm", ["off", "high"]],
     ["moonshot/kimi-k3", "kimi", ["off", "low", "medium", "high", "max"]],
