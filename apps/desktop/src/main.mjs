@@ -850,6 +850,7 @@ function modelsForProfile(cfg, models) {
   return (models || []).map((model) => ({
     ...model,
     providerName: providerById.get(model.providerId)?.name || model.providerId,
+    providerPresetId: providerById.get(model.providerId)?.presetId || "",
     providerApiFormat: providerById.get(model.providerId)?.apiFormat || ""
   }));
 }

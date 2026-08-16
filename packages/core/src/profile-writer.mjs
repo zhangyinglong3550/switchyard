@@ -1317,6 +1317,60 @@ function modelSupportsReasoning(model) {
   return Boolean(model?.capabilities?.reasoning);
 }
 
+const DSH_REASONING_LEVELS = Object.freeze(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const DSH_REASONING_LEVELS_BY_FAMILY = Object.freeze({
+  // OpenAI's current reasoning API exposes these named effort levels by model generation.
+  gpt: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  // DeepSeek's Codex integration documents low/high/max; keep the native three tiers.
+  deepseek: ["off", "low", "high", "max"],
+  // Claude effort is adaptive and documented as low/medium/high; no xhigh/max wire tier.
+  claude: ["off", "low", "medium", "high"],
+  // xAI documents low/high effort for Grok reasoning models.
+  grok: ["off", "low", "high"],
+  // GLM thinking is an on/off mode in the documented Chat API.
+  glm: ["off", "high"],
+  // Kimi's thinking-effort API uses low/medium/high/max.
+  kimi: ["off", "low", "medium", "high", "max"],
+  // Qwen DashScope uses thinking budgets; these labels provide matching DSH tiers,
+  // while the gateway's provider compatibility layer owns the wire conversion.
+  qwen: ["off", "low", "medium", "high", "xhigh"],
+  // Gemini thinkingLevel is minimal/low/medium/high on supported Gemini 3 models.
+  gemini: ["off", "minimal", "low", "medium", "high"],
+  // MiniMax exposes reasoning_split as a boolean switch, not an effort enum.
+  minimax: ["off", "high"]
+});
+
+function dshReasoningFamily(model) {
+  const text = [
+    model?.providerPresetId,
+    model?.providerId,
+    model?.providerName,
+    model?.upstreamModel,
+    model?.displayName,
+    model?.id
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (/deepseek/.test(text)) return "deepseek";
+  if (/claude|anthropic/.test(text)) return "claude";
+  if (/gpt[-_./]?|openai|codex/.test(text)) return "gpt";
+  if (/grok|xai/.test(text)) return "grok";
+  if (/glm|zhipu|智谱/.test(text)) return "glm";
+  if (/kimi|moonshot/.test(text)) return "kimi";
+  if (/qwen|通义|dashscope|alibaba/.test(text)) return "qwen";
+  if (/gemini|google/.test(text)) return "gemini";
+  if (/minimax/.test(text)) return "minimax";
+  return "";
+}
+
+function dshReasoningLevels(model) {
+  const explicit = model?.reasoningLevels || model?.reasoning_levels || model?.supportedReasoningLevels || model?.supported_reasoning_levels;
+  if (Array.isArray(explicit) && explicit.length) {
+    const normalized = explicit.map((level) => String(level).trim().toLowerCase()).filter((level) => DSH_REASONING_LEVELS.includes(level));
+    if (normalized.length) return [...new Set(normalized)];
+  }
+  const family = dshReasoningFamily(model);
+  return DSH_REASONING_LEVELS_BY_FAMILY[family] || [...DSH_REASONING_LEVELS];
+}
+
 /** DSH's pi-ai adapter accepts a per-model capability declaration. */
 export function deepSeekHarnessModelFrom(model) {
   const id = String(model?.id || "").trim();
@@ -1327,11 +1381,9 @@ export function deepSeekHarnessModelFrom(model) {
     input: modelSupportsImages(model) ? ["text", "image"] : ["text"]
   };
   if (modelSupportsReasoning(model)) {
-    // Switchyard currently exposes a boolean reasoning capability. DSH's
-    // native effort picker needs concrete wire values; use the common
-    // OpenAI-compatible spellings while still omitting the field entirely
-    // for non-reasoning models.
-    out.reasoningEfforts = { off: null, high: "high", max: "max" };
+    // DSH validates effort keys itself. Values are the same tokens so the
+    // gateway can clamp or translate them for the actual upstream protocol.
+    out.reasoningEfforts = Object.fromEntries(dshReasoningLevels(model).map((level) => [level, level === "off" ? null : level]));
   }
   return out;
 }

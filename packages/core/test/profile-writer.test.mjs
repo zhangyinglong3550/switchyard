@@ -1304,6 +1304,31 @@ test("grok profile · auto-refresh when managed; skip when not", () => {
   assert.match(text, /default = "sy-a--m1"/);
 });
 
+test("deepseek harness profile · maps reasoning levels by model family", () => {
+  const cases = [
+    ["deepseek/deepseek-v4", "deepseek", ["off", "low", "high", "max"]],
+    ["openai/gpt-5.2", "gpt", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]],
+    ["anthropic/claude-opus", "claude", ["off", "low", "medium", "high"]],
+    ["xai/grok-4", "grok", ["off", "low", "high"]],
+    ["zhipu/glm-5", "glm", ["off", "high"]],
+    ["moonshot/kimi-k3", "kimi", ["off", "low", "medium", "high", "max"]],
+    ["qwen/qwen3", "qwen", ["off", "low", "medium", "high", "xhigh"]],
+    ["google/gemini-3-pro", "gemini", ["off", "minimal", "low", "medium", "high"]],
+    ["minimax/MiniMax-M2.5", "minimax", ["off", "high"]]
+  ];
+  for (const [id, family, levels] of cases) {
+    const model = pw.deepSeekHarnessModelFrom({ id, providerId: family, upstreamModel: id, capabilities: { reasoning: true } });
+    assert.deepEqual(Object.keys(model.reasoningEfforts), levels, id);
+  }
+  const explicit = pw.deepSeekHarnessModelFrom({
+    id: "custom/reasoning",
+    providerId: "custom",
+    reasoningLevels: ["off", "low", "xhigh"],
+    capabilities: { reasoning: true }
+  });
+  assert.deepEqual(Object.keys(explicit.reasoningEfforts), ["off", "low", "xhigh"]);
+});
+
 test("deepseek harness profile · writes capability-aware managed provider without losing other settings", () => {
   const previous = process.env.DSH_HOME;
   const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-dsh-"));
