@@ -450,6 +450,24 @@ function cursorEndStreamStatus(code) {
 function firstText(fieldMap, field) { const value = fieldMap.get(field)?.[0]; return value ? Buffer.from(value).toString("utf8") : ""; }
 function shellQuote(value) { return `'${String(value).replace(/'/g, `'"'"'`)}'`; }
 
+// Cursor 新版 GrepArgs：field2=searchIn 目录、field3=glob、field4=option，
+// 不一定有 pattern（files_with_matches 模式按 glob 找文件）。不纠结缺哪个字段，
+// 用能拿到的 dir+glob 构造可执行的 find/grep 命令。
+function globToFindArgs(glob) {
+  const text = String(glob || "").trim();
+  if (!text) return "";
+  const extMatch = text.match(/\{([^}]+)\}/);
+  const exts = extMatch ? extMatch[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+  const base = text.replace(/^\*\*\//, "").replace(/\{[^}]+\}/, "*");
+  if (exts.length) {
+    return `\( ${exts.map((e) => `-name '${shellQuoteSafe(base.replace(/\*$/, "") + e)}'`).join(" -o ")} \)`;
+  }
+  return `-name '${shellQuoteSafe(base)}'`;
+}
+function shellQuoteSafe(value) {
+  return String(value || "").replace(/[^A-Za-z0-9_@%+=:,./-]/g, "\$&");
+}
+
 export function cursorAgentExecutionEvent(payload, tools = []) {
   const server = fields(payload);
   const exec = server.get(2)?.[0];
@@ -531,12 +549,19 @@ export function cursorAgentExecutionEvent(payload, tools = []) {
   const grep = execFields.get(5)?.[0];
   if (grep) {
     const args = fields(grep);
-    const pattern = firstText(args, 1);
-    const filePath = firstText(args, 2);
-    if (!pattern) return { type: "unsupported_execution", execution: "grep" };
+    // Cursor 真实 GrepArgs：field2=searchIn 目录、field3=glob；field1 可能是
+    // 调用 id（fc_/call_ 前缀）而非 pattern。尽量识别 pattern，缺失就用 dir+glob。
+    const rawPattern = firstText(args, 1);
+    const pattern = rawPattern && !/^(fc_|call_)/.test(rawPattern) ? rawPattern : "";
+    const dir = firstText(args, 2) || ".";
+    const glob = firstText(args, 3) || "";
     const target = selectShellTool(tools);
     if (target) {
-      const command = `grep -n ${shellQuote(pattern)} ${shellQuote(filePath || ".")}`;
+      const command = pattern
+        ? `grep -rn ${shellQuote(pattern)} ${shellQuote(dir)}`
+        : glob
+          ? `find ${shellQuote(dir)} -type f ${globToFindArgs(glob)}`
+          : `find ${shellQuote(dir)} -type f`;
       return {
         type: "tool_call",
         id: firstText(args, 14) || firstText(execFields, 15) || `call_${crypto.randomUUID()}`,

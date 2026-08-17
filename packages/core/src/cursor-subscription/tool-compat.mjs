@@ -6,10 +6,22 @@ const MAX_TOOL_SCHEMA_CHARS = 3000;
 
 function textPart(content) {
   if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content
-    .filter((part) => part?.type === "text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("\n");
+  if (Array.isArray(content)) {
+    const texts = [];
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "text" && typeof part.text === "string") {
+        texts.push(part.text);
+      } else if (part.type === "image_url" || part.type === "input_image" || part.type === "image") {
+        // Cursor 订阅通道不支持图片：降级为占位文本，避免静默丢失或断言报错
+        texts.push("[图片已省略：Cursor 订阅通道不支持图片]");
+      } else if (part.type !== "thinking" && part.type !== "reasoning") {
+        const t = String(part.text ?? part.content ?? "").trim();
+        if (t) texts.push(t);
+      }
+    }
+    return texts.join("\n");
+  }
   return "";
 }
 

@@ -68,29 +68,17 @@ export function normalizeCursorSubscriptionProvider(provider = {}) {
   return normalized;
 }
 
-function contentIsText(content) {
-  if (typeof content === "string") return true;
-  return Array.isArray(content) && content.every((part) => part && part.type === "text" && typeof part.text === "string");
-}
 
-function isFunctionTool(tool) {
-  return tool?.type === "function" && typeof tool?.function?.name === "string" && tool.function.name.trim().length > 0;
-}
 
 export function assertCursorSubscriptionRequest(body = {}) {
-  if (Array.isArray(body.tools) && body.tools.some((tool) => !isFunctionTool(tool))) {
-    throw new CursorSubscriptionRequestError("Cursor 订阅桥接仅支持 OpenAI function 类型工具");
+  // 仅做结构校验：不支持的内容（图片/非 function 工具等）由编码层降级处理
+  // （图片→占位文本、非 function 工具→过滤），不再逐个内容类型拒绝，避免
+  // DeepSeek 等客户端带 thinking/图片历史时被误杀。
+  if (!body || typeof body !== "object") {
+    throw new CursorSubscriptionRequestError("Cursor 订阅请求必须是 JSON 对象");
   }
-  for (const message of body.messages || []) {
-    const allowsToolResult = message?.role === "tool" && contentIsText(message.content);
-    const allowsTextMessage = ["system", "user", "assistant"].includes(message?.role) && contentIsText(message.content);
-    const allowsAssistantToolCalls = message?.role === "assistant" &&
-      Array.isArray(message?.tool_calls) && message.tool_calls.every((call) => isFunctionTool({ type: "function", function: call?.function }));
-    if (!message || (!allowsToolResult && !allowsTextMessage) ||
-      (message.role !== "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length) ||
-      (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length && !allowsAssistantToolCalls)) {
-      throw new CursorSubscriptionRequestError("Cursor 订阅桥接仅支持文本消息、function 工具调用及工具结果");
-    }
+  if ((body.messages || []).some((m) => !m || typeof m !== "object" || typeof m.role !== "string")) {
+    throw new CursorSubscriptionRequestError("Cursor 订阅消息缺少 role");
   }
   return true;
 }

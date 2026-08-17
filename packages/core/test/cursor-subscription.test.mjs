@@ -64,13 +64,10 @@ test("cursor subscription · rejects unsupported content but accepts only suppor
     { role: "user", content: "hello" },
     { role: "assistant", content: "hi" }
   ] }));
-  for (const request of [
-    { messages: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,x" }] }] },
-    { messages: [{ role: "assistant", content: "", tool_calls: [{ id: "call_1" }] }] },
-    { messages: [{ role: "user", content: "hello" }], tools: [{ type: "web_search" }] }
-  ]) {
-    assert.throws(() => assertCursorSubscriptionRequest(request), (err) => err?.code === "CURSOR_SUBSCRIPTION_UNSUPPORTED_REQUEST");
-  }
+  // 图片、非 function 工具不再拒绝：由编码层降级（图片→占位文本，工具→过滤）。
+  assert.doesNotThrow(() => assertCursorSubscriptionRequest({ messages: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,x" }] }] }));
+  assert.doesNotThrow(() => assertCursorSubscriptionRequest({ messages: [{ role: "assistant", content: "", tool_calls: [{ id: "call_1" }] }] }));
+  assert.doesNotThrow(() => assertCursorSubscriptionRequest({ messages: [{ role: "user", content: "hello" }], tools: [{ type: "web_search" }] }));
 });
 
 test("cursor subscription · maps the public auto alias to Cursor's default Agent model", () => {
@@ -571,10 +568,8 @@ test("cursor subscription · accepts function tools and preserves the tool-resul
       { role: "tool", tool_call_id: "call_1", content: "{\"enabled\":true}" }
     ]
   }));
-  assert.throws(
-    () => assertCursorSubscriptionRequest({ tools: [{ type: "web_search" }], messages: [{ role: "user", content: "x" }] }),
-    (error) => error?.code === "CURSOR_SUBSCRIPTION_UNSUPPORTED_REQUEST"
-  );
+  // 非 function 工具不再拒绝：编码层会过滤（selectCursorBridgeTools）。
+  assert.doesNotThrow(() => assertCursorSubscriptionRequest({ tools: [{ type: "web_search" }], messages: [{ role: "user", content: "x" }] }));
 
   const conversation = prepareCursorConversation([
     { role: "user", content: "Read the config" },
@@ -908,7 +903,7 @@ test("cursor subscription · maps Cursor built-in grep request to exec_command",
     id: "Grep_0-da001",
     name: "exec_command",
     arguments: JSON.stringify({
-      cmd: "grep -n '\\.root\\[data-theme' '/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css'"
+      cmd: "grep -rn '\\.root\\[data-theme' '/Users/zhangyinglong/code/codex/switchyard/apps/mobile/styles.css'"
     })
   });
 });
@@ -975,4 +970,28 @@ test("cursor subscription · pool-bound account uses its own access token and ma
   assert.equal(seenCredentials.machineId, "pool-machine-1234");
   // transport 被调用 = 走了 HTTP2 而非本机 Cursor CLI（CLI 会用当前登录账号，池化必须用账号自身 token）
   assert.ok(seenProvider, "transport should have been invoked for the pool-bound account");
+});
+
+test("cursor subscription · accepts assistant thinking/reasoning blocks (deepseek history)", () => {
+  assert.doesNotThrow(() => assertCursorSubscriptionRequest({ messages: [
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "text", text: "hi" }, { type: "thinking", text: "内部思考" }] }
+  ] }));
+});
+
+test("cursor subscription · maps Cursor GrepArgs with dir+glob and no pattern to a find command", () => {
+  // 真实 Cursor 新版 GrepArgs：field2=searchIn 目录, field3=glob, field4=files_with_matches, 无 pattern
+  const grepArgs = Buffer.concat([
+    protoField(2, "/Users/user/.grok/docs/user-guide"),
+    protoField(3, "**/*.{md,txt}"),
+    protoField(4, "files_with_matches"),
+    protoField(14, "call-123")
+  ]);
+  const exec = Buffer.concat([protoVarintField(1, 5), protoField(5, grepArgs)]);
+  const event = cursorAgentExecutionEvent(protoField(2, exec), ["exec_command"]);
+  assert.equal(event.type, "tool_call");
+  assert.equal(event.name, "exec_command");
+  assert.match(event.arguments, /find/);
+  assert.match(event.arguments, /user-guide/);
+  assert.match(event.arguments, /\.md/);
 });
