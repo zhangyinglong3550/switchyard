@@ -223,7 +223,7 @@ test("Codex runtime lists and reads native threads with mobile capabilities", as
     archive: true,
     unarchive: true,
     delete: true,
-    fork: true,
+    fork: false,
     compact: true,
     approve: true
   });

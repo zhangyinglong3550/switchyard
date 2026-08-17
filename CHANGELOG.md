@@ -1,5 +1,66 @@
 # Changelog
 
+## 2.3.4 — 2026-08-17
+
+### Feat
+
+- **Cursor 订阅账号池**：新增 `cursor_subscription` 池类型与「Cursor 订阅账号池」预设，支持粘贴导入 `email----…----userId::JWT` / JSON / NDJSON，多号加权轮询、失败换号和逐号连接测试；导入账号统一复用本机 Cursor machine id，凭证仅保存到 `~/.switchyard/pools/cursor_subscription/`，不写入 `config.json`。
+
+### Fix
+
+- **Cursor 账号池去重**：Cursor 池按 access token 优先去重，避免同一订阅号因邮箱字段变化或缺失被重复写入。
+- **DSH 思考等级与桌面端对齐**：思考档位不再硬编码，改为从 DSH host `session.models` 的当前模型 `reasoning.efforts` 动态读取——手机端显示的档位与桌面端完全一致（不同模型/供应商档位不同，如官方 DeepSeek 为 off/high/max，Switchyard 网关模型为 off/low/high/max）。`getSettings` 支持 async，registry 兼容 Promise 解包。
+- **Grok/Codex 分叉隐藏补全**：会话列表行与详情的 capabilities 统一关闭 fork（此前仅 agents 级生效）。
+
+## 2.3.3 — 2026-08-17
+
+### Fix
+
+- **Grok 分叉彻底隐藏**：此前只关了 agents 级，会话列表行/详情的 capabilities 仍来自 ACP runtime（fork:true）导致手机端菜单仍显示「分叉会话」。现统一在 Grok 的 listSessions/readSession 层关闭 fork。
+- **Codex 分叉隐藏**（桌面属主会话不能分叉）。
+- **DeepSeek 思考等级**：手机端「对话设置」思考程度下拉恢复（off/low/high/max），保存后下一轮生效（`session.selectModel` 带 `reasoningEffort`）。
+
+## 2.3.2 — 2026-08-17
+
+### Fix
+
+- **DeepSeek 思考等级恢复**：DSH runtime 补上 `settings.effortOptions`（off/low/high/max）与 `setSettings`（此前遗留 `setSettings: undefined` 导致手机端无法选择思考等级）；保存时若未显式选过模型则回退会话当前模型，`session.selectModel` 带 `reasoningEffort` 下一轮生效。
+- **分叉入口按可用性收敛**：Codex（桌面属主会话不能分叉）与 Grok（ACP 单实例锁无原生 fork）隐藏手机端「分叉会话」；DeepSeek 分叉实测可用保留。
+
+## 2.3.1 — 2026-08-17
+
+### Feat
+
+- **底部可收起任务卡（全 Agent）**：对话页底部（文档流内、输入栏上方）新增实时任务卡，展示当前会话的计划步骤与进度（`3/7 完成 · 43%`），可一键收起/展开，折叠状态按会话记忆。Codex `update_plan`、Claude `TodoWrite`、OpenCode/DSH `todo_write` 统一汇入；DSH 原生 goal 与 todo 也同步。
+- **DSH 斜杠命令与 Skills**：`/` 补全新增 DeepSeek 支持——内置命令（goal/compact/clear/model/help/status）+ 从 DSH host `skill.list` 实时拉取原生 Skills；registry 兼容 async runtime 命令列表。
+- **对话内容展示打磨**：任务卡改为随内容滚动（不再悬浮盖消息），输入栏与面板间距、正文排版节奏进一步优化。
+
+### Fix
+
+- **DSH 自托管端口冲突**：默认端口 17890 改为 17891（17888 网关 / 17889 mobile-control / 17890 会话核心网关均被占用）；自托管前先探测占用端口是否为 DSH host 并复用。
+- **任务卡无法收起**：`<summary>` 原生 toggle 与手动 toggleAttribute 双重翻转导致"收不起来"，改为自管理 class。
+- **DSH `/` 命令报错**：`dynamicCommands.map is not a function`（async runtime 返回 Promise），registry 统一 `await Promise.resolve` 解包。
+
+## 2.3.0 — 2026-08-17
+
+### Feat
+
+- **手机端 DeepSeek（DeepSeek Harness）全链路接入**：新增 `dsh-host-client` + `deepseek-harness` runtime。优先附着运行中的 DSH Desktop 服务器（手机与桌面实时双向同步），找不到时用 `dsh web` 自托管固定端口（17890）。支持会话列表/历史（含 thinking、工具卡、图片描述）、续聊发送（含图片与文本附件）、停止、重命名、分支、模型与推理档位切换、原生审批。
+- **DSH 事件流**：`/api/events.mux` WebSocket 订阅 chunk 级流式输出（text-delta 逐字上屏）、tool/call→tool/result 合并、turn/host 状态与 `approval/requested`/`approval/resolved`。该通道为纯下行（上行帧会被服务端以 1008 拒绝），客户端不再发送应用层心跳。
+- **审批体验修复**：待审批卡片不再永久卡死——会话终止自动清理、DSH 桌面端处理的审批会向手机推送 `approval_resolved` 并即时撤卡、超过 30 分钟的遗留审批不再展示。
+- **任务步骤卡对齐所有 Agent**：Codex `update_plan`、Claude Code `TodoWrite`、OpenCode `todo_write`、DSH `todo/write` 统一渲染为可勾选步骤卡（每轮取最后一次写入）；目标模式（goal）面板扩展至全部 Agent——Codex 原生 goal、DSH `goal/change` + 投影原生 goal，Claude/OpenCode 由 todo 流推导，registry 层统一累积并在会话终止时清理。
+- **Agent 抽屉式筛选**：会话列表的 Agent 并排 pill 改为底部抽屉选择器（含彩色头像与各 Agent 会话数），适应持续增加的 Agent 数量。
+- **对话体验打磨**：AI 回复新增身份行（Agent 彩点 + 名称 + 模型）；每轮轻量时间提示；流式思考默认展开（终态自动折叠）；工具行按 read/search/edit/command 分类着色；终端卡红绿灯头；composer 聚焦光晕与发送键渐变；Markdown 标题/列表节奏优化；暗色主题同步覆盖。
+- **视觉刷新（v86）**：会话卡片去边框改柔和投影、输入框改填充式、顶/底栏去分割线、圆角统一；五种主题与暗色同步覆盖。
+- **空状态升级**：无会话时展示图标 + 引导文案 +「开始新任务」CTA。
+- **Android 触觉反馈**：审批到达与任务完成时轻震动（`SwitchyardNative.vibrate`）。
+
+### Fix
+
+- **安卓壳支持回环联调**：配对与网络策略允许 `http://127.0.0.1` / `localhost`（生产 Tailscale HTTPS 路径不变），配合 `adb reverse` 可在模拟器直连本机 Session-Core。
+- **lsof 发现 DSH Desktop**：按 COMMAND 列解析（空格转义为 `\x20`），修复端口发现失败导致误自托管的问题。
+- **移动端资产缓存**：Service Worker 缓存键与版本号统一，避免同版本号下旧 JS/新 HTML 混用导致功能失效。
+
 ## 2.2.20 — 2026-07-22
 
 ### Feat

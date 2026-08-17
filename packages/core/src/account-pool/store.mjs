@@ -5,7 +5,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { ensureDir, atomicWriteFileSync } from "../utils.mjs";
 
-export const POOL_KINDS = new Set(["xai_oauth", "antigravity_oauth", "codex_oauth"]);
+export const POOL_KINDS = new Set(["xai_oauth", "antigravity_oauth", "codex_oauth", "cursor_subscription"]);
 export const POOL_STRATEGIES = new Set([
   "weighted_round_robin",
   "least_recently_used",
@@ -85,6 +85,9 @@ export function normalizeAccount(raw = {}) {
     // Agent Identity instead of OAuth access / refresh tokens.
     agentIdentity: raw.agentIdentity === true || String(raw.authMode || raw.auth_mode || "").toLowerCase() === "agentidentity",
     authMode: String(raw.authMode || raw.auth_mode || "").trim(),
+    // Cursor 订阅号：access token 之外，还需要 Cursor 设备标识用于 x-cursor-checksum。
+    // 按用户确认，导入的 Cursor 账号统一复用本机 machine id，避免每号随机设备标识。
+    machineId: String(raw.machineId || raw.machine_id || "").trim(),
     agentRuntimeId: String(raw.agentRuntimeId || raw.agent_runtime_id || "").trim(),
     agentPrivateKey: String(raw.agentPrivateKey || raw.agent_private_key || "").trim(),
     agentTaskId: String(raw.agentTaskId || raw.agent_task_id || raw.task_id || "").trim(),
@@ -236,6 +239,9 @@ export function publicAccountView(account) {
     hasSessionToken: hasSession,
     hasSsoToken: Boolean(account.ssoToken),
     hasAgentIdentity: account.agentIdentity === true && Boolean(account.agentRuntimeId && account.agentPrivateKey),
+    // Cursor 订阅号：仅回传脱敏预览，完整 machine id 不离开主进程
+    hasMachineId: Boolean(account.machineId),
+    machineIdPreview: account.machineId ? account.machineId.slice(0, 8) + "..." : "",
     accountId: account.accountId || "",
     projectId: account.projectId || "",
     planType: account.planType || "",
@@ -336,14 +342,14 @@ export function upsertAccounts(providerId, incomingAccounts, {
   if (strategy) pool.strategy = strategy;
   const existingByKey = new Map();
   for (const account of pool.accounts) {
-    existingByKey.set(accountKey(account), account);
+    existingByKey.set(accountKey(account, pool.poolKind), account);
   }
   let added = 0;
   let skipped = 0;
   let updated = 0;
   for (const raw of incomingAccounts || []) {
     const account = normalizeAccount(raw);
-    const key = accountKey(account);
+    const key = accountKey(account, pool.poolKind);
     const existing = existingByKey.get(key);
     if (existing) {
       if (skipDuplicates) {
@@ -381,7 +387,10 @@ export function upsertAccounts(providerId, incomingAccounts, {
   };
 }
 
-function accountKey(account) {
+function accountKey(account, poolKind = "") {
+  // Cursor exports may change or omit email between dumps; the access token is
+  // the stable identity of a subscription account in that pool.
+  if (poolKind === "cursor_subscription" && account.accessToken) return `access:${account.accessToken}`;
   if (account.agentIdentity && account.agentRuntimeId) return `agent:${account.agentRuntimeId}`;
   if (account.refreshToken) return `rt:${account.refreshToken}`;
   if (account.sessionToken) return `st:${account.sessionToken}`;

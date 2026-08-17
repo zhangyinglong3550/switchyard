@@ -11,6 +11,7 @@ import { createCodexRuntime } from "./mobile-control/codex-runtime.mjs";
 import { createClaudeRuntime } from "./mobile-control/claude-runtime.mjs";
 import { createGrokRuntime } from "./mobile-control/grok-runtime.mjs";
 import { createOpenCodeRuntime } from "./mobile-control/opencode-runtime.mjs";
+import { createDeepSeekRuntime } from "./mobile-control/dsh-runtime.mjs";
 import {
   createSessionRegistry,
   encodeMobileSessionId
@@ -91,7 +92,8 @@ export function detectMobileAgents({ env = mobileRuntimeEnv(), home = os.homedir
     ], env),
     "claude-code": installedExecutable("claude", [path.join(home, "npm-global", "bin", "claude")], env),
     grok: installedExecutable("grok", [path.join(home, ".local", "bin", "grok")], env),
-    opencode: installedExecutable("opencode", [path.join(home, "npm-global", "bin", "opencode")], env)
+    opencode: installedExecutable("opencode", [path.join(home, "npm-global", "bin", "opencode")], env),
+    "deepseek-harness": installedExecutable("dsh", [path.join(home, "npm-global", "bin", "dsh")], env)
   };
 }
 
@@ -120,6 +122,12 @@ function createRuntimeSet(store) {
     overlay: overlayFor(store, "opencode"),
     command: installed.opencode,
     env
+  }));
+  if (installed["deepseek-harness"]) runtimes.push(createDeepSeekRuntime({
+    overlay: overlayFor(store, "deepseek-harness"),
+    command: installed["deepseek-harness"],
+    env,
+    log: (message) => console.error(message)
   }));
   return { codexClient, runtimes };
 }

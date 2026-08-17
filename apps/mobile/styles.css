@@ -147,7 +147,7 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 .agent-choice.selected{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
 .agent-choice .agent-avatar{width:28px;height:28px;border-radius:10px;font-size:9px}
 .agent-avatar{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--text);color:var(--bg);font-size:11px;font-weight:800}
-.avatar-claude{background:#c96a4a}.avatar-grok{background:#3b6ea5}.avatar-opencode{background:#8a6d3b}
+.avatar-claude{background:#c96a4a}.avatar-grok{background:#3b6ea5}.avatar-opencode{background:#8a6d3b}.avatar-deepseek{background:#4d6bfe}
 .workspace-list{display:grid;gap:7px}
 .workspace-recent{position:relative;overflow:hidden;border-radius:14px}
 .workspace-recent .swipe-content{min-height:58px}
@@ -720,7 +720,7 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 /* ============================================================
    v63: conversation canvas — turns lead, work stays secondary.
    ============================================================ */
-.messages{gap:18px;padding:14px 14px 88px}
+.messages{gap:18px;padding:14px 14px 10px}
 .conversation-turn{display:grid;gap:10px;min-width:0;animation:turn-in .18s ease both}
 .conversation-turn.has-request{padding-top:2px}
 .turn-request{display:flex;justify-content:flex-end}.turn-request .me{max-width:82%;padding:10px 13px;border-radius:18px 18px 7px 18px;background:#2f2a23;color:#fff;box-shadow:0 3px 10px rgba(37,31,24,.1);font-size:14.5px;line-height:1.55}
@@ -735,7 +735,7 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 .term{margin:8px 9px 9px}.term-out{margin:0;max-height:230px}.term-actions{display:flex;gap:6px}.term-actions button{border:0;background:transparent;color:#b8b0a1;padding:0;font:10px var(--mono);text-decoration:underline;text-underline-offset:2px}.diff-controls{display:flex;gap:6px;padding:6px 8px;border-bottom:1px solid var(--line-soft);background:var(--card-soft)}.diff-controls button{min-height:28px;padding:0 8px;border:1px solid var(--line-soft);border-radius:999px;background:var(--card);color:var(--faint);font-size:10px}.diff-controls button.selected{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}.diff[data-filter="changes"] tr.ctx{display:none}.diff.context-collapsed tr.ctx{display:none}
 .approval-inbox{margin-bottom:8px}.approval-card{padding:0;border-radius:12px;box-shadow:none}.approval-strip{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;min-height:52px;padding:8px 10px;border:0;background:transparent;color:var(--text);text-align:left}.approval-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--amber-soft);color:var(--amber);font-size:13px;font-weight:850}.approval-strip b,.approval-strip small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.approval-strip b{font-size:12.5px}.approval-strip small{margin-top:2px;color:var(--dim);font-size:10.5px}.approval-strip em{color:var(--accent);font-size:11px;font-style:normal;font-weight:750}.approval-sheet-copy{display:grid;gap:7px}.approval-kicker{color:var(--amber);font-size:10.5px;font-weight:800;letter-spacing:.45px;text-transform:uppercase}.approval-sheet-copy strong{font-size:15px}.approval-sheet-copy p{margin:0;color:var(--dim);font-size:13px;line-height:1.5}.approval-sheet-actions{display:grid;grid-template-columns:1fr 1.35fr;gap:9px;margin-top:15px}.approval-sheet-actions button{min-height:46px;border:1px solid var(--line-input);border-radius:13px;background:var(--card);color:var(--dim);font-weight:750}.approval-sheet-actions .allow{border-color:var(--text);background:var(--text);color:var(--bg)}
 .session-queue{margin:7px 14px 0;border-radius:12px}.session-queue>details>summary{grid-template-columns:22px minmax(0,1fr) auto;display:grid;gap:7px;align-items:center;min-height:46px;padding:7px 10px}.session-queue summary span:nth-child(2){min-width:0}.session-queue summary b,.session-queue summary small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-queue summary b{font-size:12px}.session-queue summary small{margin:2px 0 0;font-size:10.5px}.session-queue summary em{font-style:normal;color:var(--faint);transition:transform .18s}.session-queue details[open] summary em{transform:rotate(180deg)}.queue-summary-icon{display:grid;place-items:center;width:21px;height:21px;border-radius:7px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:800}
-.composer{gap:7px;padding:7px 10px calc(8px + env(safe-area-inset-bottom));background:var(--chrome)}.composer .runtime-shortcut{order:1;display:flex;min-height:28px;padding:1px 2px 4px}.composer .runtime-shortcut strong{display:none}.composer .runtime-shortcut small{max-width:calc(100vw - 68px)}.composer textarea{order:3;min-height:44px;max-height:112px;padding:11px 13px;border-radius:18px;font-size:16px}.attach-control,.send-button{width:44px;height:44px;min-width:44px;border-radius:14px}.composer .attach-control{order:2}.composer .send-button{order:4}.attachment-preview{order:0;width:100%}.app-shell[data-page="detail"] .composer{bottom:var(--keyboard-inset,0px)}.chat-page{padding-bottom:6px}
+.composer{gap:7px;padding:7px 10px calc(8px + env(safe-area-inset-bottom));background:var(--chrome)}.composer .runtime-shortcut{order:1;display:flex;min-height:28px;padding:1px 2px 4px}.composer .runtime-shortcut strong{display:none}.composer .runtime-shortcut small{max-width:calc(100vw - 68px)}.composer textarea{order:3;min-height:44px;max-height:112px;padding:11px 13px;border-radius:18px;font-size:16px}.attach-control,.send-button{width:44px;height:44px;min-width:44px;border-radius:14px}.composer .attach-control{order:2}.composer .send-button{order:4}.attachment-preview{order:0;width:100%}.app-shell[data-page="detail"] .composer{bottom:var(--keyboard-inset,0px)}.chat-page{padding-bottom:150px}
 .new-message-indicator{position:fixed;z-index:20;bottom:calc(var(--composer-height,64px) + env(safe-area-inset-bottom) + 10px + var(--keyboard-inset,0px));left:50%;min-height:38px;padding:0 13px;transform:translateX(-50%);border:0;border-radius:999px;background:var(--text);color:var(--bg);box-shadow:0 8px 22px rgba(28,24,18,.2);font:750 12px var(--sans)}.new-message-indicator[hidden]{display:none}
 :root[data-density="compact"] .messages{gap:12px;padding-top:10px}.conversation-turn{gap:7px}:root[data-density="compact"] .turn-work{gap:6px}:root[data-density="compact"] .turn-result .ai{font-size:15px}:root[data-density="compact"] .work-head{min-height:44px;padding-block:7px}:root[data-density="compact"] .tl-row{min-height:40px;padding-block:6px}:root[data-density="compact"] .composer textarea{min-height:40px;padding-block:9px}
 @keyframes turn-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
@@ -787,3 +787,221 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 :root[data-scheme="dark"] .theme-swatch{border-color:rgba(255,255,255,.08)}
 .theme-option strong{font-size:12px;font-weight:750}
 .theme-option small{font-size:10px;color:var(--muted);line-height:1.25}
+
+/* ============================================================
+   v83: conversation polish — Codex-mobile-grade chat surface.
+   身份行（彩点 + Agent 名 + 模型）、气泡与工具卡的层级统一、
+   终端卡红绿灯、composer 聚焦态与发送键渐变、暗色同步覆盖。
+   ============================================================ */
+/* ---------- assistant identity row ---------- */
+.ai .who{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:10.5px;color:var(--faint);font-weight:700;letter-spacing:.2px}
+.who-dot{width:14px;height:14px;border-radius:5px;background:var(--text);box-shadow:0 0 0 3px color-mix(in srgb,var(--text) 8%,transparent);flex:none}
+.who-dot.avatar-claude{background:#c96a4a;box-shadow:0 0 0 3px rgba(201,106,74,.16)}
+.who-dot.avatar-grok{background:#3b6ea5;box-shadow:0 0 0 3px rgba(59,110,165,.16)}
+.who-dot.avatar-opencode{background:#8a6d3b;box-shadow:0 0 0 3px rgba(138,109,59,.16)}
+.who-dot.avatar-deepseek{background:#4d6bfe;box-shadow:0 0 0 3px rgba(77,107,254,.16)}
+.who-name{color:var(--muted)}
+.who-model{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--faint);opacity:.85}
+.who-model::before{content:"·";margin-right:6px;opacity:.6}
+/* ---------- user bubble ---------- */
+.me{border-radius:18px 18px 6px 18px;box-shadow:0 2px 10px color-mix(in srgb,var(--text) 10%,transparent);transition:transform .12s ease}
+.turn-request .me{border-radius:18px 18px 6px 18px;font-size:15px}
+.me:active{transform:scale(.985)}
+/* ---------- assistant body rhythm ---------- */
+.turn-result .ai{letter-spacing:-.06px}
+.turn-result .msg-body p+p{margin-top:10px}
+.turn-result .msg-body{line-height:1.72}
+.msg-body h1,.msg-body h2,.msg-body h3{letter-spacing:-.15px}
+.msg-body h2{margin-top:16px}
+.msg-body h3{margin-top:14px}
+.msg-body li{margin:4px 0}
+.msg-body li::marker{color:var(--faint);font-weight:700}
+.msg-body strong{color:var(--text)}
+.msg-body pre{border-radius:12px}
+.msg-body pre::-webkit-scrollbar,.term-out::-webkit-scrollbar,.pv pre::-webkit-scrollbar,.diff-table-wrap::-webkit-scrollbar{display:none}
+/* ---------- thinking card ---------- */
+.think{border-radius:13px;transition:border-color .2s ease}
+.think summary i{background:var(--accent);opacity:.75}
+.think[open] summary i{animation:none;opacity:.5}
+.think-body{line-height:1.62;color:color-mix(in srgb,var(--dim) 88%,var(--text))}
+/* ---------- tool rows: activity-tinted icons ---------- */
+.tl-ic{border-radius:8px;transition:background .2s ease,color .2s ease}
+.tl-ic.read{background:color-mix(in srgb,#5b7fa6 12%,transparent);color:#5b7fa6}
+.tl-ic.search{background:color-mix(in srgb,#7c6aa6 12%,transparent);color:#7c6aa6}
+.tl-ic.edit{background:color-mix(in srgb,#b5822e 14%,transparent);color:#b5822e}
+.tl-ic.command{background:color-mix(in srgb,#4e8d6b 13%,transparent);color:#4e8d6b}
+.tl-ic.other{background:color-mix(in srgb,var(--muted) 12%,transparent);color:var(--muted)}
+.tl-row:active{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.tl .spin{border-width:2px}
+/* ---------- terminal card traffic lights ---------- */
+.term{box-shadow:0 6px 18px rgba(12,10,8,.14)}
+.term-cmd{align-items:flex-start}
+.term-cmd::before{content:"";flex:none;display:inline-block;width:8px;height:8px;margin-top:5px;border-radius:50%;background:#e06c5a;box-shadow:-12px 0 0 #d9a94a,-24px 0 0 #6bb37e;margin-left:24px}
+.term-foot{color:var(--terminal-dim)}
+/* ---------- work group header ---------- */
+.work-ic{border-radius:8px}
+.work-group.status-running .work-ic{animation:work-breath 2.4s ease-in-out infinite}
+@keyframes work-breath{50%{opacity:.62}}
+/* ---------- diff card ---------- */
+.diff{border-radius:11px}
+.diff-head{letter-spacing:.2px}
+/* ---------- composer ---------- */
+.composer textarea{transition:border-color .18s ease,box-shadow .18s ease}
+.composer textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 14%,transparent)}
+.send-button{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 88%,#000 0%),var(--accent));box-shadow:0 6px 16px color-mix(in srgb,var(--accent) 32%,transparent)}
+.send-button:active{transform:scale(.94)}
+.attach-control:active{transform:scale(.94)}
+.runtime-shortcut small{transition:border-color .18s ease}
+.runtime-shortcut:active small{border-color:var(--accent);color:var(--accent)}
+/* ---------- chat header & session rows ---------- */
+.chat-identity strong{font-size:14.5px;letter-spacing:-.1px}
+.session-row{transition:transform .12s ease}
+.session-row:active{transform:scale(.992)}
+/* ---------- streaming shimmer on live dot ---------- */
+.chat-identity i.running{box-shadow:0 0 0 4px color-mix(in srgb,var(--green) 14%,transparent)}
+/* ---------- dark scheme sync ---------- */
+:root[data-scheme="dark"] .who-dot{background:var(--text)}
+:root[data-scheme="dark"] .tl-ic.read{background:rgba(112,150,196,.16);color:#8fb0d8}
+:root[data-scheme="dark"] .tl-ic.search{background:rgba(148,128,196,.16);color:#b3a3d8}
+:root[data-scheme="dark"] .tl-ic.edit{background:rgba(200,150,80,.16);color:#dcb87a}
+:root[data-scheme="dark"] .tl-ic.command{background:rgba(96,166,128,.16);color:#8fc9a8}
+:root[data-scheme="dark"] .tl-ic.other{background:rgba(160,152,136,.14);color:#a39a8d}
+:root[data-scheme="dark"] .think-body{color:#b3a996}
+:root[data-scheme="dark"] .me{box-shadow:0 2px 10px rgba(0,0,0,.35)}
+:root[data-scheme="dark"] .term{box-shadow:0 6px 18px rgba(0,0,0,.4)}
+
+/* ============================================================
+   v84: conversation & list refinements — per-turn time chips,
+   live thinking (auto expand while streaming), wrapped agent
+   filter pills, colored agent tags, balanced new-task picker,
+   empty-state CTA.
+   ============================================================ */
+/* ---------- per-turn time chip ---------- */
+.turn-time{display:flex;justify-content:center;margin:-2px 0 -4px;color:var(--faint);font-size:10px;font-weight:650;letter-spacing:.3px;user-select:none}
+.turn-time::before,.turn-time::after{content:"";flex:1;min-width:12px;height:1px;margin:auto 10px;background:var(--line-soft)}
+/* ---------- live thinking ---------- */
+.think.streaming-live{border-color:color-mix(in srgb,var(--accent) 26%,var(--line));background:color-mix(in srgb,var(--accent) 4%,var(--card-soft))}
+.think.streaming-live summary i{background:var(--accent);animation:pulse 1.2s infinite}
+.think.streaming-live summary b{color:var(--accent)}
+/* ---------- agent filter: drawer trigger (v85) ---------- */
+.agent-filter-trigger{display:flex;align-items:center;gap:9px;width:100%;height:44px;margin-bottom:12px;padding:0 14px;border:1px solid var(--line);border-radius:12px;background:var(--card-soft);color:var(--text);font-size:14px;font-weight:700;text-align:left}
+/* 命中目标始终是按钮本身：Android WebView 上点击内部元素偶发不派发 click。 */
+.agent-filter-trigger strong,.agent-filter-trigger svg{pointer-events:none}
+.agent-filter-trigger svg{width:17px;height:17px;color:var(--faint);flex:none}
+.agent-filter-trigger strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.agent-filter-trigger .chev{width:15px;height:15px;color:var(--faint);flex:none;transition:transform .18s ease}
+.agent-filter-trigger:active{background:var(--card)}
+.agent-filter-trigger:active .chev{transform:rotate(180deg)}
+.agent-sheet-list{display:grid;gap:7px;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:1px 2px 8px;-webkit-overflow-scrolling:touch}
+.agent-sheet-row{display:grid;grid-template-columns:38px minmax(0,1fr) auto;gap:11px;align-items:center;width:100%;min-height:58px;padding:9px 12px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--text);text-align:left}
+.agent-sheet-row.selected{border-color:var(--accent);background:var(--accent-soft)}
+.agent-sheet-row:active{background:var(--card-soft)}
+.agent-sheet-row .agent-avatar{width:38px;height:38px;border-radius:12px}
+.agent-avatar-all{background:var(--text);color:var(--bg);font-size:16px}
+.agent-sheet-copy{display:grid;gap:2px;min-width:0}
+.agent-sheet-copy strong{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-sheet-copy small{color:var(--dim);font-size:11px}
+.agent-sheet-check{color:var(--accent);font-size:16px;font-weight:800}
+/* ---------- colored agent tags on session rows ---------- */
+.tag-agent{display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--muted) 9%,transparent);color:var(--dim)}
+.tag-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+.tag-dot.avatar-claude{background:#c96a4a}.tag-dot.avatar-grok{background:#3b6ea5}.tag-dot.avatar-opencode{background:#8a6d3b}.tag-dot.avatar-deepseek{background:#4d6bfe}
+/* ---------- balanced new-task picker (6 agents → 3×2) ---------- */
+.agent-picker{grid-template-columns:repeat(3,1fr)}
+.agent-choice{height:76px}
+/* ---------- empty state with CTA ---------- */
+.empty-cta{display:grid;justify-items:center;gap:6px;padding:64px 28px;text-align:center}
+.empty-glyph{display:grid;place-items:center;width:54px;height:54px;margin-bottom:6px;border:1.5px dashed var(--line-input);border-radius:16px;color:var(--faint);font-size:22px}
+.empty-cta strong{color:var(--text);font-size:15px}
+.empty-cta small{color:var(--muted);font-size:12.5px;line-height:1.6}
+.empty-action{min-height:44px;margin-top:10px;padding:0 22px;border:0;border-radius:22px;background:var(--text);color:var(--bg);font-size:13.5px;font-weight:750;box-shadow:0 8px 18px color-mix(in srgb,var(--text) 16%,transparent)}
+.empty-action:active{transform:scale(.97)}
+/* ---------- dark sync ---------- */
+:root[data-scheme="dark"] .tag-agent{background:rgba(160,152,136,.14);color:var(--dim)}
+:root[data-scheme="dark"] .think.streaming-live{background:color-mix(in srgb,var(--accent) 7%,var(--card-soft))}
+:root[data-scheme="dark"] .empty-action{box-shadow:0 8px 18px rgba(0,0,0,.35)}
+
+/* ============================================================
+   v86: visual refresh — 无边框卡片（靠底色分层）、统一圆角、
+   填充式输入框、悬浮式顶/底栏。所有主题通过变量生效，暗色同步。
+   ============================================================ */
+/* ---------- 页面与卡片层次 ---------- */
+:root,:root[data-theme="paper"]{--bg:#f3f0ea;--card:#ffffff;--card-soft:#faf8f4;--sheet:#ffffff;--surface:#f7f5f0;--line:#eae4d9;--line-soft:#efeae0;--line-input:#e5ddcf;--shadow-card:0 1px 2px rgba(28,26,23,.04),0 6px 18px rgba(28,26,23,.05);--shadow-float:0 12px 34px rgba(28,26,23,.14)}
+:root[data-theme="slate"]{--bg:#eef1f6;--card:#ffffff;--card-soft:#f7f9fc;--surface:#f4f6fa;--shadow-card:0 1px 2px rgba(23,32,45,.04),0 6px 18px rgba(23,32,45,.06);--shadow-float:0 12px 34px rgba(23,32,45,.14)}
+:root[data-theme="matcha"]{--bg:#eef2ea;--card:#ffffff;--card-soft:#f7faf4;--surface:#f3f7ef;--shadow-card:0 1px 2px rgba(22,30,17,.04),0 6px 18px rgba(22,30,17,.05);--shadow-float:0 12px 34px rgba(22,30,17,.13)}
+:root[data-theme="ink"]{--bg:#171512;--card:#242019;--card-soft:#2a251d;--sheet:#211d16;--surface:#282318;--line:#332d24;--line-soft:#2e2920;--line-input:#3a3327;--shadow-card:0 1px 2px rgba(0,0,0,.25),0 8px 22px rgba(0,0,0,.28);--shadow-float:0 14px 38px rgba(0,0,0,.5)}
+:root[data-theme="midnight"]{--bg:#0f141c;--card:#1a212e;--card-soft:#1f2735;--sheet:#171e29;--surface:#1e2633;--line:#283243;--line-soft:#232d3d;--line-input:#2d3949;--shadow-card:0 1px 2px rgba(0,0,0,.3),0 8px 22px rgba(0,0,0,.32);--shadow-float:0 14px 38px rgba(0,0,0,.55)}
+/* ---------- 会话卡片：无边框 + 柔和投影 ---------- */
+.session-row{border:0;border-radius:18px;box-shadow:var(--shadow-card)}
+.session-row::before{left:0;top:14px;bottom:14px;border-radius:0 3px 3px 0}
+.skel-row{border:0;border-radius:18px;box-shadow:var(--shadow-card)}
+.workspace-swipe{border:0}
+/* ---------- 填充式输入框 ---------- */
+.search-field,.agent-filter-trigger{border:0;background:color-mix(in srgb,var(--card) 72%,var(--bg))}
+.search-field:focus-within,.agent-filter-trigger:active{background:var(--card)}
+.composer textarea{border-color:transparent;background:color-mix(in srgb,var(--card) 88%,var(--bg))}
+.composer textarea:focus{border-color:var(--accent);background:var(--card)}
+.attach-control{border:0!important;background:color-mix(in srgb,var(--card) 72%,var(--bg))}
+.select-wrap select,.form-block textarea{border-color:var(--line-input)}
+.circle-button{border:0;box-shadow:var(--shadow-card)}
+/* ---------- 悬浮式 chrome：去分割线 ---------- */
+.tabbar{border-top:0;box-shadow:0 -6px 24px color-mix(in srgb,var(--text) 6%,transparent)}
+.chat-header{border-bottom:0;box-shadow:0 1px 0 color-mix(in srgb,var(--text) 4%,transparent)}
+.composer{border-top:0}
+/* ---------- 对话内卡片统一 ---------- */
+.turn-work .work-group,.work-group{border:0;background:var(--card-soft);border-radius:16px}
+.work-items{background:transparent}
+.tl{border-bottom-color:color-mix(in srgb,var(--text) 5%,transparent)}
+.think{border:0;background:color-mix(in srgb,var(--accent) 4%,var(--card-soft));border-radius:14px}
+.think[open] summary{border-bottom-color:color-mix(in srgb,var(--text) 6%,transparent)}
+.think-body{border-top:0;padding-top:2px}
+.plan-card,.execution-card,.goal-card{border:0;box-shadow:var(--shadow-card);border-radius:16px}
+.term,.diff,.pv{border-radius:14px}
+.pv{border-color:var(--line-soft)}
+.turn-request .me{border-radius:20px 20px 7px 20px}
+.me{border-radius:20px 20px 7px 20px;box-shadow:0 2px 12px color-mix(in srgb,var(--text) 12%,transparent)}
+/* ---------- 底部抽屉 ---------- */
+.bottom-sheet{border-radius:26px 26px 0 0;box-shadow:var(--shadow-float)}
+.agent-sheet-row,.model-option{border-color:var(--line-soft);border-radius:16px}
+.agent-sheet-row.selected{border-color:var(--accent)}
+/* ---------- 组头/分区 ---------- */
+.group-head{border-radius:12px}
+.section-heading{letter-spacing:.02em}
+/* ---------- 暗色同步微调 ---------- */
+:root[data-scheme="dark"] .session-row{box-shadow:var(--shadow-card)}
+:root[data-scheme="dark"] .search-field,:root[data-scheme="dark"] .agent-filter-trigger{background:rgba(255,255,255,.045)}
+:root[data-scheme="dark"] .search-field:focus-within,:root[data-scheme="dark"] .agent-filter-trigger:active{background:var(--card)}
+:root[data-scheme="dark"] .composer textarea{background:rgba(255,255,255,.05)}
+:root[data-scheme="dark"] .composer textarea:focus{background:var(--card)}
+:root[data-scheme="dark"] .attach-control{background:rgba(255,255,255,.045)}
+:root[data-scheme="dark"] .think{background:color-mix(in srgb,var(--accent) 6%,var(--card-soft))}
+:root[data-scheme="dark"] .tl{border-bottom-color:rgba(255,255,255,.05)}
+
+/* ============================================================
+   v89: bottom task panel — DSH 桌面端「可收起任务卡」的手机形态。
+   钉在输入栏上方，实时显示当前会话的计划步骤（全 Agent 通用）。
+   ============================================================ */
+.task-panel{position:static;width:auto;max-width:100%;margin:6px 14px 0;padding:0;pointer-events:auto}
+.task-panel[hidden]{display:none}
+.task-card{pointer-events:auto;overflow:hidden;border:1px solid var(--line-soft);border-radius:15px;background:color-mix(in srgb,var(--card) 94%,var(--bg));box-shadow:var(--shadow-card);max-height:40vh}
+.task-head{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:9px;align-items:center;width:100%;min-height:46px;padding:7px 12px;border:0;background:transparent;color:var(--text);text-align:left;cursor:pointer}
+.task-icon{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:800}
+.task-copy{display:grid;gap:1px;min-width:0}
+.task-copy b{color:var(--faint);font-size:10px;font-weight:800;letter-spacing:.4px}
+.task-copy strong{overflow:hidden;color:var(--text);font-size:12.5px;text-overflow:ellipsis;white-space:nowrap}
+.task-chev{color:var(--faint);font-size:12px;transition:transform .18s ease}
+.task-card.open .task-chev{transform:rotate(180deg)}
+.task-steps{list-style:none;margin:0;padding:0 12px 10px;border-top:1px dashed var(--line-soft);overflow-y:auto;max-height:calc(40vh - 46px)}
+.task-card:not(.open) .task-steps{display:none}
+.task-step{display:grid;grid-template-columns:19px minmax(0,1fr);gap:8px;align-items:start;padding:6px 0;color:var(--dim);font-size:12px;line-height:1.4}
+.task-step>span{display:grid;place-items:center;width:18px;height:18px;border:1.5px solid #d7cdbb;border-radius:50%;color:#9d8e79;font-size:9px;font-weight:800}
+.task-step.done{color:var(--muted)}
+.task-step.done>span{border-color:var(--green);background:var(--green);color:#fff}
+.task-step.done b{text-decoration:line-through;text-decoration-color:#cfc4b5}
+.task-step.doing{color:var(--text)}
+.task-step.doing>span{border:2px solid var(--accent);background:var(--accent-soft);animation:pulse 1.6s infinite}
+.task-step.doing b{font-weight:750}
+.task-step.todo>span{border-color:#d4cbbd;color:#998d7d}
+:root[data-scheme="dark"] .task-card{background:color-mix(in srgb,var(--card) 94%,#000);border-color:var(--line)}
+:root[data-scheme="dark"] .task-steps{border-top-color:var(--line-soft)}
+:root[data-scheme="dark"] .task-step.todo>span{border-color:#4a4335;color:#8d8471}

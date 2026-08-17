@@ -819,6 +819,27 @@ export const PROVIDER_PRESETS = [
     models: CURSOR_SUBSCRIPTION_STATIC_MODELS
   },
   {
+    id: "cursor-subscription-account-pool",
+    label: "Cursor 订阅账号池",
+    providerId: "cursor-subscription",
+    name: "Cursor 订阅账号池",
+    providerType: "cursor_subscription",
+    apiFormat: "cursor_subscription",
+    baseUrl: "https://agentn.api5.cursor.sh",
+    authModes: ["account_pool"],
+    defaultAuthMode: "account_pool",
+    poolKind: "cursor_subscription",
+    poolStrategy: "weighted_round_robin",
+    enabled: true,
+    maxConcurrentRequests: 2,
+    streamIdleTimeoutMs: 90000,
+    riskLevel: "high",
+    riskNote: "多账号轮换的 Cursor 订阅桥接。凭据仅保存在本机 ~/.switchyard/pools/；统一复用本机 machine id，Cursor 端可能因此风控。请遵守 Cursor 服务条款。",
+    note: "粘贴导入 Cursor 订阅号（email----…----userId::eyJ…），加权轮询 + 失败换号。保存供应商后在「账号池」面板管理账号。",
+    preferPresetModels: true,
+    models: CURSOR_SUBSCRIPTION_STATIC_MODELS
+  },
+  {
     id: "custom-openai",
     label: "自定义 OpenAI-compatible",
     providerId: "custom",

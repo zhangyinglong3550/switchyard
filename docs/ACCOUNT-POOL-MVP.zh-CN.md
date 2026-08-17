@@ -9,6 +9,7 @@
 客户端 → Switchyard :17888
             ├─ xai_oauth 池 ──→ api.x.ai
             ├─ codex_oauth 池 → chatgpt.com/backend-api/codex
+            ├─ cursor_subscription 池 → agentn.api5.cursor.sh
             └─ antigravity 池 →（实验）可选 CLIProxyAPI 8317
 ```
 
@@ -16,20 +17,21 @@
 
 ## 能力矩阵
 
-| 能力 | Grok (`xai_oauth`) | Codex (`codex_oauth`) |
-|------|--------------------|------------------------|
-| 粘贴导入 | SSO / RT / JSON | CPA `type:codex` JSON / RT |
-| 多选文件 / 文件夹 | 支持 | **主路径** |
-| Token 刷新 | OAuth refresh | RT 或 `session_token` |
-| 额度 | 无稳定公开 API | `wham/usage` 5h+周剩余 |
-| 调度 | 加权轮询等 | 同左 |
-| 失败换号 | 401/403/429/5xx | 同左 |
+| 能力 | Grok (`xai_oauth`) | Codex (`codex_oauth`) | Cursor (`cursor_subscription`) |
+|------|--------------------|------------------------|--------------------------------|
+| 粘贴导入 | SSO / RT / JSON | CPA `type:codex` JSON / RT | `email----…----userId::JWT` / JSON / NDJSON |
+| 多选文件 / 文件夹 | 支持 | **主路径** | 不支持（粘贴为主） |
+| Token 刷新 | OAuth refresh | RT 或 `session_token` | 不刷新；access 过期需重新导入 |
+| 额度 | 无稳定公开 API | `wham/usage` 5h+周剩余 | 逐号连接测试 |
+| 调度 | 加权轮询等 | 同左 | 同左 |
+| 失败换号 | 401/403/429/5xx | 同左 | 同左 |
 
 ## 预设
 
 - `xai-account-pool` → providerId 建议 `grok`
 - `codex-account-pool` → `codex-pool`
 - `antigravity-account-pool` → 实验性
+- `cursor-subscription-account-pool` → `cursor-subscription`
 
 ## 使用（Codex 批量号）
 
@@ -46,13 +48,22 @@ node /path/to/import-helper.mjs --dir ./codex-jsons
 
 （可选：`file/grok/import-codex-pool.mjs` 为本地辅助脚本，仓库内以 UI/IPC 为准。）
 
+## 使用（Cursor 订阅号池）
+
+1. 供应商 → 新增 **Cursor 订阅账号池**
+2. 在账号池面板粘贴多行 `email----…----userId::eyJ…`，或粘贴含 `access_token` 的 JSON / NDJSON
+3. Switchyard 自动读取本机 Cursor `storage.serviceMachineId`，导入账号统一复用该 machine id
+4. 点击 **测试连接** 逐号验证；请求时走 HTTP/2 直连 AgentService，失败按池策略换号
+
+Cursor 池按 access token 去重；若同一导出账号邮箱变化或缺失，不会重复写入。
+
 ## 开发入口
 
 | 模块 | 路径 |
 |------|------|
 | 持久化 | `packages/core/src/account-pool/store.mjs` |
 | 选号/刷新 | `packages/core/src/account-pool/picker.mjs` |
-| 导入 | `import-xai.mjs` / `import-multi.mjs` |
+| 导入 | `import-xai.mjs` / `import-multi.mjs` / `cursor-subscription/pool-import.mjs` |
 | 额度 | `quota.mjs` |
 | 调度接入 | `packages/core/src/upstream/dispatch.mjs` |
 | UI / IPC | `apps/desktop/renderer/*` · `apps/desktop/src/main.mjs` |
@@ -72,7 +83,7 @@ export SWITCHYARD_ANTIGRAVITY_CLIENT_ID="..."
 export SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET="..."
 ```
 
-Grok / Codex 池**不依赖**上述变量。若本机凭证已过期，先在 Antigravity 或 CLIProxyAPI 完成登录/刷新，
+Grok / Codex / Cursor 池**不依赖**上述变量。若本机凭证已过期，先在 Antigravity 或 CLIProxyAPI 完成登录/刷新，
 再由 Switchyard 自动同步。
 
 ## 安全

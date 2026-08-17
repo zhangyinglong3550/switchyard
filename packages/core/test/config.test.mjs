@@ -119,6 +119,49 @@ test("validateConfig rejects duplicate provider id", () => {
   assert.throws(() => validateConfig(cfg), /Duplicate provider/);
 });
 
+test("mergeWithDefaults keeps cursor_subscription account pool provider intact", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      {
+        id: "cursor-pool",
+        presetId: "cursor-subscription-account-pool",
+        authMode: "account_pool",
+        poolKind: "cursor_subscription",
+        apiFormat: "cursor_subscription",
+        enabled: true
+      }
+    ],
+    models: []
+  });
+  const provider = cfg.providers[0];
+  assert.equal(provider.providerType, "account_pool");
+  assert.equal(provider.authMode, "account_pool");
+  assert.equal(provider.poolKind, "cursor_subscription");
+  assert.equal(provider.apiFormat, "cursor_subscription");
+  assert.equal(provider.baseUrl, "https://agentn.api5.cursor.sh");
+});
+
+test("mergeWithDefaults keeps single Cursor subscription bridge provider intact", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      {
+        id: "cursor-subscription",
+        presetId: "cursor-subscription",
+        authMode: "cursor_subscription",
+        providerType: "cursor_subscription",
+        apiFormat: "cursor_subscription",
+        baseUrl: "https://agentn.api5.cursor.sh",
+        enabled: true
+      }
+    ],
+    models: []
+  });
+  const provider = cfg.providers[0];
+  assert.equal(provider.authMode, "keychain");
+  assert.equal(provider.poolKind, undefined);
+  assert.equal(provider.apiFormat, "cursor_subscription");
+});
+
 test("validateConfig rejects unsupported apiFormat", () => {
   const cfg = mergeWithDefaults({
     providers: [{ id: "p", apiFormat: "weird", baseUrl: "http://x" }]

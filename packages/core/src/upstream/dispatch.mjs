@@ -411,19 +411,49 @@ function isEmptyContent(value) {
 
 function sanitizeUpstreamMessages(messages) {
   if (!Array.isArray(messages)) return messages;
+  let callSeq = 0;
+  const pendingToolIds = [];
+  const ensureId = (id) => {
+    if (id && String(id).trim()) return String(id).trim();
+    return `call_swy_${++callSeq}`;
+  };
   return messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
-    if (msg.role === "assistant" && isEmptyContent(msg.content)) {
+    if (msg.role === "assistant") {
       const next = { ...msg };
-      if (Array.isArray(next.tool_calls) && next.tool_calls.length) {
-        delete next.content;
-      } else {
-        // 既无正文也无工具调用的空 assistant 会触发更严格上游的校验，补占位兜底。
-        next.content = "(空)";
+      if (Array.isArray(next.tool_calls)) {
+        // 严格上游（KE deepseek-v4-pro 等）要求 tool_calls[].id 非空，且后续
+        // tool 消息的 tool_call_id 必须配对。Grok 历史里两者常为空串。
+        next.tool_calls = next.tool_calls.map((tc) => {
+          if (!tc || typeof tc !== "object") return tc;
+          const id = ensureId(tc.id);
+          pendingToolIds.push(id);
+          return tc.id === id ? tc : { ...tc, id };
+        });
+      }
+      if (isEmptyContent(next.content)) {
+        if (Array.isArray(next.tool_calls) && next.tool_calls.length) {
+          delete next.content;
+        } else {
+          // 既无正文也无工具调用的空 assistant 会触发更严格上游的校验，补占位兜底。
+          next.content = "(空)";
+        }
       }
       return next;
     }
-    if ((msg.role === "tool" || msg.role === "user") && isEmptyContent(msg.content)) {
+    if (msg.role === "tool") {
+      let next = msg;
+      if (!msg.tool_call_id || !String(msg.tool_call_id).trim()) {
+        const id = pendingToolIds.length ? pendingToolIds.shift() : `call_swy_${++callSeq}`;
+        next = { ...msg, tool_call_id: id };
+      } else {
+        const i = pendingToolIds.indexOf(String(msg.tool_call_id).trim());
+        if (i >= 0) pendingToolIds.splice(i, 1);
+      }
+      if (isEmptyContent(next.content)) next = { ...next, content: "(空)" };
+      return next;
+    }
+    if (msg.role === "user" && isEmptyContent(msg.content)) {
       return { ...msg, content: "(空)" };
     }
     return msg;

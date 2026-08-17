@@ -262,6 +262,18 @@ const POOL_KIND_UI = {
     showPaste: true,
     showFilePick: true,
     authNote: "已选择 Codex 账号池：批量多选本地 JSON 即可。Sub2API 备份请使用上方专用导入；OAuth 账号无 refresh_token 时会用 session_token 续 access。"
+  },
+  cursor_subscription: {
+    label: "Cursor 订阅",
+    chip: "账号池 · Cursor",
+    title: "Cursor 订阅账号池",
+    body: "凭证只存 ~/.switchyard/pools/cursor_subscription/。支持粘贴导入 Cursor 订阅号（每行一个 access token），加权轮询 + 失败换号；所有账号统一复用本机 Cursor machine id。",
+    importPlaceholder: "每行一个 Cursor 订阅号，例如：\nemail----password----xxxx----userId::eyJ…（`::` 后为 access JWT）\n也支持含 access_token 的 JSON / 数组 / NDJSON",
+    importBtn: "导入本机默认目录",
+    showPaste: true,
+    showFilePick: false,
+    showCpa: false,
+    authNote: "已选择 Cursor 订阅账号池：粘贴导入后即可多号轮询。凭据仅存本机 pools 目录；统一复用本机 machine id，请遵守 Cursor 服务条款。"
   }
 };
 
@@ -304,7 +316,15 @@ function syncProviderPoolUi() {
   const dirBtn = document.getElementById("btn-pool-import-dir");
   if (dirBtn) dirBtn.style.display = showFilePick ? "" : "none";
   const importBtn = document.getElementById("btn-pool-import-cpa");
-  if (importBtn) importBtn.textContent = ui.importBtn;
+  if (importBtn) {
+    importBtn.textContent = ui.importBtn;
+    importBtn.style.display = ui.showCpa === false ? "none" : "";
+  }
+  // Cursor 订阅账号池专属：批量测试连接按钮
+  const testBtn = document.getElementById("btn-pool-test-cursor");
+  if (testBtn) testBtn.style.display = kind === "cursor_subscription" ? "" : "none";
+  const testResult = document.getElementById("provider-pool-test-result");
+  if (testResult && kind !== "cursor_subscription") testResult.textContent = "";
 }
 
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -3207,6 +3227,32 @@ document.getElementById("btn-pool-refresh-quota")?.addEventListener("click", asy
     toast(err?.message || String(err));
   }
 });
+document.getElementById("btn-pool-test-cursor")?.addEventListener("click", async () => {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const poolKind = currentPoolKind();
+  const resultEl = document.getElementById("provider-pool-test-result");
+  if (resultEl) resultEl.textContent = "";
+  try {
+    toast("正在逐个测试 Cursor 账号…");
+    const form = document.getElementById("provider-form");
+    const baseUrl = form?.querySelector('[name="baseUrl"]')?.value?.trim() || "";
+    const result = await invoke("account-pool:test-cursor", { providerId, poolKind, baseUrl });
+    if (!result.ok) return toast(result.error || "测试失败");
+    const lines = (result.results || []).map((r) => {
+      const label = r.email || r.id || "?";
+      return `${r.ok ? "✅" : "❌"} ${escapeHtml(label)}${r.error ? ` — ${escapeHtml(String(r.error).slice(0, 200))}` : ""}`;
+    });
+    const summary = `测试完成：成功 ${result.okCount || 0}，失败 ${result.failed || 0}，共 ${result.tested || 0}`;
+    if (resultEl) {
+      resultEl.innerHTML = `<span class="tiny">${escapeHtml(summary)}</span>\n${lines.length ? lines.join("<br>") : '<span class="tiny muted">没有可测试的账号</span>'}`;
+    }
+    toast(summary);
+  } catch (err) {
+    if (resultEl) resultEl.innerHTML = `<span class="chip bad">测试失败：${escapeHtml(err?.message || String(err))}</span>`;
+    toast(err?.message || String(err));
+  }
+});
 document.getElementById("btn-pool-import-text")?.addEventListener("click", async () => {
   const providerId = currentProviderFormId();
   if (!providerId) return toast("请先填写供应商标识");
@@ -3216,12 +3262,16 @@ document.getElementById("btn-pool-import-text")?.addEventListener("click", async
   if (!text.trim()) {
     return toast(poolKind === "codex_oauth"
       ? "请粘贴 Codex auth.json / JSON 数组 / refresh_token 列表"
-      : "请粘贴 JSON / RT / 卡密 SSO");
+      : poolKind === "cursor_subscription"
+        ? "请粘贴 Cursor 订阅号（email----…----userId::eyJ… 每行一个）"
+        : "请粘贴 JSON / RT / 卡密 SSO");
   }
   try {
     toast(poolKind === "codex_oauth"
       ? "正在导入 Codex 账号…"
-      : "正在导入（若含 SSO 会自动转换，请稍候）…");
+      : poolKind === "cursor_subscription"
+        ? "正在导入 Cursor 订阅号…"
+        : "正在导入（若含 SSO 会自动转换，请稍候）…");
     const form = document.getElementById("provider-form");
     const proxyUrl = form?.querySelector('[name="proxyUrl"]')?.value?.trim() || "";
     const result = await invoke("account-pool:import-text", {

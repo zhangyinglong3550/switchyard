@@ -38,6 +38,14 @@ const AGENTS = Object.freeze({
       ["help", "查看 Grok 帮助"], ["model", "查看或切换模型"],
       ["new", "开始新会话"], ["status", "查看当前会话状态"]
     ]
+  },
+  "deepseek-harness": {
+    skillRoots: [".dsh/skills"], skillPrefix: "/",
+    commands: [
+      ["goal", "进入/管理目标模式"], ["compact", "压缩当前会话上下文"],
+      ["clear", "清空当前会话"], ["model", "查看或切换模型"],
+      ["help", "查看 DSH 帮助"], ["status", "查看当前会话状态"]
+    ]
   }
 });
 

@@ -319,7 +319,7 @@ public final class MainActivity extends Activity {
   private void loadPairingUrl(String raw) {
     try {
       URI uri = new URI(raw.trim());
-      if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) throw new IllegalArgumentException();
+      if (uri.getHost() == null || !isTrustedScheme(uri)) throw new IllegalArgumentException();
       String nextOrigin = new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), null, null, null).toString();
       // A new pairing URL must never inherit a token from a previous or mistyped origin.
       if (!nextOrigin.equals(tokenStore.getBaseUrl())) tokenStore.clear();
@@ -335,10 +335,19 @@ public final class MainActivity extends Activity {
     }
   }
 
+  /** 生产走 Tailscale HTTPS；明文 http 仅允许回环地址（模拟器 adb reverse 联调）。 */
+  private boolean isTrustedScheme(URI uri) {
+    String scheme = uri.getScheme();
+    if ("https".equalsIgnoreCase(scheme)) return true;
+    if (!"http".equalsIgnoreCase(scheme)) return false;
+    String host = uri.getHost();
+    return "127.0.0.1".equals(host) || "localhost".equals(host);
+  }
+
   private void loadTrusted(String baseUrl) {
     try {
       URI uri = new URI(baseUrl);
-      if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) throw new IllegalArgumentException();
+      if (uri.getHost() == null || !isTrustedScheme(uri)) throw new IllegalArgumentException();
       trustedOrigin = baseUrl;
       updatePairingRecoveryBar();
       setContentView(webContainer);
@@ -624,6 +633,16 @@ public final class MainActivity extends Activity {
     }
     @JavascriptInterface public void showNotification(String title, String body) {
       runOnUiThread(() -> MainActivity.this.showStatusNotification(title, body));
+    }
+    /** 审批等待等关键时刻的触觉反馈；无震动器的设备静默忽略。 */
+    @JavascriptInterface public void vibrate(String pattern) {
+      try {
+        android.os.Vibrator vibrator = (android.os.Vibrator) getSystemService(VIBRATOR_SERVICE);
+        if (vibrator == null || !vibrator.hasVibrator()) return;
+        long[] pulses = new long[]{0, 40, 70, 40};
+        if (pattern != null && pattern.trim().equalsIgnoreCase("long")) pulses = new long[]{0, 70, 90, 70, 90, 70};
+        vibrator.vibrate(android.os.VibrationEffect.createWaveform(pulses, -1));
+      } catch (Exception ignored) {}
     }
   }
 }

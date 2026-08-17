@@ -944,3 +944,35 @@ test("cursor subscription · omits update_plan from mcp_tools payload", () => {
   assert.equal(mcpTools.get(1).length, 1);
   assert.equal(protoFields(mcpTools.get(1)[0]).get(1)[0].toString(), "exec_command");
 });
+
+test("cursor subscription · pool-bound account uses its own access token and machine id over keychain", async () => {
+  const boundProvider = {
+    id: "cursor-pool",
+    providerType: "cursor_subscription",
+    apiFormat: "cursor_subscription",
+    authMode: "cursor_subscription",
+    baseUrl: "https://agentn.api5.cursor.sh",
+    enabled: true,
+    _accountPool: true,
+    _accountId: "acct-1",
+    _accountEmail: "pool@example.com",
+    _cursorAccessToken: "pool-access-token-1234567890abcdef",
+    _cursorMachineId: "pool-machine-1234"
+  };
+  let seenCredentials = null;
+  let seenProvider = null;
+  const result = await callCursorSubscription(boundProvider, { model: "auto", stream: false, messages: [{ role: "user", content: "hello" }] }, {
+    keychain: { get: () => JSON.stringify(validCredentials) }, // 若走 keychain 会拿到 validCredentials
+    transport: async function* ({ provider, credentials }) {
+      seenProvider = provider;
+      seenCredentials = credentials;
+      yield { type: "text", text: "ok" };
+      yield { type: "terminal" };
+    }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(seenCredentials.accessToken, "pool-access-token-1234567890abcdef");
+  assert.equal(seenCredentials.machineId, "pool-machine-1234");
+  // transport 被调用 = 走了 HTTP2 而非本机 Cursor CLI（CLI 会用当前登录账号，池化必须用账号自身 token）
+  assert.ok(seenProvider, "transport should have been invoked for the pool-bound account");
+});

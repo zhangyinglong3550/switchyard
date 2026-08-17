@@ -6,6 +6,7 @@ import path from "node:path";
 import { projectMobileEvent, projectMobileSession } from "./dto.mjs";
 import { classifyMobileApproval } from "./approval-policy.mjs";
 import { createMobileCommandCatalog } from "./command-catalog.mjs";
+import { applyGoalTool, deriveGoalFromMessages } from "./goal-state.mjs";
 
 export function encodeMobileSessionId(agentId, nativeId) {
   const payload = Buffer.from(JSON.stringify({
@@ -138,6 +139,9 @@ export function createSessionRegistry({
   const pendingApprovals = new Map();
   const sessionDirectories = new Map();
   const activeSessions = new Set();
+  // 目标面板的会话内累积状态：任何 Agent 的 create/update_goal、update_plan、
+  // TodoWrite / todo_write 工具流都会喂进来，手机端因此都能显示目标与步骤。
+  const liveGoals = new Map();
   const isQueuePaused = (sessionId) => store.isQueuePaused?.(sessionId) || false;
   const setQueuePaused = (sessionId, paused) => store.setQueuePaused?.(sessionId, paused);
   const commandCatalog = createMobileCommandCatalog();
@@ -252,11 +256,48 @@ export function createSessionRegistry({
           });
         } catch {}
       }
+      // 桌面端已处理审批（或审批被 Agent 自己解决）时，手机上的待审批卡片必须
+      // 立即消失；否则会永远显示“等待审批”，点了也只会报错。
+      if (event.type === "approval_resolved") {
+        let removed = false;
+        for (const [id, approval] of pendingApprovals) {
+          if (approval.sessionId !== mobileSessionId) continue;
+          pendingApprovals.delete(id);
+          removed = true;
+        }
+        if (removed) {
+          detailCache.delete(mobileSessionId);
+          sessionsCache.clear();
+          ledger.append({
+            sessionId: mobileSessionId,
+            type: "status",
+            summary: "approval_resolved"
+          });
+        }
+        return;
+      }
+      // 目标/计划推导：工具事件（goal 系 + todo 系）即时累积；runtime 自带
+      // goal（Codex/DSH 原生）时采用其目标/状态，但保留已推导出的计划步骤。
+      if (event.type === "tool" && event.tool) {
+        const goal = applyGoalTool(liveGoals.get(mobileSessionId), event.tool);
+        if (goal) liveGoals.set(mobileSessionId, goal);
+        if (goal && !event.goal) event = { ...event, goal };
+      } else if (event.goal) {
+        const previous = liveGoals.get(mobileSessionId);
+        const merged = {
+          ...(previous || {}),
+          ...event.goal,
+          plan: Array.isArray(event.goal.plan) && event.goal.plan.length ? event.goal.plan : previous?.plan || []
+        };
+        liveGoals.set(mobileSessionId, merged);
+        event = { ...event, goal: merged };
+      }
       ledger.append(projectMobileEvent({
         sessionId: mobileSessionId,
         type: event.type,
         summary: event.summary,
         role: event.role,
+        goal: event.goal,
         attachments: event.attachments,
         route: event.route,
         ...(delivery ? { delivery } : {}),
@@ -269,6 +310,11 @@ export function createSessionRegistry({
       const terminalState = String(event.summary || "").toLowerCase();
       const ended = ["completed", "failed", "cancelled", "canceled", "incomplete", "end_turn", "stop", "max_tokens", "length"].includes(terminalState) || event.type === "error";
       if (ended) {
+        // 会话已终止时，该会话遗留的待审批请求不可能再被回答；留在手机上
+        // 只会让“等待审批”状态卡死。
+        for (const [id, approval] of pendingApprovals) {
+          if (approval.sessionId === mobileSessionId) pendingApprovals.delete(id);
+        }
         activeSessions.delete(mobileSessionId);
         detailCache.delete(mobileSessionId);
         sessionsCache.clear();
@@ -501,10 +547,10 @@ export function createSessionRegistry({
         model: store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id) || detail.model,
         capabilities: detail.capabilities || runtime.capabilities
       }, store.getOverlay(mobileSessionId)),
-      settings: runtime.getSettings?.(nativeId) || null,
+      settings: await Promise.resolve(runtime.getSettings?.(nativeId)) || null,
       queue: store.listQueue?.(mobileSessionId) || [],
       queuePaused: isQueuePaused(mobileSessionId),
-      goal: detail.goal || null,
+      goal: detail.goal || deriveGoalFromMessages(allMessages),
       ...(activeSessions.has(mobileSessionId) ? { state: "running" } : {})
     };
     if (isLiveState(base.state)) activeSessions.add(mobileSessionId);
@@ -557,7 +603,9 @@ export function createSessionRegistry({
       directory = await assertWorkspacePath(cwd);
     }
     const mentions = key === "codex" ? await runtime.listMentions?.({ cwd: directory }) || [] : [];
-    return commandCatalog.list(key, runtime.listCommands?.() || [], { mentions });
+    // runtime.listCommands 可能是同步数组也可能是 async（DSH 走 skill.list），统一解包。
+    const dynamicCommands = await Promise.resolve(runtime.listCommands?.() || []);
+    return commandCatalog.list(key, dynamicCommands, { mentions });
   };
 
   const defaultModelFor = (agentId) => {
@@ -763,7 +811,7 @@ export function createSessionRegistry({
       type: "status",
       summary: "对话设置将在下一轮生效"
     });
-    return { ok: true, effectiveFrom: "next_turn", settings: runtime.getSettings?.(nativeId) || null };
+    return { ok: true, effectiveFrom: "next_turn", settings: await Promise.resolve(runtime.getSettings?.(nativeId)) || null };
   };
 
   const runtimeAttachmentsFor = (assets = []) => assets.map((asset) => {
@@ -960,7 +1008,10 @@ export function createSessionRegistry({
     return { sessionId: id };
   };
 
+  // 兜底：审批请求超过 30 分钟仍未处理时不再展示（Agent 早就不等这个答案了）。
+  const APPROVAL_TTL_MS = 30 * 60 * 1000;
   const listApprovals = () => [...pendingApprovals.values()]
+    .filter((approval) => Date.now() - Date.parse(approval.createdAt || "") < APPROVAL_TTL_MS)
     .map((approval) => ({
       id: approval.id,
       sessionId: approval.sessionId,

@@ -1248,3 +1248,31 @@ test("dispatchChat strips empty assistant content so strict Bedrock upstreams ac
   assert.equal(tool.content, "(空)", "empty tool result gets a non-empty placeholder");
   assert.equal(emptyAssistant.content, "(空)", "assistant with neither content nor tool_calls gets a placeholder");
 });
+
+test("dispatchChat fills empty tool_calls id / tool_call_id so strict KE pro upstreams accept history", async (t) => {
+  resetPatches();
+  let received = null;
+  const up = await spawnUpstream((req, res, body) => {
+    received = JSON.parse(body);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      id: "x", object: "chat.completion", model: "deepseek-v4-pro-ga",
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]
+    }));
+  });
+  t.after(() => close(up));
+  const provider = { id: "ke", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${up.address().port}/v1` };
+  await dispatchChat(provider, "deepseek-v4-pro-ga", {
+    messages: [
+      { role: "user", content: "go" },
+      // Grok 历史：tool_calls.id 为空串，后续 tool 的 tool_call_id 也为空串
+      { role: "assistant", content: "run", tool_calls: [{ id: "", type: "function", function: { name: "shell", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "", content: "exit: 0" }
+    ]
+  }, { model: { id: "ke/deepseek-v4-pro", providerId: "ke" } });
+  const asst = received.messages.find((m) => m.role === "assistant" && m.tool_calls);
+  const tool = received.messages.find((m) => m.role === "tool");
+  assert.ok(asst.tool_calls[0].id && String(asst.tool_calls[0].id).trim(), "tool_calls id must be non-empty");
+  assert.ok(tool.tool_call_id && String(tool.tool_call_id).trim(), "tool_call_id must be non-empty");
+  assert.equal(tool.tool_call_id, asst.tool_calls[0].id, "tool_call_id must pair with assistant tool_calls id");
+});

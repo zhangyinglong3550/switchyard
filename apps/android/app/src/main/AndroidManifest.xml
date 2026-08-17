@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.VIBRATE" />
   <!-- Android 11+ 包可见性：不声明 queries 时 resolveActivity(VIEW/https) 恒为 null，
        会误判「没有浏览器」。声明后才能正确拉起系统浏览器选择器。 -->
   <queries>

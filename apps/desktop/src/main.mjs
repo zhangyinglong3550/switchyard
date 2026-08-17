@@ -140,7 +140,7 @@ import {
   saveCursorSubscriptionCredentials
 } from "../../../packages/core/src/cursor-subscription/auth.mjs";
 import { isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "../../../packages/core/src/cursor-subscription/model-catalog.mjs";
-import { readLocalCursorModelCatalog, readLocalCursorSubscriptionCredentials } from "../../../packages/core/src/cursor-subscription/local-auth.mjs";
+import { readLocalCursorModelCatalog, readLocalCursorSubscriptionCredentials, readCursorMachineId } from "../../../packages/core/src/cursor-subscription/local-auth.mjs";
 import { cursorAgentCliModelCatalog, findCursorAgentExecutable } from "../../../packages/core/src/cursor-subscription/agent-cli.mjs";
 import { callCursorSubscription, clearCursorSubscriptionRuntime, cursorSubscriptionLaneSnapshot } from "../../../packages/core/src/cursor-subscription/client.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
@@ -174,6 +174,7 @@ import {
   refreshAccountQuota,
   recoverExpiredAccountCooldowns
 } from "../../../packages/core/src/account-pool/index.mjs";
+import { importCursorSubscriptionAccountsFromText } from "../../../packages/core/src/cursor-subscription/pool-import.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
@@ -1902,6 +1903,22 @@ ipcMain.handle("account-pool:import-text", async (_e, payload = {}) => {
       error: "Antigravity 粘贴导入暂未开放，可先用 Codex / Grok 池"
     };
   }
+  // Cursor 订阅号池：粘贴 email----…----userId::eyJ… 多行，统一复用本机 machine id
+  if (poolKind === "cursor_subscription") {
+    const machine = readCursorMachineId();
+    if (!machine.ok) {
+      return {
+        ok: false,
+        error: "未找到本机 Cursor 机器标识，无法导入 Cursor 订阅号：请先在本机登录 Cursor 后重试",
+        added: 0,
+        skipped: 0
+      };
+    }
+    return importCursorSubscriptionAccountsFromText(providerId, payload.text || "", {
+      machineId: machine.machineId,
+      skipDuplicates: payload.skipDuplicates !== false
+    });
+  }
 
   // Grok / xAI：优先用前端传入的 proxy，否则读供应商配置，再 fallback 本机 7890
   let proxyUrl = String(payload.proxyUrl || "").trim();
@@ -1940,6 +1957,14 @@ ipcMain.handle("account-pool:import-cpa", (_e, payload = {}) => {
       dirs: payload.dirs,
       skipDuplicates: payload.skipDuplicates !== false
     });
+  }
+  if (poolKind === "cursor_subscription") {
+    return {
+      ok: false,
+      error: "Cursor 订阅号池仅支持粘贴导入，请在「账号池」面板粘贴 email----…----userId::eyJ…",
+      added: 0,
+      skipped: 0
+    };
   }
   return importXaiAccountsFromCpaDirs(providerId, {
     dirs: payload.dirs,
@@ -2138,6 +2163,67 @@ ipcMain.handle("account-pool:set-strategy", (_e, payload = {}) => {
   const pool = loadPool(providerId, { poolKind: resolvePoolKind(payload, providerId) });
   if (payload.strategy) pool.strategy = payload.strategy;
   return savePool(pool);
+});
+
+// 批量测试 Cursor 订阅账号池：逐个账号用其 access token + 本机 machine id 发起最小请求，
+// 返回每个账号的有效性。只用于人工验证，不改变账号健康状态。
+ipcMain.handle("account-pool:test-cursor", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const poolKind = resolvePoolKind(payload, providerId);
+  if (poolKind !== "cursor_subscription") {
+    return { ok: false, error: "仅 Cursor 订阅账号池支持批量测试" };
+  }
+  const pool = loadPool(providerId, { poolKind });
+  const accounts = (pool.accounts || []).filter(
+    (account) => account.enabled !== false && account.accessToken && account.machineId
+  );
+  if (!accounts.length) {
+    return { ok: true, tested: 0, okCount: 0, failed: 0, results: [], error: "账号池没有可测试的 Cursor 账号" };
+  }
+  const results = [];
+  const concurrency = Math.min(3, accounts.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < accounts.length) {
+      const account = accounts[cursor++];
+      const provider = {
+        ...normalizeCursorSubscriptionProvider({
+          id: providerId,
+          apiFormat: "cursor_subscription",
+          baseUrl: payload.baseUrl || "https://agentn.api5.cursor.sh",
+          enabled: true
+        }),
+        _cursorAccessToken: account.accessToken,
+        _cursorMachineId: account.machineId
+      };
+      try {
+        const result = await callCursorSubscription(provider, {
+          model: String(payload.model || "auto"),
+          stream: false,
+          messages: [{ role: "user", content: "Reply with OK." }]
+        });
+        results.push({
+          id: account.id,
+          email: account.email || account.sub || account.id,
+          ok: Boolean(result.ok),
+          status: result.status || 0,
+          error: result.ok ? "" : (result.payload?.error?.message || `status ${result.status}`)
+        });
+      } catch (err) {
+        results.push({
+          id: account.id,
+          email: account.email || account.sub || account.id,
+          ok: false,
+          status: 0,
+          error: err?.message || String(err)
+        });
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  const okCount = results.filter((r) => r.ok).length;
+  return { ok: true, tested: results.length, okCount, failed: results.length - okCount, results };
 });
 
 ipcMain.handle("cursor-subscription:status", (_e, payload = {}) => {

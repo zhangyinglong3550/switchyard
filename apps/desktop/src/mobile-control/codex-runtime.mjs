@@ -17,7 +17,9 @@ const CAPABILITIES = Object.freeze({
   archive: true,
   unarchive: true,
   delete: true,
-  fork: true,
+  // 桌面属主的 Codex 历史会话不能从手机分叉（thread/fork 仅对手机新建的会话可用），
+  // 手机上绝大多数 Codex 会话都是桌面属主，统一隐藏分叉入口。
+  fork: false,
   compact: true,
   approve: true
 });

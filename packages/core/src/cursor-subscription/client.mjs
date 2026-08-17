@@ -910,8 +910,16 @@ export async function callCursorSubscription(provider, body, {
     model,
     provider
   });
-  const useCursorAgentCli = transport === http2AgentEvents && provider.useCursorAgentCli !== false && isCursorAgentCliEligible(body);
-  const credentials = useCursorAgentCli ? null : loadCursorSubscriptionCredentials(provider, keychain);
+  // 池化绑定账号：使用该账号自己的 access token（machine id 统一复用本机值），
+  // 并且必须走 HTTP2 直连而非本机 Cursor CLI（CLI 只会用当前登录的账号）。
+  const boundCredentials = provider?._cursorAccessToken
+    ? { accessToken: provider._cursorAccessToken, machineId: provider._cursorMachineId || "" }
+    : null;
+  if (boundCredentials && !boundCredentials.machineId) {
+    return { ok: false, status: 401, payload: { error: { code: "CURSOR_SUBSCRIPTION_MACHINE_ID_MISSING", message: "Cursor 订阅账号池账号缺少本机 machine id，请重新导入账号" } } };
+  }
+  const useCursorAgentCli = !boundCredentials && transport === http2AgentEvents && provider.useCursorAgentCli !== false && isCursorAgentCliEligible(body);
+  const credentials = useCursorAgentCli ? null : (boundCredentials || loadCursorSubscriptionCredentials(provider, keychain));
   if (!useCursorAgentCli && !credentials) return { ok: false, status: 401, payload: { error: { code: "CURSOR_SUBSCRIPTION_UNCONFIGURED", message: "Cursor 订阅桥接尚未连接本机凭据" } } };
   const lane = laneFor(provider);
   try {

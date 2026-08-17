@@ -268,16 +268,18 @@ function normalizeKnownProvider(provider) {
     withRouting.authMode === "account_pool" ||
     withRouting.providerType === "account_pool" ||
     String(withRouting.presetId || "").includes("account-pool") ||
-    ["xai_oauth", "antigravity_oauth", "codex_oauth"].includes(withRouting.poolKind);
+    ["xai_oauth", "antigravity_oauth", "codex_oauth", "cursor_subscription"].includes(withRouting.poolKind);
   if (looksLikeAccountPool) {
     let poolKind = withRouting.poolKind || "xai_oauth";
     if (withRouting.presetId === "antigravity-account-pool") poolKind = "antigravity_oauth";
     if (withRouting.presetId === "codex-account-pool") poolKind = "codex_oauth";
     if (withRouting.presetId === "xai-account-pool") poolKind = "xai_oauth";
+    if (withRouting.presetId === "cursor-subscription-account-pool") poolKind = "cursor_subscription";
     const defaults = {
       xai_oauth: { baseUrl: "https://api.x.ai/v1", apiFormat: "openai_chat" },
       antigravity_oauth: { baseUrl: "https://daily-cloudcode-pa.googleapis.com", apiFormat: "antigravity" },
-      codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" }
+      codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" },
+      cursor_subscription: { baseUrl: "https://agentn.api5.cursor.sh", apiFormat: "cursor_subscription" }
     };
     const d = defaults[poolKind] || defaults.xai_oauth;
     return {

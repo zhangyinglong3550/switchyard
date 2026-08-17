@@ -163,6 +163,9 @@ export function createGrokRuntime({ client, overlay, command, env } = {}) {
   });
   return {
     ...runtime,
+    // Grok ACP 的分叉对本机会话不可用（active_sessions 单实例锁 + 无原生
+    // fork 落盘），统一隐藏手机端分叉入口。
+    capabilities: { ...runtime.capabilities, fork: false },
     // Grok 的 ACP 是进程级单实例会话状态（active_sessions 锁）：长驻 ACP 进程
     // resume 一个被其他 grok CLI 持有的会话时，prompt 会被路由到错误会话或
     // 卡死。改用一次性 `grok --single --cwd <cwd> -r <session_id>` 进程发送：
@@ -233,12 +236,18 @@ export function createGrokRuntime({ client, overlay, command, env } = {}) {
         directory: cwd,
         project: cwd ? path.basename(cwd) : "",
         archived: false,
-        capabilities: { ...runtime.capabilities },
+        capabilities: { ...runtime.capabilities, fork: false },
         messages
       };
     },
     isBusy(sessionId) {
       return Boolean(runtime.isBusy?.(sessionId));
+    },
+    // 会话行/详情的 capabilities 统一关闭 fork（ACP 内部仍暴露 fork:true，
+    // 但 Grok 会话实际不能从手机分叉）。
+    async listSessions(options = {}) {
+      const rows = await runtime.listSessions(options);
+      return rows.map((row) => ({ ...row, capabilities: { ...(row.capabilities || {}), fork: false } }));
     }
   };
 }

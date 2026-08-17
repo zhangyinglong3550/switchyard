@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <!-- Mobile Control is intentionally accessed through Tailscale HTTPS. -->
+  <!-- Mobile Control is intentionally accessed through Tailscale HTTPS.
+       Loopback cleartext is permitted for emulator adb-reverse development. -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">localhost</domain>
+  </domain-config>
   <base-config cleartextTrafficPermitted="false">
     <trust-anchors>
       <certificates src="system" />

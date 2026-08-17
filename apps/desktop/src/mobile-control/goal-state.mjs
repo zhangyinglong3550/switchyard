@@ -2,7 +2,9 @@ import { cleanMobileText } from "./dto.mjs";
 
 const DONE = new Set(["completed", "complete", "done"]);
 const ACTIVE = new Set(["in_progress", "running", "doing", "active"]);
-const GOAL_TOOL_NAMES = new Set(["create_goal", "get_goal", "update_goal", "update_plan"]);
+// Codex 目标模式（create/update_goal + update_plan）、Claude TodoWrite、
+// OpenCode/DSH todo_write 都视为目标/计划来源，统一喂给手机端目标面板。
+const GOAL_TOOL_NAMES = new Set(["create_goal", "get_goal", "update_goal", "update_plan", "todo_write", "todowrite", "write_todo"]);
 
 function objectValue(value) {
   if (!value) return {};
@@ -13,7 +15,7 @@ function objectValue(value) {
 function planItems(value) {
   const raw = Array.isArray(value) ? value : [];
   return raw.map((item) => ({
-    step: cleanMobileText(item?.step || item?.title || item?.task || "", 500).trim(),
+    step: cleanMobileText(item?.step || item?.title || item?.task || item?.content || "", 500).trim(),
     status: String(item?.status || "pending").toLowerCase()
   })).filter((item) => item.step);
 }
@@ -74,6 +76,11 @@ export function applyGoalTool(previous, tool = {}, { at = new Date().toISOString
   }
   if (name === "update_plan") {
     const plan = planItems(source.plan || source.steps);
+    if (plan.length) next.plan = plan;
+    if (!next.status || next.status === "complete") next.status = "in_progress";
+  }
+  if (name === "todo_write" || name === "todowrite" || name === "write_todo") {
+    const plan = planItems(source.todos || source.plan || source.steps);
     if (plan.length) next.plan = plan;
     if (!next.status || next.status === "complete") next.status = "in_progress";
   }

@@ -175,3 +175,16 @@ test("provider presets · enable Cursor subscription bridge by default with expl
   assert.ok(cursor.models.some((model) => model.id === "grok-4.5"));
   assert.ok(cursor.models.some((model) => model.id === "gpt-5.6-sol"));
 });
+
+test("provider presets · cursor subscription account pool preset uses account_pool auth", () => {
+  const pool = providerPresetFor("cursor-subscription-account-pool");
+  assert.ok(pool);
+  assert.equal(pool.providerType, "cursor_subscription");
+  assert.equal(pool.apiFormat, "cursor_subscription");
+  assert.equal(pool.defaultAuthMode, "account_pool");
+  assert.deepEqual(pool.authModes, ["account_pool"]);
+  assert.equal(pool.poolKind, "cursor_subscription");
+  assert.equal(pool.baseUrl, "https://agentn.api5.cursor.sh");
+  assert.equal(pool.enabled, true);
+  assert.ok(pool.models.length >= 8);
+});

@@ -40,16 +40,20 @@ export function normalizeCursorSubscriptionProvider(provider = {}) {
     ? CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL
     : (provider.baseUrl || CURSOR_SUBSCRIPTION_DEFAULT_BASE_URL);
   const baseUrl = assertSafeBaseUrl(requestedBaseUrl);
+  // 账号池形态（authMode=account_pool + poolKind=cursor_subscription）保留原样，
+  // 只有单账号桥接形态才落到 keychain。
+  const isPoolForm = provider?.authMode === "account_pool" || provider?.providerType === "account_pool" || provider?.poolKind === "cursor_subscription";
   const normalized = {
     ...provider,
     id,
     name: provider.name || "Cursor 订阅桥接",
     providerType: "cursor_subscription",
     apiFormat: CURSOR_SUBSCRIPTION_API_FORMAT,
-    authMode: "keychain",
+    authMode: isPoolForm ? "account_pool" : "keychain",
+    poolKind: isPoolForm ? (provider.poolKind || "cursor_subscription") : provider.poolKind,
     keychainAccount: cursorSubscriptionKeychainAccount({ ...provider, id }),
     baseUrl,
-    enabled: provider.enabled === true,
+    enabled: isPoolForm ? provider.enabled !== false : provider.enabled === true,
     maxConcurrentRequests: Math.min(
       CURSOR_SUBSCRIPTION_MAX_CONCURRENCY,
       Math.max(1, Math.floor(Number(provider.maxConcurrentRequests) || CURSOR_SUBSCRIPTION_DEFAULT_CONCURRENCY))
