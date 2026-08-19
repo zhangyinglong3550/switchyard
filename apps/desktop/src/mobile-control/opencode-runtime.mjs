@@ -18,7 +18,7 @@ function openCodeCapabilityConfig() {
     for (const model of Array.isArray(config.models) ? config.models : Object.values(config.models || {})) {
       const id = String(model?.id || "").trim();
       if (!id) continue;
-      const images = Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || model?.visionFallbackModelId);
+      const images = Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || model?.visionFallbackModelId || model?.visionFallbackModelIds?.length);
       models[id] = {
         attachment: images,
         modalities: { input: images ? ["text", "image"] : ["text"], output: ["text"] }

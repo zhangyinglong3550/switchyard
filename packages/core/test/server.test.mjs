@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import net from "node:net";
-import { createServer } from "../src/server.mjs";
+import { createServer, isCodexUiSidecarRequest, requestedModelForClient } from "../src/server.mjs";
 
 function writeTempConfig(content) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lls-srv-"));
@@ -2589,4 +2589,102 @@ test("server records a trusted Codex parent-thread correlation id without exposi
   const record = logs.find((entry) => entry.requestLog);
   assert.equal(record.correlationThreadId, "019fa127-e5c6-76a3-8a45-41e97a44fed6");
   assert.doesNotMatch(JSON.stringify(record), /must-not-be-recorded/);
+});
+
+test("requestedModelForClient · Codex 起标题/进度摘要改走客户端默认模型", () => {
+  const config = {
+    defaultModel: null,
+    clients: { codex: { defaultModel: "ke/deepseek-v4-flash" } }
+  };
+  assert.equal(isCodexUiSidecarRequest({
+    model: "gpt-5.6-sol",
+    input: "请总结这段代码"
+  }), false);
+  assert.equal(requestedModelForClient(config, "codex", {
+    model: "gpt-5.6-sol",
+    input: "请总结这段代码"
+  }), "gpt-5.6-sol");
+  assert.equal(requestedModelForClient(config, "codex", {
+    model: "gpt-5.6-sol",
+    input: [{ type: "message", role: "user", content: "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.\nUser prompt:\n我发的截图识别一下" }]
+  }), "ke/deepseek-v4-flash");
+  assert.equal(requestedModelForClient(config, "codex", {
+    model: "codex/gpt-5.6-sol",
+    messages: [{ role: "user", content: "You write the one-line activity update displayed beneath an existing Codex task title.\nTask title: 识别截图" }]
+  }), "ke/deepseek-v4-flash");
+  assert.equal(requestedModelForClient(config, "hermes", {
+    model: "gpt-5.6-sol",
+    input: "provide a short title for a task"
+  }), "gpt-5.6-sol");
+});
+
+test("server routes Codex title sidecar to the client default model", async (t) => {
+  const officialHits = [];
+  const cheapHits = [];
+  const official = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (c) => (buf += c));
+    req.on("end", () => {
+      officialHits.push(JSON.parse(buf).model);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "official" } }] }));
+    });
+  });
+  const cheap = http.createServer((req, res) => {
+    let buf = "";
+    req.on("data", (c) => (buf += c));
+    req.on("end", () => {
+      cheapHits.push(JSON.parse(buf).model);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "cheap-title" } }] }));
+    });
+  });
+  await new Promise((r) => official.listen(0, "127.0.0.1", r));
+  await new Promise((r) => cheap.listen(0, "127.0.0.1", r));
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [
+      { id: "official", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${official.address().port}/v1` },
+      { id: "cheap", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${cheap.address().port}/v1` }
+    ],
+    models: [
+      { id: "official/gpt-5.6-sol", providerId: "official", upstreamModel: "gpt-5.6-sol", aliases: ["gpt-5.6-sol"] },
+      { id: "cheap/flash", providerId: "cheap", upstreamModel: "flash" }
+    ],
+    clients: { codex: { enabled: true, allowedModels: ["*"], defaultModel: "cheap/flash" } }
+  });
+  const server = createServer();
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((r) => server.close(r));
+    await new Promise((r) => official.close(r));
+    await new Promise((r) => cheap.close(r));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const sidecar = await fetchJson(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-sol",
+      input: [{ type: "message", role: "user", content: "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.\nUser prompt:\n帮我看看" }]
+    })
+  });
+  assert.equal(sidecar.status, 200, JSON.stringify(sidecar.body));
+  assert.deepEqual(officialHits, []);
+  assert.deepEqual(cheapHits, ["flash"]);
+
+  const normal = await fetchJson(`http://127.0.0.1:${port}/codex/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-sol",
+      input: [{ type: "message", role: "user", content: "这段代码怎么改" }]
+    })
+  });
+  assert.equal(normal.status, 200, JSON.stringify(normal.body));
+  assert.deepEqual(officialHits, ["gpt-5.6-sol"]);
+  assert.deepEqual(cheapHits, ["flash"]);
 });

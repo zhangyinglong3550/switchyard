@@ -156,8 +156,6 @@ const PRESET_GROUP = {
   "custom-openai": "chatPassthrough",
   ollama: "unsupported",
   "lm-studio": "unsupported",
-  "cursor-subscription": "adapter",
-  "antigravity-cli2api": "adapter",
   "antigravity-account-pool": "adapter"
 };
 
@@ -252,7 +250,7 @@ function fallbackByApiFormat(apiFormat) {
   const format = String(apiFormat || "").trim().toLowerCase();
   if (format === "openai_responses") return cloneCapability(GROUP.passthroughResponses);
   if (format === "anthropic_messages") return cloneCapability(GROUP.anthropic);
-  if (format === "cursor_subscription" || format === "antigravity") return cloneCapability(GROUP.adapter);
+  if (format === "antigravity") return cloneCapability(GROUP.adapter);
   if (format === "openai_chat") return cloneCapability(GROUP.chatPassthrough);
   return cloneCapability(GROUP.unsupported);
 }

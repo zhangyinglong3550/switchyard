@@ -305,6 +305,20 @@ test("codex profile · writes model catalog for Codex App model picker", () => {
   assert.match(ccSwitchProfile, /request_max_retries = 5/);
 });
 
+test("deepseek harness profile · does not advertise image input for describe-bridge models", () => {
+  const native = pw.deepSeekHarnessModelFrom({
+    id: "vision/model",
+    capabilities: { images: true, multimodal: true }
+  });
+  const bridged = pw.deepSeekHarnessModelFrom({
+    id: "deepseek/deepseek-v4-flash",
+    capabilities: { text: true, images: false, multimodal: false },
+    visionFallbackModelId: "vision/model"
+  });
+  assert.deepEqual(native.input, ["text", "image"]);
+  assert.deepEqual(bridged.input, ["text"]);
+});
+
 test("codex profile · model catalog exposes image input when a vision fallback is configured", () => {
   const catalog = pw.buildCodexModelCatalog({
     models: [{
@@ -346,27 +360,6 @@ test("codex profile · gpt-5.6 family exposes max/ultra reasoning levels", () =>
   assert.equal(luna.default_reasoning_level, "medium");
   assert.ok(luna.supported_reasoning_levels.some((item) => item.effort === "max"));
   assert.equal(luna.supported_reasoning_levels.some((item) => item.effort === "ultra"), false);
-});
-
-test("codex profile · Cursor models expose Agent-selected fast tier without model variants", () => {
-  const catalog = pw.buildCodexModelCatalog({
-    models: [{
-      id: "cursor-subscription/grok-4.5",
-      providerId: "cursor-subscription",
-      providerApiFormat: "cursor_subscription",
-      upstreamModel: "grok-4.5",
-      displayName: "Cursor Grok 4.5",
-      capabilities: { text: true, reasoning: true, tools: true, stream: true }
-    }]
-  });
-  assert.equal(catalog.models[0].slug, "cursor-subscription/grok-4.5");
-  assert.deepEqual(catalog.models[0].additional_speed_tiers, ["fast"]);
-  assert.deepEqual(catalog.models[0].service_tiers, [{
-    id: "priority",
-    name: "Fast",
-    description: "1.5x speed, increased usage"
-  }]);
-  assert.ok(catalog.models[0].supported_reasoning_levels.some((item) => item.effort === "high"));
 });
 
 test("codex profile · repairs model cache drift when Switchyard custom provider is active", () => {

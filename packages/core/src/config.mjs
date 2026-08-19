@@ -3,7 +3,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { configPath, ensureDir, DEFAULT_CONFIG_PATH } from "./utils.mjs";
-import { canonicalCursorSubscriptionModelId, cursorSubscriptionDisplayName, isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "./cursor-subscription/model-catalog.mjs";
 import { normalizeSensitiveGuardConfig } from "./sensitive-guard.mjs";
 import { normalizeRequestBodyCaptureConfig } from "./request-body-capture.mjs";
 
@@ -11,8 +10,7 @@ export const SUPPORTED_API_FORMATS = new Set([
   "openai_chat",
   "openai_responses",
   "anthropic_messages",
-  "antigravity",
-  "cursor_subscription"
+  "antigravity"
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
@@ -115,6 +113,28 @@ export function initConfig({ force = false } = {}) {
   return { ok: true, created: true, path: target };
 }
 
+function isRetiredCursorSubscriptionProvider(provider) {
+  return provider?.apiFormat === "cursor_subscription"
+    || provider?.providerType === "cursor_subscription"
+    || provider?.poolKind === "cursor_subscription"
+    || String(provider?.presetId || "").startsWith("cursor-subscription");
+}
+
+function isRetiredAntigravityCli2ApiProvider(provider) {
+  if (String(provider?.presetId || "") === "antigravity-cli2api") return true;
+  try {
+    const url = new URL(String(provider?.baseUrl || ""));
+    const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+    return loopback && url.port === "8317";
+  } catch {
+    return false;
+  }
+}
+
+function isRetiredProvider(provider) {
+  return isRetiredCursorSubscriptionProvider(provider) || isRetiredAntigravityCli2ApiProvider(provider);
+}
+
 export function mergeWithDefaults(input) {
   const out = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   if (input && typeof input === "object") {
@@ -127,10 +147,24 @@ export function mergeWithDefaults(input) {
     if (input.requestBodyCapture && typeof input.requestBodyCapture === "object") {
       out.requestBodyCapture = normalizeRequestBodyCaptureConfig(input.requestBodyCapture);
     }
-    if (Array.isArray(input.providers)) out.providers = input.providers.map(normalizeKnownProvider);
+    if (Array.isArray(input.providers)) {
+      out.providers = input.providers
+        .filter((provider) => !isRetiredProvider(provider))
+        .map(normalizeKnownProvider);
+    }
     if (Array.isArray(input.models)) {
+      const retiredIds = new Set(
+        (input.providers || [])
+          .filter(isRetiredProvider)
+          .map((provider) => provider.id)
+      );
       out.models = normalizeKnownVisionFallbacks(
-        collapseReasoningVariantModels(input.models.map((model) => normalizeKnownModel(model, out.providers)), out.providers),
+        collapseReasoningVariantModels(
+          input.models
+            .filter((model) => !retiredIds.has(model.providerId))
+            .map((model) => normalizeKnownModel(model, out.providers)),
+          out.providers
+        ),
         out.providers
       );
     }
@@ -196,24 +230,12 @@ export function collapseReasoningVariantModels(models = [], providers = []) {
   for (const model of models || []) {
     const provider = providerById.get(model?.providerId);
     const isSupportedProvider = provider?.apiFormat === "antigravity" ||
-      provider?.apiFormat === "cursor_subscription" ||
       provider?.authMode === "codex_oauth" ||
       provider?.providerType === "codex_oauth" ||
       String(provider?.baseUrl || "").includes("chatgpt.com/backend-api/codex");
-    const cursorVariant = isCursorSubscriptionProvider(provider)
-      ? canonicalCursorSubscriptionModelId(model?.upstreamModel || model?.id)
-      : "";
     const normalized = isSupportedProvider && canonicalReasoningVariant(model?.upstreamModel || model?.id);
-    const upstreamModel = cursorVariant || normalized?.base || model?.upstreamModel;
-    const next = cursorVariant && cursorVariant !== (model?.upstreamModel || model?.id)
-      ? {
-          ...model,
-          id: modelIdForUpstream(model, upstreamModel),
-          upstreamModel,
-          displayName: cursorSubscriptionDisplayName(model?.displayName, upstreamModel),
-          aliases: Array.from(new Set([...(model?.aliases || []), model.id, model.upstreamModel].filter(Boolean)))
-        }
-      : normalized
+    const upstreamModel = normalized?.base || model?.upstreamModel;
+    const next = normalized
       ? {
           ...model,
           id: modelIdForUpstream(model, upstreamModel),
@@ -268,18 +290,16 @@ function normalizeKnownProvider(provider) {
     withRouting.authMode === "account_pool" ||
     withRouting.providerType === "account_pool" ||
     String(withRouting.presetId || "").includes("account-pool") ||
-    ["xai_oauth", "antigravity_oauth", "codex_oauth", "cursor_subscription"].includes(withRouting.poolKind);
+    ["xai_oauth", "antigravity_oauth", "codex_oauth"].includes(withRouting.poolKind);
   if (looksLikeAccountPool) {
     let poolKind = withRouting.poolKind || "xai_oauth";
     if (withRouting.presetId === "antigravity-account-pool") poolKind = "antigravity_oauth";
     if (withRouting.presetId === "codex-account-pool") poolKind = "codex_oauth";
     if (withRouting.presetId === "xai-account-pool") poolKind = "xai_oauth";
-    if (withRouting.presetId === "cursor-subscription-account-pool") poolKind = "cursor_subscription";
     const defaults = {
       xai_oauth: { baseUrl: "https://api.x.ai/v1", apiFormat: "openai_chat" },
       antigravity_oauth: { baseUrl: "https://daily-cloudcode-pa.googleapis.com", apiFormat: "antigravity" },
-      codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" },
-      cursor_subscription: { baseUrl: "https://agentn.api5.cursor.sh", apiFormat: "cursor_subscription" }
+      codex_oauth: { baseUrl: "https://chatgpt.com/backend-api/codex", apiFormat: "openai_responses" }
     };
     const d = defaults[poolKind] || defaults.xai_oauth;
     return {
@@ -313,10 +333,6 @@ function normalizeKnownProvider(provider) {
       providerType: "anthropic_oauth",
       baseUrl: withRouting.baseUrl || "https://api.anthropic.com"
     };
-  }
-  const looksLikeCursorSubscription = withRouting.providerType === "cursor_subscription" || withRouting.apiFormat === "cursor_subscription" || withRouting.presetId === "cursor-subscription";
-  if (looksLikeCursorSubscription) {
-    return normalizeCursorSubscriptionProvider(withRouting);
   }
   const looksLikeXiaomiMiMo = baseUrl.includes("xiaomimimo.com") || id.includes("xiaomi") || id.includes("mimo") || name.includes("xiaomi") || name.includes("mimo");
   if (looksLikeXiaomiMiMo && baseUrl.endsWith("/anthropic")) {
@@ -452,11 +468,6 @@ export function validateConfig(config) {
       throw new Error(`Provider ${provider.id} has unsupported routingMode: ${provider.routingMode}`);
     }
     if (!provider.baseUrl) throw new Error(`Provider ${provider.id} requires baseUrl`);
-    if (provider.providerType === "cursor_subscription") {
-      if (provider.enabled !== false && config.host !== "127.0.0.1") throw new Error("Cursor subscription bridge requires config.host to be 127.0.0.1");
-      const concurrency = Number(provider.maxConcurrentRequests || 2);
-      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 3) throw new Error("Cursor subscription bridge supports 1 to 3 concurrent requests");
-    }
   }
   const modelIds = new Set();
   for (const model of config.models) {

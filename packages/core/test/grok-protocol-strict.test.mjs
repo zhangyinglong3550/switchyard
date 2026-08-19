@@ -56,3 +56,11 @@ test("grok-protocol-strict · keeps empty line untouched", () => {
   // 空行由 pipeStream 上层负责处理（写成 \\n），patch 不动
   assert.equal(grokProtocolStrictPatch.streamLine(""), "");
 });
+
+test("grok-protocol-strict · drops extra reasoning field so Grok thoughts stay on reasoning_content", () => {
+  const line = 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"先想","reasoning":"先想"},"finish_reason":null}]}';
+  const out = grokProtocolStrictPatch.streamLine(line);
+  const parsed = JSON.parse(out.slice(6));
+  assert.equal(parsed.choices[0].delta.reasoning_content, "先想");
+  assert.equal("reasoning" in parsed.choices[0].delta, false);
+});

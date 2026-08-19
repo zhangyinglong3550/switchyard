@@ -28,7 +28,10 @@ test("vision fallback · describes images for configured text-only model", async
     }]
   };
 
+  const logs = [];
   const next = await applyVisionFallback(config, route, chatBody, {
+    descCache: new Map(),
+    emit: (entry) => logs.push(entry),
     fetchImpl: async (_url, init) => {
       calls.push(JSON.parse(init.body));
       return new Response(JSON.stringify({
@@ -47,6 +50,12 @@ test("vision fallback · describes images for configured text-only model", async
   assert.equal(next._switchyardVision.mode, "fallback");
   assert.equal(next._switchyardVision.fallbackOk, true);
   assert.equal(next._switchyardVision.fallbackModelId, "vision/gpt-vision");
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].requestLog, true);
+  assert.equal(logs[0].path, "/vision-fallback");
+  assert.equal(logs[0].modelId, "vision/gpt-vision");
+  assert.equal(logs[0].providerId, "vision");
+  assert.match(logs[0].responsePreview, /红色按钮/);
 });
 
 test("vision fallback · describes each historical image separately", async () => {
@@ -86,6 +95,7 @@ test("vision fallback · describes each historical image separately", async () =
   };
 
   const next = await applyVisionFallback(config, route, chatBody, {
+    descCache: new Map(),
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body);
       calls.push(body);
@@ -138,4 +148,78 @@ test("vision fallback · reports unsupported image input when no fallback is con
   const next = await applyVisionFallback(config, route, body);
   assert.equal(next._switchyardVision.mode, "unsupported_no_fallback");
   assert.equal(JSON.stringify(next).includes("image_url"), true);
+});
+
+test("vision fallback · walks a chain when the first eye model fails", async () => {
+  const config = {
+    providers: [
+      { id: "p", apiFormat: "openai_chat", baseUrl: "https://text.example.com/v1" },
+      { id: "vision", apiFormat: "openai_chat", baseUrl: "https://vision.example.com/v1" }
+    ],
+    models: [
+      {
+        id: "p/text",
+        providerId: "p",
+        upstreamModel: "text",
+        capabilities: { text: true, images: false },
+        visionFallbackModelId: "vision/primary",
+        visionFallbackModelIds: ["vision/backup"]
+      },
+      { id: "vision/primary", providerId: "vision", upstreamModel: "primary", capabilities: { text: true, images: true } },
+      { id: "vision/backup", providerId: "vision", upstreamModel: "backup", capabilities: { text: true, images: true } }
+    ]
+  };
+  const route = { provider: config.providers[0], model: config.models[0], upstreamModel: "text" };
+  const calls = [];
+  const next = await applyVisionFallback(config, route, {
+    messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,CHAIN" } }] }]
+  }, {
+    descCache: new Map(),
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push(body.model);
+      if (body.model === "primary") {
+        return new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "备用眼睛看到了按钮。" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+  });
+  assert.deepEqual(calls, ["primary", "backup"]);
+  assert.equal(next._switchyardVision.mode, "fallback");
+  assert.equal(next._switchyardVision.fallbackOk, true);
+  assert.equal(next._switchyardVision.fallbackModelId, "vision/backup");
+  assert.match(JSON.stringify(next), /备用眼睛看到了按钮/);
+});
+
+test("vision fallback · reuses a content-hash cache across turns", async () => {
+  const config = {
+    providers: [
+      { id: "p", apiFormat: "openai_chat", baseUrl: "https://text.example.com/v1" },
+      { id: "vision", apiFormat: "openai_chat", baseUrl: "https://vision.example.com/v1" }
+    ],
+    models: [
+      { id: "p/text", providerId: "p", upstreamModel: "text", capabilities: { text: true, images: false }, visionFallbackModelId: "vision/gpt-vision" },
+      { id: "vision/gpt-vision", providerId: "vision", upstreamModel: "gpt-vision", capabilities: { text: true, images: true } }
+    ]
+  };
+  const route = { provider: config.providers[0], model: config.models[0], upstreamModel: "text" };
+  const descCache = new Map();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "同一张仪表盘。" } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,CACHE" } }] }] };
+  const logs = [];
+  const first = await applyVisionFallback(config, route, body, { descCache, fetchImpl, emit: (entry) => logs.push(entry) });
+  const second = await applyVisionFallback(config, route, body, { descCache, fetchImpl, emit: (entry) => logs.push(entry) });
+  assert.equal(calls, 1);
+  assert.equal(first._switchyardVision.cacheHits, 0);
+  assert.equal(second._switchyardVision.cacheHits, 1);
+  assert.equal(logs.length, 2);
+  assert.equal(logs[0].requestSummary.cacheHit, false);
+  assert.equal(logs[1].requestSummary.cacheHit, true);
+  assert.equal(logs[1].modelId, "vision/gpt-vision");
+  assert.equal(second._switchyardVision.fallbackOk, true);
+  assert.match(JSON.stringify(second), /同一张仪表盘/);
 });

@@ -83,29 +83,18 @@ test('renderer entry module parses before packaging', async () => {
   );
 });
 
-test('Cursor subscription settings present the local-only bridge without experimental labeling', () => {
+test('provider dialog omits retired Cursor subscription UI', () => {
   const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
-  assert.match(html, /id="provider-cursor-subscription-panel"/);
-  assert.match(html, /Cursor 订阅桥接/);
-  assert.doesNotMatch(html, /Cursor 订阅桥接（实验性）/);
-  assert.match(html, /仅个人本机使用/);
-  assert.doesNotMatch(html, /实验性桥接/);
-  assert.match(html, /id="btn-cursor-subscription-import-local"/);
-  assert.match(html, /从本机已登录 Cursor 自动导入/);
-  assert.match(html, /id="btn-cursor-subscription-connect"/);
-  assert.match(html, /id="btn-cursor-subscription-clear"/);
-  assert.match(js, /cursor-subscription:local-status/);
-  assert.match(js, /cursor-subscription:import-local/);
-  assert.match(js, /cursor-subscription:connect/);
-  assert.match(js, /cursor-subscription:clear/);
+  assert.doesNotMatch(html, /id="provider-cursor-subscription-panel"/);
+  assert.doesNotMatch(html, /option value="cursor_subscription"/);
+  assert.doesNotMatch(html, /Cursor 订阅桥接/);
+  assert.doesNotMatch(js, /cursor-subscription:/);
 });
 
-
-test('provider dialog exposes Cursor protocol, supports manual upstream models, and omits directory sync', () => {
+test('provider dialog supports manual upstream models and omits directory sync', () => {
   const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
-  assert.match(html, /option value="cursor_subscription"/);
   assert.doesNotMatch(html, /id="btn-provider-sync-models"/);
   assert.match(js, /data-discovery-upstream/);
   assert.match(js, /上游模型 ID/);

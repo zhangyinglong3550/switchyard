@@ -106,20 +106,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 
 ---
 
-### 6. Cursor 订阅账号池（本机凭据池化）
-
-本机 **多 Cursor 订阅号** 可作为 `cursor_subscription` 账号池轮询，复用本机 Cursor machine id，凭据只落在 `~/.switchyard/pools/cursor_subscription/`。
-
-- 粘贴导入 `email----…----userId::eyJ…`、`email----JWT`、纯 JWT 或 JSON / NDJSON
-- 每个账号使用自己的 access token，统一复用本机 machine id
-- 加权轮询 + 401/403/429/5xx 失败换号
-- 提供逐号连接测试；不会把 token 写入 `config.json`
-
-> Cursor 订阅账号池走原生 HTTP/2 AgentService，不复用当前 Cursor CLI 登录账号；请遵守 Cursor 服务条款。
-
----
-
-### 7. OpenCode / Grok Build 接三方模型
+### 6. OpenCode / Grok Build 接三方模型
 
 不只是 Codex / Claude Code——**OpenCode** 与 **Grok Build** 也能走同一张模型表。
 
@@ -137,7 +124,7 @@ DeepSeek / 纯文本 Coding 模型也能处理「带图提问」，无需换主�
 
 ---
 
-### 8. Android 手机控制：在受控边界内查看和继续桌面 Agent 任务
+### 7. Android 手机控制：在受控边界内查看和继续桌面 Agent 任务
 
 Switchyard 现在提供**可安装的 Android 客户端**，不是仅供电脑浏览器访问的演示页。桌面端在 **详细 → 工具 → 手机控制** 启用服务、生成一次性配对链接；Android App 通过同一 Tailnet 的 **Tailscale HTTPS** 安全连接到桌面端。
 
@@ -172,7 +159,7 @@ Switchyard 现在提供**可安装的 Android 客户端**，不是仅供电脑�
 | 多家供应商进同一个 Agent | **打平模型目录**，Claude Code / Codex / OpenCode / Grok Build 里一起选 |
 | 中转经常抖（如讯飞） | 网关重试，Agent 尽量无感 |
 | 便宜模型也要能看图 | 视觉兜底链路 |
-| 多 Codex / 多 Grok / 多 Cursor 订阅号 | 内置账号池，少依赖 CLI2API |
+| 多 Codex / 多 Grok | 内置账号池，少依赖 CLI2API |
 | Grok Build 也想用公司/中转模型 | 一键写入 `sy-*` 托管块，走 `/grok/v1` |
 | 想在 Android 手机上查看和继续桌面任务 | 可安装 Android App、Tailscale HTTPS 配对、实时状态与最小权限操作 |
 
@@ -225,7 +212,7 @@ Codex / Claude Code / Hermes / OpenCode / Grok Build / 兼容客户端
      Switchyard Gateway（本机）
    · 协议适配 Chat ↔ Responses ↔ Messages
    · 失败自动重试 · 视觉兜底
-   · Codex / Grok / Cursor 账号池（选号 → 刷新/测试 → 换号）
+   · Codex / Grok 账号池（选号 → 刷新/测试 → 换号）
               │
     ┌─────────┼─────────┐
     ▼         ▼         ▼

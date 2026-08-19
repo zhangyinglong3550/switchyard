@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { responsesToChat, chatToResponse, extractNamespaceMap, streamChatAsResponses } from "../src/openai-adapter.mjs";
-import { anthropicToChat, chatToAnthropic, streamResponsesAsAnthropic } from "../src/anthropic-adapter.mjs";
+import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamResponsesAsAnthropic } from "../src/anthropic-adapter.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse, streamResponsesAsChat } from "../src/openai-adapter-out.mjs";
 import { Writable } from "node:stream";
@@ -43,6 +43,72 @@ test("responsesToChat preserves function_call_output as tool message", () => {
   }, "u");
   const toolMsg = chat.messages.find((m) => m.role === "tool");
   assert.equal(toolMsg.tool_call_id, "c1");
+});
+
+test("responsesToChat unwraps object image_url and keeps pixels as Chat image_url.url string", () => {
+  const chat = responsesToChat({
+    input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "看图" },
+        { type: "input_image", image_url: { url: "data:image/png;base64,AQIDBA==" }, detail: "low" }
+      ]
+    }]
+  }, "u");
+  const user = chat.messages.find((m) => m.role === "user");
+  assert.equal(Array.isArray(user.content), true);
+  const image = user.content.find((part) => part.type === "image_url");
+  assert.equal(typeof image.image_url.url, "string");
+  assert.equal(image.image_url.url, "data:image/png;base64,AQIDBA==");
+  assert.equal(image.image_url.detail, "low");
+});
+
+test("responsesToChat keeps function_call_output image parts for the next Chat turn", () => {
+  const chat = responsesToChat({
+    input: [
+      { type: "function_call", call_id: "c1", name: "screenshot", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "c1",
+        output: [
+          { type: "input_text", text: "captured" },
+          { type: "input_image", image_url: "data:image/png;base64,AQID" }
+        ]
+      }
+    ]
+  }, "u");
+  const tool = chat.messages.find((m) => m.role === "tool");
+  assert.equal(tool.tool_call_id, "c1");
+  assert.equal(Array.isArray(tool.content), true);
+  assert.equal(tool.content[0].text, "captured");
+  assert.equal(tool.content[1].image_url.url, "data:image/png;base64,AQID");
+});
+
+test("responsesToChat folds top-level input_text/input_image items into one user turn", () => {
+  const chat = responsesToChat({
+    input: [
+      { type: "input_text", text: "这是什么" },
+      { type: "input_image", image_url: "data:image/jpeg;base64,AQID" }
+    ]
+  }, "u");
+  const user = chat.messages.filter((m) => m.role === "user");
+  assert.equal(user.length, 1);
+  assert.equal(user[0].content[0].text, "这是什么");
+  assert.equal(user[0].content[1].image_url.url, "data:image/jpeg;base64,AQID");
+});
+
+test("responsesToChat maps max_completion_tokens and legacy function role", () => {
+  const chat = responsesToChat({
+    max_completion_tokens: 128,
+    input: [
+      { role: "function", name: "lookup", content: "found" }
+    ]
+  }, "u");
+  assert.equal(chat.max_tokens, 128);
+  assert.equal(chat.messages[0].role, "tool");
+  assert.equal(chat.messages[0].tool_call_id, "lookup");
+  assert.equal(chat.messages[0].content, "found");
 });
 
 test("chatToResponse converts tool_calls to function_call output items", () => {
@@ -746,6 +812,27 @@ test("anthropicToChat lifts tool_use and tool_result into chat tool flow", () =>
   assert.equal(tool.tool_call_id, "tu1");
 });
 
+test("anthropicToChat keeps tool_result images as Chat image_url parts", () => {
+  const chat = anthropicToChat({
+    messages: [{
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: "tu1",
+        content: [
+          { type: "text", text: "shot" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AQID" } }
+        ]
+      }]
+    }]
+  }, "u");
+  const tool = chat.messages.find((m) => m.role === "tool");
+  assert.equal(tool.tool_call_id, "tu1");
+  assert.equal(Array.isArray(tool.content), true);
+  assert.equal(tool.content.some((part) => part.type === "text" && part.text === "shot"), true);
+  assert.equal(tool.content.some((part) => part.type === "image_url" && part.image_url.url.startsWith("data:image/png;base64,AQID")), true);
+});
+
 test("anthropicToChat maps output_config.effort to chat reasoning", () => {
   const chat = anthropicToChat({
     messages: [{ role: "user", content: "think" }],
@@ -823,6 +910,48 @@ test("anthropic effort survives Chat → Responses conversion", () => {
   }, "gpt");
   const responses = chatToResponses(chat, "gpt-5.6-luna");
   assert.deepEqual(responses.reasoning, { effort: "xhigh" });
+});
+
+test("chatToAnthropic maps chat reasoning fields into Anthropic thinking blocks", () => {
+  const out = chatToAnthropic({
+    choices: [{ message: { role: "assistant", reasoning_content: "先想", reasoning: "先想", content: "再答" } }]
+  }, "m");
+  assert.equal(out.content[0].type, "thinking");
+  assert.equal(out.content[0].thinking, "先想");
+  assert.equal(out.content[1].type, "text");
+  assert.equal(out.content[1].text, "再答");
+});
+
+test("streamChatAsAnthropic keeps reasoning off the answer text", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"先分析","reasoning":"先分析"}}]}',
+        "",
+        'data: {"choices":[{"delta":{"content":"结论"},"finish_reason":"stop"}]}',
+        "",
+        "data: [DONE]",
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({
+    write(chunk, _enc, cb) {
+      body += chunk.toString();
+      cb();
+    }
+  });
+  res.writeHead = () => {};
+  await streamChatAsAnthropic({ body: stream, ok: true, status: 200 }, res, "cursor/grok", { heartbeatMs: 60_000 });
+  assert.match(body, /"type":"thinking"/);
+  assert.match(body, /"type":"thinking_delta"/);
+  assert.match(body, /"thinking":"先分析"/);
+  assert.match(body, /"type":"text_delta"/);
+  assert.match(body, /"text":"结论"/);
+  assert.doesNotMatch(body, /"type":"text_delta"[^}]*"text":"先分析"/);
 });
 
 test("chatToAnthropic converts tool_calls back to tool_use blocks", () => {

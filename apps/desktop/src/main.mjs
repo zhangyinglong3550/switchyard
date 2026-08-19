@@ -134,15 +134,6 @@ import {
 } from "../../../packages/core/src/oauth-codex-local.mjs";
 import { refreshCodexTokens } from "../../../packages/core/src/account-pool/oauth-codex.mjs";
 import { dispatchChat } from "../../../packages/core/src/upstream/dispatch.mjs";
-import {
-  clearCursorSubscriptionCredentials,
-  parseCursorSubscriptionCredentials,
-  saveCursorSubscriptionCredentials
-} from "../../../packages/core/src/cursor-subscription/auth.mjs";
-import { isCursorSubscriptionProvider, normalizeCursorSubscriptionProvider } from "../../../packages/core/src/cursor-subscription/model-catalog.mjs";
-import { readLocalCursorModelCatalog, readLocalCursorSubscriptionCredentials, readCursorMachineId } from "../../../packages/core/src/cursor-subscription/local-auth.mjs";
-import { cursorAgentCliModelCatalog, findCursorAgentExecutable } from "../../../packages/core/src/cursor-subscription/agent-cli.mjs";
-import { callCursorSubscription, clearCursorSubscriptionRuntime, cursorSubscriptionLaneSnapshot } from "../../../packages/core/src/cursor-subscription/client.mjs";
 import { checkBalance } from "../../../packages/core/src/balance-check.mjs";
 import { listModelsForClient } from "../../../packages/core/src/config.mjs";
 import { resolveRoute } from "../../../packages/core/src/router.mjs";
@@ -174,7 +165,6 @@ import {
   refreshAccountQuota,
   recoverExpiredAccountCooldowns
 } from "../../../packages/core/src/account-pool/index.mjs";
-import { importCursorSubscriptionAccountsFromText } from "../../../packages/core/src/cursor-subscription/pool-import.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let providerHealthMonitor = null;
@@ -1263,7 +1253,7 @@ function resolveBundleSecrets(provider) {
   if (authMode === "none") {
     return { status: "included", reason: "无需认证" };
   }
-  if (/oauth|cursor_subscription/i.test(authMode)) {
+  if (/oauth/i.test(authMode)) {
     return {
       status: "unavailable",
       reason: "OAuth / 订阅登录态绑定本机，请在目标机器重新登录"
@@ -1903,22 +1893,6 @@ ipcMain.handle("account-pool:import-text", async (_e, payload = {}) => {
       error: "Antigravity 粘贴导入暂未开放，可先用 Codex / Grok 池"
     };
   }
-  // Cursor 订阅号池：粘贴 email----…----userId::eyJ… 多行，统一复用本机 machine id
-  if (poolKind === "cursor_subscription") {
-    const machine = readCursorMachineId();
-    if (!machine.ok) {
-      return {
-        ok: false,
-        error: "未找到本机 Cursor 机器标识，无法导入 Cursor 订阅号：请先在本机登录 Cursor 后重试",
-        added: 0,
-        skipped: 0
-      };
-    }
-    return importCursorSubscriptionAccountsFromText(providerId, payload.text || "", {
-      machineId: machine.machineId,
-      skipDuplicates: payload.skipDuplicates !== false
-    });
-  }
 
   // Grok / xAI：优先用前端传入的 proxy，否则读供应商配置，再 fallback 本机 7890
   let proxyUrl = String(payload.proxyUrl || "").trim();
@@ -1957,14 +1931,6 @@ ipcMain.handle("account-pool:import-cpa", (_e, payload = {}) => {
       dirs: payload.dirs,
       skipDuplicates: payload.skipDuplicates !== false
     });
-  }
-  if (poolKind === "cursor_subscription") {
-    return {
-      ok: false,
-      error: "Cursor 订阅号池仅支持粘贴导入，请在「账号池」面板粘贴 email----…----userId::eyJ…",
-      added: 0,
-      skipped: 0
-    };
   }
   return importXaiAccountsFromCpaDirs(providerId, {
     dirs: payload.dirs,
@@ -2165,151 +2131,6 @@ ipcMain.handle("account-pool:set-strategy", (_e, payload = {}) => {
   return savePool(pool);
 });
 
-// 批量测试 Cursor 订阅账号池：逐个账号用其 access token + 本机 machine id 发起最小请求，
-// 返回每个账号的有效性。只用于人工验证，不改变账号健康状态。
-ipcMain.handle("account-pool:test-cursor", async (_e, payload = {}) => {
-  const providerId = String(payload.providerId || "").trim();
-  if (!providerId) throw new Error("providerId is required");
-  const poolKind = resolvePoolKind(payload, providerId);
-  if (poolKind !== "cursor_subscription") {
-    return { ok: false, error: "仅 Cursor 订阅账号池支持批量测试" };
-  }
-  const pool = loadPool(providerId, { poolKind });
-  const accounts = (pool.accounts || []).filter(
-    (account) => account.enabled !== false && account.accessToken && account.machineId
-  );
-  if (!accounts.length) {
-    return { ok: true, tested: 0, okCount: 0, failed: 0, results: [], error: "账号池没有可测试的 Cursor 账号" };
-  }
-  const results = [];
-  const concurrency = Math.min(3, accounts.length);
-  let cursor = 0;
-  async function worker() {
-    while (cursor < accounts.length) {
-      const account = accounts[cursor++];
-      const provider = {
-        ...normalizeCursorSubscriptionProvider({
-          id: providerId,
-          apiFormat: "cursor_subscription",
-          baseUrl: payload.baseUrl || "https://agentn.api5.cursor.sh",
-          enabled: true
-        }),
-        _cursorAccessToken: account.accessToken,
-        _cursorMachineId: account.machineId
-      };
-      try {
-        const result = await callCursorSubscription(provider, {
-          model: String(payload.model || "auto"),
-          stream: false,
-          messages: [{ role: "user", content: "Reply with OK." }]
-        });
-        results.push({
-          id: account.id,
-          email: account.email || account.sub || account.id,
-          ok: Boolean(result.ok),
-          status: result.status || 0,
-          error: result.ok ? "" : (result.payload?.error?.message || `status ${result.status}`)
-        });
-      } catch (err) {
-        results.push({
-          id: account.id,
-          email: account.email || account.sub || account.id,
-          ok: false,
-          status: 0,
-          error: err?.message || String(err)
-        });
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  const okCount = results.filter((r) => r.ok).length;
-  return { ok: true, tested: results.length, okCount, failed: results.length - okCount, results };
-});
-
-ipcMain.handle("cursor-subscription:status", (_e, payload = {}) => {
-  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
-  const account = keychainAccountForProvider(provider);
-  const configured = hasKeychainSecret(account);
-  const cliAvailable = Boolean(findCursorAgentExecutable());
-  const lane = cursorSubscriptionLaneSnapshot(provider);
-  return {
-    ok: true,
-    configured: configured || cliAvailable,
-    status: configured || cliAvailable ? lane.status : "unconfigured",
-    accountLabel: cliAvailable ? "Cursor Agent CLI · 文本优先" : (configured ? `Keychain · ${account.slice(0, 3)}***` : "未配置"),
-    maxConcurrentRequests: provider.maxConcurrentRequests,
-    streamIdleTimeoutMs: provider.streamIdleTimeoutMs,
-    cliAvailable
-  };
-});
-ipcMain.handle("cursor-subscription:show-credentials", (_e, payload = {}) => {
-  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
-  const account = keychainAccountForProvider(provider);
-  if (!hasKeychainSecret(account)) return { ok: false, reason: "未保存凭据" };
-  const secret = getKeychainSecret(account);
-  const parsed = parseCursorSubscriptionCredentials(secret);
-  if (!parsed) return { ok: false, reason: "凭据解析失败" };
-  return {
-    ok: true,
-    accessTokenPreview: parsed.accessToken.slice(0, 12) + "..." + parsed.accessToken.slice(-6),
-    accessTokenLength: parsed.accessToken.length,
-    machineIdPreview: parsed.machineId.slice(0, 8) + "...",
-    machineIdLength: parsed.machineId.length
-  };
-});
-ipcMain.handle("cursor-subscription:local-status", () => {
-  const local = readLocalCursorSubscriptionCredentials();
-  return { ok: Boolean(local.ok), reason: local.ok ? "" : local.reason };
-});
-ipcMain.handle("cursor-subscription:import-local", (_e, payload = {}) => {
-  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
-  const credentials = readLocalCursorSubscriptionCredentials();
-  if (!credentials.ok) {
-    const hints = {
-      access_token_not_found: "未检测到 Cursor 桌面端登录态，请先在本机 Cursor 完成登录后重试。",
-      machine_id_not_found: "未找到 Cursor 本机标识，请完全退出并重新打开 Cursor 后重试。",
-      unsupported_platform: "自动导入目前仅支持 macOS。"
-    };
-    throw new Error(hints[credentials.reason] || "未检测到可导入的本机 Cursor 登录态。");
-  }
-  const result = saveCursorSubscriptionCredentials(provider, credentials, {
-    set: (account, secret) => setKeychainSecret(account, secret),
-    get: (account) => hasKeychainSecret(account),
-    delete: (account) => deleteKeychainSecret(account)
-  });
-  clearCursorSubscriptionRuntime(provider);
-  appendLog({ level: "info", msg: "cursor subscription local session imported", providerId: provider.id });
-  return { ok: Boolean(result?.ok), status: "connected" };
-});
-ipcMain.handle("cursor-subscription:connect", (_e, payload = {}) => {
-  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
-  const credentials = { accessToken: payload.accessToken, machineId: payload.machineId };
-  const result = saveCursorSubscriptionCredentials(provider, credentials, {
-    set: (account, secret) => setKeychainSecret(account, secret),
-    get: (account) => hasKeychainSecret(account),
-    delete: (account) => deleteKeychainSecret(account)
-  });
-  clearCursorSubscriptionRuntime(provider);
-  appendLog({ level: "info", msg: "cursor subscription credentials saved", providerId: provider.id });
-  return { ok: Boolean(result?.ok), status: "connected" };
-});
-ipcMain.handle("cursor-subscription:clear", (_e, payload = {}) => {
-  const provider = normalizeCursorSubscriptionProvider(payload.provider || payload);
-  const result = clearCursorSubscriptionCredentials(provider, { delete: (account) => deleteKeychainSecret(account) });
-  clearCursorSubscriptionRuntime(provider);
-  appendLog({ level: "info", msg: "cursor subscription credentials cleared", providerId: provider.id });
-  return { ...result, status: "unconfigured" };
-});
-ipcMain.handle("cursor-subscription:test", async (_e, payload = {}) => {
-  const provider = { ...normalizeCursorSubscriptionProvider(payload.provider || payload), enabled: true };
-  const result = await callCursorSubscription(provider, {
-    model: String(payload.model || "auto"),
-    stream: false,
-    messages: [{ role: "user", content: "Reply with OK." }]
-  });
-  if (!result.ok) return { ok: false, status: result.status, error: result.payload?.error?.message || "Cursor 订阅通道测试失败" };
-  return { ok: true, status: result.status, bodyPreview: result.payload?.choices?.[0]?.message?.content || "连接成功" };
-});
 ipcMain.handle("provider:presets", () => listProviderPresets());
 ipcMain.handle("provider:test", async (_e, provider) => testProviderConnectivity(provider));
 ipcMain.handle("provider-health:list", () => getProviderHealthMonitor().snapshot());
@@ -2366,20 +2187,6 @@ async function discoverModelsForProvider(provider) {
   const preset = providerPresetFor({ ...provider, ...probe, authMode: provider.authMode });
   const hints = presetModelHints(preset);
   const presetModels = Array.from(hints.values()).map((model) => normalizeHintModel(model));
-  // Cursor AgentService has no compatible /models endpoint. Read the local
-  // Cursor Desktop picker instead; it reflects the signed-in user's currently
-  // enabled models without sending credentials or probing every model.
-  if (isCursorSubscriptionProvider(probe)) {
-    const localCatalog = readLocalCursorModelCatalog();
-    if (localCatalog.ok) return { ok: true, url: "cursor-desktop:local-model-picker", models: localCatalog.models };
-    // The CLI is only a fallback. Its `--list-models` output contains the
-    // full reasoning/speed cross-product, while the Desktop picker exposes
-    // the actual base model identities and parameter capabilities.
-    const cliCatalog = cursorAgentCliModelCatalog();
-    if (cliCatalog.ok) return { ok: true, url: "cursor-agent-cli:local-model-catalog", models: cliCatalog.models };
-    if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: "未读取到本机 Cursor 模型目录，已显示内置兜底列表" };
-    return { ok: false, error: "未读取到本机 Cursor 模型目录" };
-  }
   // 无 /models 的内网网关：直接返回预制模型，避免先打失败接口
   if (preset?.preferPresetModels && presetModels.length) {
     return { ok: true, url: "preset:models", models: presetModels };
@@ -2979,8 +2786,8 @@ function buildImageDiagnostic(config, { model, clientId, includeImage }) {
     providerId: route.provider.id,
     upstreamModel: route.upstreamModel,
     supportsImages,
-    visionFallbackModelId: route.model.visionFallbackModelId || "",
-    expectedPath: supportsImages ? "direct" : (route.model.visionFallbackModelId ? "fallback" : "direct_unverified")
+    visionFallbackModelId: route.model.visionFallbackModelId || route.model.visionFallbackModelIds?.[0] || "",
+    expectedPath: supportsImages ? "direct" : ((route.model.visionFallbackModelId || route.model.visionFallbackModelIds?.length) ? "fallback" : "direct_unverified")
   };
 }
 
@@ -3241,27 +3048,6 @@ async function testProviderConnectivity(provider) {
     }
   }
   const apiFormat = probe.apiFormat || "openai_chat";
-  if (apiFormat === "cursor_subscription" || probe.providerType === "cursor_subscription") {
-    const cursorProvider = { ...normalizeCursorSubscriptionProvider(probe), enabled: true };
-    const result = await callCursorSubscription(cursorProvider, {
-      model: "auto",
-      stream: false,
-      messages: [{ role: "user", content: "Reply with OK." }]
-    });
-    return result.ok
-      ? {
-          ok: true,
-          status: result.status,
-          url: "cursor-agent-cli:local",
-          bodyPreview: `Cursor Agent CLI 文本链路测试成功：${result.payload?.choices?.[0]?.message?.content || "OK"}`
-        }
-      : {
-          ok: false,
-          status: result.status,
-          url: "cursor-agent-cli:local",
-          error: result.payload?.error?.message || "Cursor 订阅通道测试失败"
-        };
-  }
   if (apiFormat === "antigravity") {
     const token = String(probe._antigravityAccessToken || probe.apiKey || "").trim();
     const projectId = String(probe._antigravityProjectId || probe.projectId || probe.project || "").trim();

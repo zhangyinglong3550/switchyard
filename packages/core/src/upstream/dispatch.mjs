@@ -15,7 +15,6 @@
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
-import { callCursorSubscription } from "../cursor-subscription/client.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
@@ -152,7 +151,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   // Cursor subscription requests are single-account, quota-sensitive calls.
   // Retrying a 429 through the generic dispatcher both hides the original
   // upstream message and needlessly trips its lane circuit breaker.
-  const retryOpts = isAccountPoolProvider(provider) || provider?.apiFormat === "cursor_subscription"
+  const retryOpts = isAccountPoolProvider(provider)
     ? { ...opts, retry: { enabled: false } }
     : opts;
   const accountSessionKey = provider?.poolKind === "antigravity_oauth"
@@ -176,30 +175,6 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
   const upstreamOpts = { ...opts, proxyUrl: effectiveProxyUrl(provider, opts.proxyUrl) };
   const requestOverrides = collectRequestOverrides(provider, ctxModel);
   const upstreamOptsWithOverrides = applyHeaderOverrides(upstreamOpts, requestOverrides);
-
-  if (apiFormat === "cursor_subscription") {
-    const result = await callCursorSubscription(provider, { ...outbound, model: upstreamModel, stream }, {
-      keychain: upstreamOptsWithOverrides.cursorSubscriptionKeychain,
-      transport: upstreamOptsWithOverrides.cursorSubscriptionTransport,
-      signal: upstreamOptsWithOverrides.signal,
-      sensitiveGuard: upstreamOptsWithOverrides.sensitiveGuard,
-      onSensitiveAudit: upstreamOptsWithOverrides.onSensitiveAudit,
-      clientId: upstreamOptsWithOverrides.clientId,
-      sessionKey: upstreamOptsWithOverrides.sessionKey,
-      model: ctxModel
-    });
-    if (!result.ok) return withAccountMeta({ kind: "error", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-    if (stream) {
-      const upstream = Array.isArray(outbound.tools) && outbound.tools.length && !result.response.switchyardNativeToolCalls
-        ? transformOpenCodeTextToolCalls(result.response, {
-          tools: outbound.tools,
-          restoreToolName: (name) => ctx._switchyardToolNameSafeToRaw?.get(name) || name
-        })
-        : result.response;
-      return withAccountMeta({ kind: "stream", upstream, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-    }
-    return withAccountMeta({ kind: "json", status: result.status, payload: result.payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
-  }
 
   if (apiFormat === "antigravity") {
     const built = buildAntigravityEnvelope(provider, upstreamModel, outbound, upstreamOptsWithOverrides);

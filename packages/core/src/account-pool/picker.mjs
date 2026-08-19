@@ -33,12 +33,6 @@ export const POOL_KIND_META = {
     defaultBaseUrl: CODEX_API_BASE_URL,
     defaultApiFormat: "openai_responses",
     emptyHint: "账号池为空：请导入多份 Codex auth.json / refresh_token"
-  },
-  cursor_subscription: {
-    label: "Cursor 订阅",
-    defaultBaseUrl: "https://agentn.api5.cursor.sh",
-    defaultApiFormat: "cursor_subscription",
-    emptyHint: "账号池为空：请粘贴导入 Cursor 订阅 access token（email----…----userId::eyJ…）"
   }
 };
 
@@ -178,17 +172,6 @@ export async function ensureFreshAccount(account, {
   let current = account;
   if (kind === "codex_oauth" && isAgentIdentityAccount(current)) {
     return { ok: true, account: current, refreshed: false };
-  }
-  // Cursor 订阅号：access token 直接可用，没有 refresh 机制；过期时明确报错。
-  if (kind === "cursor_subscription") {
-    if (current.accessToken && !isAccessExpired(current, 0)) {
-      return { ok: true, account: current, refreshed: false };
-    }
-    return {
-      ok: false,
-      error: current.accessToken ? "cursor-access-token-expired" : "cursor-access-token-missing",
-      account: current
-    };
   }
   if (kind === "antigravity_oauth") {
     const cpaCredential = readAntigravityCpaCredential(account, {
@@ -419,26 +402,6 @@ export function bindProviderToAccount(provider, account) {
       _accountEmail: account.email || "",
       _antigravityAccessToken: account.accessToken,
       _antigravityProjectId: account.projectId || provider.projectId || provider.project || ""
-    };
-  }
-
-  // Cursor 订阅多号：每个账号一个 access token，统一复用本机 machine id。
-  // 绑定后的 provider 走原生 cursor_subscription 通道（HTTP2），禁用 CLI。
-  if (kind === "cursor_subscription") {
-    return {
-      ...provider,
-      authMode: "cursor_subscription",
-      providerType: "cursor_subscription",
-      apiFormat: provider.apiFormat || "cursor_subscription",
-      baseUrl: provider.baseUrl || meta.defaultBaseUrl,
-      apiKey: undefined,
-      apiKeyEnv: undefined,
-      enabled: provider.enabled !== false,
-      _accountPool: true,
-      _accountId: account.id,
-      _accountEmail: account.email || "",
-      _cursorAccessToken: account.accessToken,
-      _cursorMachineId: account.machineId || ""
     };
   }
 

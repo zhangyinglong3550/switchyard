@@ -81,32 +81,40 @@ test("mergeWithDefaults collapses persisted reasoning variants into one Agent-se
   assert.ok(cfg.models[1].aliases.includes("gemini-3.6-flash-low"));
 });
 
-test("mergeWithDefaults collapses Cursor CLI reasoning and speed variants into the desktop model identity", () => {
+test("mergeWithDefaults drops retired Cursor subscription providers and their models", () => {
   const cfg = mergeWithDefaults({
-    providers: [{ id: "cursor", providerType: "cursor_subscription", baseUrl: "https://agentn.api5.cursor.sh", enabled: true }],
+    providers: [
+      { id: "cursor", providerType: "cursor_subscription", baseUrl: "https://agentn.api5.cursor.sh", enabled: true },
+      { id: "cursor-pool", presetId: "cursor-subscription-account-pool", authMode: "account_pool", poolKind: "cursor_subscription", apiFormat: "cursor_subscription", enabled: true },
+      { id: "ok", apiFormat: "openai_chat", baseUrl: "http://x" }
+    ],
     models: [
-      { id: "cursor/cursor-grok-4.5-low", providerId: "cursor", upstreamModel: "cursor-grok-4.5-low", displayName: "Cursor Grok 4.5 Low" },
-      { id: "cursor/cursor-grok-4.5-high-fast", providerId: "cursor", upstreamModel: "cursor-grok-4.5-high-fast", displayName: "Cursor Grok 4.5 Fast" }
+      { id: "cursor/grok-4.5", providerId: "cursor", upstreamModel: "grok-4.5" },
+      { id: "cursor-pool/claude-opus-5", providerId: "cursor-pool", upstreamModel: "claude-opus-5" },
+      { id: "ok/gpt", providerId: "ok", upstreamModel: "gpt" }
     ]
   });
-  assert.deepEqual(cfg.models.map((model) => ({
-    id: model.id,
-    upstreamModel: model.upstreamModel,
-    displayName: model.displayName,
-    aliases: model.aliases
-  })), [{
-    id: "cursor/grok-4.5",
-    upstreamModel: "grok-4.5",
-    displayName: "Cursor Grok 4.5",
-    aliases: [
-      "cursor/cursor-grok-4.5-low",
-      "cursor-grok-4.5-low",
-      "cursor/cursor-grok-4.5-high-fast",
-      "cursor-grok-4.5-high-fast",
-      "cursor/grok-4.5",
-      "grok-4.5"
+  assert.deepEqual(cfg.providers.map((provider) => provider.id), ["ok"]);
+  assert.deepEqual(cfg.models.map((model) => model.id), ["ok/gpt"]);
+});
+
+test("mergeWithDefaults drops retired Antigravity CLIProxyAPI providers and their models", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "antigravity", presetId: "antigravity-cli2api", apiFormat: "openai_chat", baseUrl: "http://127.0.0.1:8317/v1", enabled: true },
+      { id: "cliproxy", apiFormat: "openai_chat", baseUrl: "http://localhost:8317/v1", enabled: true },
+      { id: "antigravity-pool", presetId: "antigravity-account-pool", apiFormat: "antigravity", baseUrl: "https://daily-cloudcode-pa.googleapis.com", enabled: true },
+      { id: "ok", apiFormat: "openai_chat", baseUrl: "http://x" }
+    ],
+    models: [
+      { id: "antigravity/gemini-3-flash", providerId: "antigravity", upstreamModel: "gemini-3-flash" },
+      { id: "cliproxy/claude-sonnet-4-6", providerId: "cliproxy", upstreamModel: "claude-sonnet-4-6" },
+      { id: "antigravity-pool/gemini-3.6-flash", providerId: "antigravity-pool", upstreamModel: "gemini-3.6-flash" },
+      { id: "ok/gpt", providerId: "ok", upstreamModel: "gpt" }
     ]
-  }]);
+  });
+  assert.deepEqual(cfg.providers.map((provider) => provider.id), ["antigravity-pool", "ok"]);
+  assert.deepEqual(cfg.models.map((model) => model.id), ["antigravity-pool/gemini-3.6-flash", "ok/gpt"]);
 });
 
 test("validateConfig rejects duplicate provider id", () => {
@@ -117,49 +125,6 @@ test("validateConfig rejects duplicate provider id", () => {
     ]
   });
   assert.throws(() => validateConfig(cfg), /Duplicate provider/);
-});
-
-test("mergeWithDefaults keeps cursor_subscription account pool provider intact", () => {
-  const cfg = mergeWithDefaults({
-    providers: [
-      {
-        id: "cursor-pool",
-        presetId: "cursor-subscription-account-pool",
-        authMode: "account_pool",
-        poolKind: "cursor_subscription",
-        apiFormat: "cursor_subscription",
-        enabled: true
-      }
-    ],
-    models: []
-  });
-  const provider = cfg.providers[0];
-  assert.equal(provider.providerType, "account_pool");
-  assert.equal(provider.authMode, "account_pool");
-  assert.equal(provider.poolKind, "cursor_subscription");
-  assert.equal(provider.apiFormat, "cursor_subscription");
-  assert.equal(provider.baseUrl, "https://agentn.api5.cursor.sh");
-});
-
-test("mergeWithDefaults keeps single Cursor subscription bridge provider intact", () => {
-  const cfg = mergeWithDefaults({
-    providers: [
-      {
-        id: "cursor-subscription",
-        presetId: "cursor-subscription",
-        authMode: "cursor_subscription",
-        providerType: "cursor_subscription",
-        apiFormat: "cursor_subscription",
-        baseUrl: "https://agentn.api5.cursor.sh",
-        enabled: true
-      }
-    ],
-    models: []
-  });
-  const provider = cfg.providers[0];
-  assert.equal(provider.authMode, "keychain");
-  assert.equal(provider.poolKind, undefined);
-  assert.equal(provider.apiFormat, "cursor_subscription");
 });
 
 test("validateConfig rejects unsupported apiFormat", () => {
@@ -402,6 +367,20 @@ test("mergeWithDefaults corrects known text-only models misclassified as multimo
   const vision = cfg.models.find((item) => item.id === "xiaomi-mimo/mimo-v2.5");
   assert.equal(vision.capabilities.images, true);
   assert.equal(vision.capabilities.multimodal, true);
+});
+
+test("mergeWithDefaults keeps native image routes for models that already support vision", () => {
+  const cfg = mergeWithDefaults({
+    providers: [
+      { id: "xiaomi-mimo", name: "Xiaomi MiMo", apiFormat: "openai_chat", baseUrl: "https://api.xiaomimimo.com/v1" }
+    ],
+    models: [
+      { id: "xiaomi-mimo/mimo-v2.5", providerId: "xiaomi-mimo", upstreamModel: "mimo-v2.5", capabilities: { text: true, stream: true, images: true } }
+    ]
+  });
+  const vision = cfg.models.find((item) => item.id === "xiaomi-mimo/mimo-v2.5");
+  assert.equal(vision.capabilities.images, true);
+  assert.equal(vision.visionFallbackModelId, undefined);
 });
 
 test("initConfig/loadConfig/saveConfig round trip in tempdir", () => {

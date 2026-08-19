@@ -1,5 +1,3 @@
-import { CURSOR_SUBSCRIPTION_STATIC_MODELS } from "./cursor-subscription/model-catalog.mjs";
-
 const CODEX_CHAT_REASONING = {
   deepseek: {
     supportsThinking: true,
@@ -656,26 +654,6 @@ export const PROVIDER_PRESETS = [
     ]
   },
   {
-    id: "antigravity-cli2api",
-    label: "Antigravity（外挂 CLIProxyAPI）",
-    providerId: "antigravity",
-    name: "Antigravity CLI2API",
-    apiFormat: "openai_chat",
-    baseUrl: "http://127.0.0.1:8317/v1",
-    authModes: ["api_key"],
-    defaultAuthMode: "api_key",
-    apiKeyEnv: "CLIPROXY_API_KEY",
-    dashboardUrl: "https://github.com/router-for-me/CLIProxyAPI",
-    note: "外挂模式：号池与协议翻译都在 CLIProxyAPI。默认端口 8317，Key 与 cliproxy config 中 api-keys 一致。",
-    models: [
-      { id: "gemini-3.1-flash-lite", displayName: "Gemini 3.1 Flash Lite", contextWindow: 1000000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gemini-3-flash", displayName: "Gemini 3 Flash", contextWindow: 1000000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "gemini-3.5-flash-low", displayName: "Gemini 3.5 Flash Low", contextWindow: 1000000, capabilities: { tools: true, stream: true } },
-      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6（via Antigravity）", contextWindow: 200000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },
-      { id: "claude-opus-4-6-thinking", displayName: "Claude Opus 4.6 Thinking（via Antigravity）", contextWindow: 200000, capabilities: { reasoning: true, tools: true, stream: true } }
-    ]
-  },
-  {
     id: "antigravity-account-pool",
     label: "Antigravity（OpenAI 接入）",
     providerId: "antigravity-pool",
@@ -800,46 +778,6 @@ export const PROVIDER_PRESETS = [
     ]
   },
   {
-    id: "cursor-subscription",
-    label: "Cursor 订阅桥接",
-    providerId: "cursor-subscription",
-    name: "Cursor 订阅桥接",
-    providerType: "cursor_subscription",
-    apiFormat: "cursor_subscription",
-    baseUrl: "https://agentn.api5.cursor.sh",
-    authModes: ["cursor_subscription"],
-    defaultAuthMode: "cursor_subscription",
-    enabled: true,
-    maxConcurrentRequests: 2,
-    streamIdleTimeoutMs: 90000,
-    riskLevel: "high",
-    riskNote: "仅个人本机使用的 Cursor 订阅桥接。凭据仅保存在本机系统安全存储；不要共享账号、远程暴露或多账号轮换。",
-    note: "支持文本流式对话和 OpenAI function 工具调用。模型目录提供当前 Cursor Desktop 常用模型；可用范围仍取决于本机 Cursor 账号。",
-    preferPresetModels: true,
-    models: CURSOR_SUBSCRIPTION_STATIC_MODELS
-  },
-  {
-    id: "cursor-subscription-account-pool",
-    label: "Cursor 订阅账号池",
-    providerId: "cursor-subscription",
-    name: "Cursor 订阅账号池",
-    providerType: "cursor_subscription",
-    apiFormat: "cursor_subscription",
-    baseUrl: "https://agentn.api5.cursor.sh",
-    authModes: ["account_pool"],
-    defaultAuthMode: "account_pool",
-    poolKind: "cursor_subscription",
-    poolStrategy: "weighted_round_robin",
-    enabled: true,
-    maxConcurrentRequests: 2,
-    streamIdleTimeoutMs: 90000,
-    riskLevel: "high",
-    riskNote: "多账号轮换的 Cursor 订阅桥接。凭据仅保存在本机 ~/.switchyard/pools/；统一复用本机 machine id，Cursor 端可能因此风控。请遵守 Cursor 服务条款。",
-    note: "粘贴导入 Cursor 订阅号（email----…----userId::eyJ…），加权轮询 + 失败换号。保存供应商后在「账号池」面板管理账号。",
-    preferPresetModels: true,
-    models: CURSOR_SUBSCRIPTION_STATIC_MODELS
-  },
-  {
     id: "custom-openai",
     label: "自定义 OpenAI-compatible",
     providerId: "custom",
@@ -868,7 +806,6 @@ export const AUTH_MODE_LABELS = {
   codex_oauth: "Codex OAuth（复用 codex login）",
   anthropic_oauth: "Anthropic 官方（复用 Claude Code 登录）",
   account_pool: "账号池（多账号）",
-  cursor_subscription: "Cursor 订阅桥接",
   none: "无需认证"
 };
 

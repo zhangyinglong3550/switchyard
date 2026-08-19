@@ -363,6 +363,23 @@ function firstNumber(...values) {
   return 0;
 }
 
+export function isCodexUiSidecarRequest(body) {
+  const text = [
+    typeof body?.instructions === "string" ? body.instructions : "",
+    typeof body?.input === "string" ? body.input : "",
+    ...(Array.isArray(body?.input) ? body.input.map((item) => contentToText(item?.content ?? item?.text ?? "")) : []),
+    ...(Array.isArray(body?.messages) ? body.messages.map((item) => contentToText(item?.content)) : [])
+  ].join("\n");
+  return text.includes("provide a short title for a task")
+    || text.includes("one-line activity update displayed beneath an existing Codex task title");
+}
+
+export function requestedModelForClient(config, clientId, body) {
+  const raw = String(body?.model || "").trim();
+  if (clientId !== "codex" || !isCodexUiSidecarRequest(body)) return raw;
+  return String(config?.clients?.codex?.defaultModel || config?.defaultModel || raw).trim();
+}
+
 function recordRoute(record, route, requestedModel) {
   if (!record) return;
   record.requestedModel = requestedModel || "";
@@ -1055,7 +1072,7 @@ function resolveRequestRoute(config, requestedModel, clientId, requestRecord, em
 
 async function handleChat(config, req, res, clientId, emit, requestRecord, withDispatchOpts = dispatchOptsFromReq) {
   const body = await readJsonBody(req);
-  const route = resolveRequestRoute(config, body.model || "", clientId, requestRecord, emit);
+  const route = resolveRequestRoute(config, requestedModelForClient(config, clientId, body), clientId, requestRecord, emit);
   if (!route) {
     emitRequestError(requestRecord, body.model, `No route for model ${body.model || "(empty)"}`);
     json(res, 400, { error: `No route for model ${body.model || "(empty)"}` });
@@ -1069,7 +1086,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord, withD
   }
   let chatBody = { ...body, _modelId: route.model.id };
   recordPrompt(requestRecord, chatBody.messages);
-  chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
+  chatBody = await applyVisionFallback(config, route, chatBody, { clientId, emit });
   setVisionHeader(res, chatBody);
   recordRequestSummary(requestRecord, chatBody, route, "openai_chat", config);
   emitTraceStart(emit, requestRecord);
@@ -1147,7 +1164,7 @@ async function handleChat(config, req, res, clientId, emit, requestRecord, withD
 
 async function handleResponses(config, req, res, clientId, emit, requestRecord, withDispatchOpts = dispatchOptsFromReq) {
   const body = await readJsonBody(req);
-  const route = resolveRequestRoute(config, body.model || "", clientId, requestRecord, emit);
+  const route = resolveRequestRoute(config, requestedModelForClient(config, clientId, body), clientId, requestRecord, emit);
   if (!route) {
     emitRequestError(requestRecord, body.model, `No route for model ${body.model || "(empty)"}`);
     json(res, 400, { error: `No route for model ${body.model || "(empty)"}` });
@@ -1241,7 +1258,7 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
   let chatBody = { ...responsesToChat(body, route.upstreamModel), _modelId: route.model.id };
   const namespaceMap = extractNamespaceMap(body.tools);
   recordPrompt(requestRecord, chatBody.messages);
-  chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
+  chatBody = await applyVisionFallback(config, route, chatBody, { clientId, emit });
   setVisionHeader(res, chatBody);
   recordRequestSummary(requestRecord, chatBody, route, "openai_responses", config);
   emitTraceStart(emit, requestRecord);
@@ -1272,10 +1289,10 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
         });
       }
     }
-    // Antigravity and Cursor subscription are normalized to Chat SSE by
-    // dispatch, so they can use the same lossless Chat -> Responses bridge as
+    // Antigravity is normalized to Chat SSE by
+    // dispatch, so it can use the same lossless Chat -> Responses bridge as
     // OpenAI-compatible providers.
-    if (apiFormat !== "openai_chat" && apiFormat !== "antigravity" && apiFormat !== "cursor_subscription") {
+    if (apiFormat !== "openai_chat" && apiFormat !== "antigravity") {
       const fallback = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: false }, withDispatchOpts(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
       recordDispatchCompatibility(requestRecord, fallback);
       if (fallback.kind === "error") {
@@ -1399,6 +1416,10 @@ function streamChatPayloadAsSse(res, payload, requestedModel) {
   };
   // 起始 chunk
   writeChunk({ role: "assistant", content: "" });
+  const reasoning = typeof message.reasoning_content === "string" && message.reasoning_content
+    ? message.reasoning_content
+    : (typeof message.reasoning === "string" ? message.reasoning : "");
+  if (reasoning) writeChunk({ reasoning_content: reasoning, reasoning });
   // 文本内容
   const text = contentToText(message.content);
   if (text) writeChunk({ content: text });
@@ -1511,7 +1532,7 @@ function isChatMeaningfulEvent(parsed) {
   return Array.isArray(parsed?.choices) && parsed.choices.some((choice) => {
     const delta = choice?.delta || {};
     return choice?.message || choice?.text || choice?.finish_reason != null ||
-      Boolean(delta.content || delta.reasoning_content || delta.tool_calls?.length || delta.function_call);
+      Boolean(delta.content || delta.reasoning_content || delta.reasoning || delta.tool_calls?.length || delta.function_call);
   });
 }
 
@@ -1872,7 +1893,7 @@ function writeStreamError(res, err, { protocol = "", model = "" } = {}) {
 
 async function handleAnthropicMessages(config, req, res, clientId, emit, requestRecord, withDispatchOpts = dispatchOptsFromReq) {
   const body = await readJsonBody(req);
-  const route = resolveRequestRoute(config, body.model || "", clientId, requestRecord, emit);
+  const route = resolveRequestRoute(config, requestedModelForClient(config, clientId, body), clientId, requestRecord, emit);
   if (!route) {
     emitRequestError(requestRecord, body.model, `No route for model ${body.model || "(empty)"}`);
     json(res, 400, { error: `No route for model ${body.model || "(empty)"}` });
@@ -1886,7 +1907,7 @@ async function handleAnthropicMessages(config, req, res, clientId, emit, request
   }
   let chatBody = { ...anthropicToChat(body, route.upstreamModel), _modelId: route.model.id };
   recordPrompt(requestRecord, chatBody.messages);
-  chatBody = await applyVisionFallback(config, route, chatBody, { clientId });
+  chatBody = await applyVisionFallback(config, route, chatBody, { clientId, emit });
   setVisionHeader(res, chatBody);
   recordRequestSummary(requestRecord, chatBody, route, "anthropic_messages", config);
   maybeCaptureClaudeDebugRequest(requestRecord, body, route, "anthropic_messages");

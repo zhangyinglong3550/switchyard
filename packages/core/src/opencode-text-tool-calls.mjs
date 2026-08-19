@@ -9,7 +9,6 @@
 import crypto from "node:crypto";
 import { SseParser } from "./sse-parser.mjs";
 
-const OPEN_TAG = "<tool_calls>";
 const CLOSE_TAG = "</tool_calls>";
 
 function normalizeToken(value) {
@@ -23,14 +22,6 @@ function normalizeToken(value) {
 function contentOf(xml, tag) {
   const matched = new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`, "i").exec(xml);
   return matched ? matched[1].trim() : "";
-}
-
-function longestOpenTagPrefix(value) {
-  const max = Math.min(value.length, OPEN_TAG.length - 1);
-  for (let size = max; size > 0; size -= 1) {
-    if (OPEN_TAG.startsWith(value.slice(-size))) return size;
-  }
-  return 0;
 }
 
 function buildToolIndex(tools, restoreToolName) {
@@ -154,6 +145,55 @@ function parseNamedParameters(xml) {
   return Object.keys(args).length ? JSON.stringify(args) : "{}";
 }
 
+function parseChildTagArguments(xml) {
+  const args = {};
+  const regex = /<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/g;
+  let matched;
+  while ((matched = regex.exec(xml))) {
+    if (["tool_call", "to_mcp", "arguments", "tool_call_params", "parameter"].includes(matched[1])) continue;
+    args[matched[1]] = xmlUnescape(matched[2]).trim();
+  }
+  return Object.keys(args).length ? JSON.stringify(args) : "{}";
+}
+
+function firstLineToolName(body) {
+  const first = String(body || "").replace(/^\s+/, "").split(/\n/, 1)[0].trim();
+  return /^[\w./:-]+$/.test(first) ? first : "";
+}
+
+function stripTranscriptNoise(text) {
+  return String(text || "")
+    .replace(/<\/assistant</gi, "</assistant>\n<")
+    .replace(/<\/?assistant_tool_calls\b[^>]*>/gi, "")
+    .replace(/<tool_result\b[\s\S]*?<\/tool_result>/gi, "")
+    .replace(/<\/tool_calls?>/gi, "")
+    .replace(/<\/?assistant\b[^>]*>/gi, "")
+    .replace(/<\/assistant/gi, "");
+}
+
+function findToolMarkup(buffer) {
+  // 必须是开标签。`</tool_call>` 含有子串 `<tool_call`，旧实现会误当成新块起点。
+  const matched = /<(tool_calls?)\b/i.exec(buffer);
+  if (!matched) return null;
+  return {
+    start: matched.index,
+    close: matched[1].toLowerCase() === "tool_calls" ? CLOSE_TAG : "</tool_call>"
+  };
+}
+
+const HOLD_TAGS = ["<tool_calls>", "<tool_call>", "<tool_result>", "<assistant_tool_calls>"];
+
+function longestHoldPrefix(value) {
+  let keep = 0;
+  for (const tag of HOLD_TAGS) {
+    const max = Math.min(value.length, tag.length - 1);
+    for (let size = max; size > 0; size -= 1) {
+      if (tag.startsWith(value.slice(-size))) keep = Math.max(keep, size);
+    }
+  }
+  return keep;
+}
+
 function makeToolCall(name, argumentsText) {
   return {
     id: `call_${crypto.randomUUID()}`,
@@ -179,16 +219,22 @@ function parseToolCalls(xml, index) {
   const named = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
   let matched;
   while ((matched = named.exec(xml))) {
-    const rawName = xmlAttributes(matched[1]).name;
-    if (!rawName) continue; // This is the nested <tool_call> from <to_mcp>.
-    const name = resolveDirectToolName(rawName, index);
-    if (!name) continue;
-    const body = matched[2];
+    let rawName = xmlAttributes(matched[1]).name;
+    let body = matched[2];
+    if (!rawName) {
+      rawName = firstLineToolName(body);
+      if (rawName) body = body.replace(/^\s+/, "").split(/\n/).slice(1).join("\n");
+    }
+    if (!rawName) continue;
+    const name = resolveDirectToolName(rawName, index) || rawName;
     const rawArguments = contentOf(body, "tool_call_params") || contentOf(body, "arguments");
-    calls.push(makeToolCall(
-      name,
-      rawArguments ? parseArguments(rawArguments) : parseNamedParameters(body)
-    ));
+    const args = rawArguments
+      ? parseArguments(rawArguments)
+      : (() => {
+        const namedArgs = parseNamedParameters(body);
+        return namedArgs === "{}" ? parseChildTagArguments(body) : namedArgs;
+      })();
+    calls.push(makeToolCall(name, args));
   }
   return calls;
 }
@@ -200,6 +246,7 @@ class TextToolCallDecoder {
     this.toolBuffer = "";
     this.inToolCall = false;
     this.sawToolCall = false;
+    this.closeTag = CLOSE_TAG;
   }
 
   push(text) {
@@ -209,29 +256,28 @@ class TextToolCallDecoder {
       this.buffer = "";
     }
     const out = { text: "", toolCalls: [] };
-    // A complete <tool_calls> block is often emitted inside one SSE delta.
-    // Continue while `inToolCall` is true so that, after moving `buffer` into
-    // `toolBuffer`, we also inspect that same delta for its closing tag.
+    // A complete <tool_calls> / <tool_call> block is often emitted inside one SSE delta.
     while (this.buffer || this.inToolCall) {
       if (!this.inToolCall) {
-        const start = this.buffer.indexOf(OPEN_TAG);
-        if (start < 0) {
-          const keep = longestOpenTagPrefix(this.buffer);
-          out.text += this.buffer.slice(0, this.buffer.length - keep);
+        const mark = findToolMarkup(this.buffer);
+        if (!mark) {
+          const keep = longestHoldPrefix(this.buffer);
+          out.text += stripTranscriptNoise(this.buffer.slice(0, this.buffer.length - keep));
           this.buffer = keep ? this.buffer.slice(-keep) : "";
           break;
         }
-        out.text += this.buffer.slice(0, start);
-        this.toolBuffer = this.buffer.slice(start);
+        out.text += stripTranscriptNoise(this.buffer.slice(0, mark.start));
+        this.toolBuffer = this.buffer.slice(mark.start);
+        this.closeTag = mark.close;
         this.buffer = "";
         this.inToolCall = true;
         continue;
       }
 
-      const end = this.toolBuffer.indexOf(CLOSE_TAG);
+      const end = this.toolBuffer.indexOf(this.closeTag);
       // Wait for the next SSE delta when the XML is split across chunks.
       if (end < 0) break;
-      const complete = this.toolBuffer.slice(0, end + CLOSE_TAG.length);
+      const complete = this.toolBuffer.slice(0, end + this.closeTag.length);
       const calls = parseToolCalls(complete, this.index);
       if (calls.length) {
         this.sawToolCall = true;
@@ -241,25 +287,29 @@ class TextToolCallDecoder {
         // deleting model output.
         out.text += complete;
       }
-      this.buffer = this.toolBuffer.slice(end + CLOSE_TAG.length);
+      this.buffer = this.toolBuffer.slice(end + this.closeTag.length);
       this.toolBuffer = "";
       this.inToolCall = false;
     }
+    out.text = stripTranscriptNoise(out.text);
     return out;
   }
 
   flush() {
     if (this.inToolCall) {
-      const text = this.toolBuffer + this.buffer;
       this.toolBuffer = "";
       this.buffer = "";
       this.inToolCall = false;
-      return { text, toolCalls: [] };
+      return { text: "", toolCalls: [] };
     }
-    const text = this.buffer;
+    const text = stripTranscriptNoise(this.buffer);
     this.buffer = "";
     return { text, toolCalls: [] };
   }
+}
+
+export function createTextToolCallDecoder(tools = [], restoreToolName = (name) => name) {
+  return new TextToolCallDecoder(buildToolIndex(tools, restoreToolName));
 }
 
 function choiceWithDelta(event, choiceIndex, delta, finishReason = undefined) {

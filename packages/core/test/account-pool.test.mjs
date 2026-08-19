@@ -688,34 +688,3 @@ test("picker · expired cooldown is conservatively recovered as degraded", async
   assert.equal(account.health, "degraded");
   assert.equal(account.modelHealth.m.health, "degraded");
 });
-
-test("picker · cursor_subscription pool binds access token and local machine id", async (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "switchyard-cursor-bind-"));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const SAMPLE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHx1c2VyXzAxS1pNV0RQWEQzUEdKV0M4SlZaRTMyOTZOIiwidGltZSI6IjE3ODY0ODYzNTYiLCJyYW5kb21uZXNzIjoiMzM4OGZkZGItMjk4ZC00YWQxIiwiZXhwIjoxNzkxNjcwMzU2LCJpc3MiOiJodHRwczovL2F1dGhlbnRpY2F0aW9uLmN1cnNvci5zaCIsInNjb3BlIjoib3BlbmlkIHByb2ZpbGUgZW1haWwgb2ZmbGluZV9hY2Nlc3MiLCJhdWQiOiJodHRwczovL2N1cnNvci5jb20iLCJ0eXBlIjoid2ViIiwid29ya29zU2Vzc2lvbklkIjoic2Vzc2lvbl8wMUtaU0U0WTJRWlEwMERNQjRLOVY0V0M4USJ9.m5aq8RjsqUwTGJtTgq6mEqsZm2CFBZ7iMpH5RD3r79Y";
-  upsertAccounts("cursor-pool", [
-    { email: "a@example.com", accessToken: SAMPLE_JWT, machineId: "mach-local", sub: "user_01KZMWDPXD3PGJWC8JVZE3296N" }
-  ], { poolKind: "cursor_subscription", home });
-  const pool = loadPool("cursor-pool", { poolKind: "cursor_subscription", home });
-  assert.equal(pool.accounts.length, 1);
-
-  const provider = { id: "cursor-pool", authMode: "account_pool", poolKind: "cursor_subscription", apiFormat: "cursor_subscription", enabled: true };
-  assert.equal(isAccountPoolProvider(provider), true);
-  assert.equal(poolKindOf(provider), "cursor_subscription");
-
-  // ensureFreshAccount：cursor 账号 access 未过期直接可用，不触发 refresh
-  const fresh = await ensureFreshAccount(pool.accounts[0], { provider, home });
-  assert.equal(fresh.ok, true);
-  assert.equal(fresh.account.accessToken, SAMPLE_JWT);
-
-  const bound = bindProviderToAccount(provider, pool.accounts[0]);
-  assert.equal(bound._accountPool, true);
-  assert.equal(bound.apiFormat, "cursor_subscription");
-  assert.equal(bound.providerType, "cursor_subscription");
-  assert.equal(bound.authMode, "cursor_subscription");
-  assert.equal(bound._cursorAccessToken, SAMPLE_JWT);
-  assert.equal(bound._cursorMachineId, "mach-local");
-  assert.equal(bound._accountEmail, "a@example.com");
-  // 绑定后不再视为池
-  assert.equal(isAccountPoolProvider(bound), false);
-});

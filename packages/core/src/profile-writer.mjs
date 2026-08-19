@@ -375,10 +375,6 @@ function isOfficialCodexModel({ providerId, upstreamModel }) {
 }
 
 function supportsCodexPriorityTier({ providerId, providerApiFormat, upstreamModel }) {
-  // Cursor exposes its acceleration as the `fast` picker parameter. Codex's
-  // Agent UI calls the equivalent choice `priority`; the subscription bridge
-  // maps it back to Cursor's local parameter without creating fake model IDs.
-  if (providerApiFormat === "cursor_subscription") return true;
   if (!/^(codex|openai|official-gpt)$/i.test(String(providerId || ""))) return false;
   const model = String(upstreamModel || "").toLowerCase();
   if (!/^gpt-5(?:$|[._-])/.test(model)) return false;
@@ -474,7 +470,7 @@ function codexCatalogModelFrom(model, index = 0, options = {}) {
   const slug = codexCatalogSlugForModel(model, options);
   if (!slug) return null;
   const contextWindow = Number.isFinite(model?.contextWindow) ? model.contextWindow : CODEX_MODEL_TEMPLATE.context_window;
-  const hasVisionFallback = Boolean(model?.visionFallbackModelId);
+  const hasVisionFallback = Boolean(model?.visionFallbackModelId || model?.visionFallbackModelIds?.length);
   const supportsImages = Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || hasVisionFallback);
   const providerId = String(model?.providerId || "").trim();
   const upstreamModel = String(model?.upstreamModel || slug).trim();
@@ -496,7 +492,7 @@ function codexCatalogModelFrom(model, index = 0, options = {}) {
     "x-switchyard-model-id": String(model?.id || "").trim(),
     "x-switchyard-provider": providerId,
     "x-switchyard-upstream-model": upstreamModel,
-    "x-switchyard-vision-fallback-model": model?.visionFallbackModelId || ""
+    "x-switchyard-vision-fallback-model": model?.visionFallbackModelId || model?.visionFallbackModelIds?.[0] || ""
   };
 }
 
@@ -1126,6 +1122,7 @@ export function buildOpenCodeModelsMap(models = []) {
       model?.capabilities?.images
       || model?.capabilities?.multimodal
       || model?.visionFallbackModelId
+      || model?.visionFallbackModelIds?.length
     );
     // OpenCode checks attachment/modalities before it calls the provider. If
     // these fields are omitted it rejects ACP/CLI image attachments locally,
@@ -1149,6 +1146,7 @@ export function renderOpenCodeCapabilityPlugin(models = []) {
       model?.capabilities?.images
       || model?.capabilities?.multimodal
       || model?.visionFallbackModelId
+      || model?.visionFallbackModelIds?.length
     );
     capabilities[id] = {
       tools: model?.capabilities?.tools !== false,
@@ -1310,7 +1308,9 @@ function deepSeekHarnessBaseUrl({ host, port } = {}) {
 }
 
 function modelSupportsImages(model) {
-  return Boolean(model?.capabilities?.images || model?.capabilities?.multimodal || model?.visionFallbackModelId);
+  // DSH 只声明真实视觉能力。描述桥不能伪装成原生多模态，否则会盖住
+  // dsh-vision-router 的「+ 自动识图」twin，并在插件与网关之间叠一次译图。
+  return Boolean(model?.capabilities?.images || model?.capabilities?.multimodal);
 }
 
 function modelSupportsReasoning(model) {

@@ -6,8 +6,7 @@ const PROTOCOLS = new Set([
   "openai_chat",
   "openai_responses",
   "anthropic_messages",
-  "antigravity",
-  "cursor_subscription"
+  "antigravity"
 ]);
 
 const PROFILES = {
@@ -24,10 +23,6 @@ const PROFILES = {
     features: { streaming: true, toolCalls: true, reasoning: true, nativeResponses: false, nativeAnthropic: true }
   },
   antigravity: {
-    canonicalProtocol: "openai_chat",
-    features: { streaming: true, toolCalls: true, reasoning: true, nativeResponses: false, nativeAnthropic: false }
-  },
-  cursor_subscription: {
     canonicalProtocol: "openai_chat",
     features: { streaming: true, toolCalls: true, reasoning: true, nativeResponses: false, nativeAnthropic: false }
   }

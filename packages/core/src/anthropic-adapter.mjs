@@ -11,6 +11,7 @@ import {
 import {
   SWITCHYARD_THINKING_KEY,
   cloneAnthropicThinkingBlocks,
+  extractReasoningFieldText,
   reasoningBlocksFromMessage,
   resolveReasoningEffortFromAnthropic
 } from "./reasoning.mjs";
@@ -71,7 +72,7 @@ export function anthropicToChat(body, upstreamModel) {
           messages.push({
             role: "tool",
             tool_call_id: r.tool_use_id || r.id || "",
-            content: contentToText(r.content)
+            content: contentToChatContent(r.content)
           });
         }
         if (textContent) messages.push({ role, content: textContent });
@@ -185,25 +186,52 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel, optio
   let streamError = null;
   let terminalSeen = false;
   let finishReason = null; // first non-null wins
+  let thinkingStarted = false;
+  let thinkingStopped = false;
+  let thinkingBlockIndex = -1;
   let textStarted = false;
   let textBlockStopped = false;
+  let textBlockIndex = -1;
   let nextBlockIndex = 0;
   const toolBlocks = new Map(); // delta.index -> { blockIndex, id, name, input }
 
-  const ensureTextBlock = () => {
-    if (!textStarted) {
-      textStarted = true;
+  const stopThinking = () => {
+    if (thinkingStarted && !thinkingStopped) {
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: thinkingBlockIndex });
+      thinkingStopped = true;
+    }
+  };
+
+  const ensureThinkingBlock = () => {
+    if (textStarted) return -1;
+    if (!thinkingStarted) {
+      thinkingStarted = true;
+      thinkingBlockIndex = nextBlockIndex++;
       writeEvent(res, "content_block_start", {
         type: "content_block_start",
-        index: 0,
+        index: thinkingBlockIndex,
+        content_block: { type: "thinking", thinking: "", signature: "" }
+      });
+    }
+    return thinkingBlockIndex;
+  };
+
+  const ensureTextBlock = () => {
+    stopThinking();
+    if (!textStarted) {
+      textStarted = true;
+      textBlockIndex = nextBlockIndex++;
+      writeEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index: textBlockIndex,
         content_block: { type: "text", text: "" }
       });
-      nextBlockIndex = Math.max(nextBlockIndex, 1);
     }
-    return 0;
+    return textBlockIndex;
   };
 
   const ensureToolBlock = (deltaTool) => {
+    stopThinking();
     const key = Number.isInteger(deltaTool?.index) ? deltaTool.index : 0;
     const existing = toolBlocks.get(key);
     if (existing) return existing;
@@ -254,12 +282,19 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel, optio
       terminalSeen = true;
     }
 
-    const deltaContent = delta.content;
-    const deltaReasoning = delta.reasoning_content;
-    let deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
-    if (!deltaText && typeof deltaReasoning === "string" && deltaReasoning.length > 0) {
-      deltaText = deltaReasoning;
+    const deltaReasoning = extractReasoningFieldText(delta);
+    if (deltaReasoning) {
+      const idx = ensureThinkingBlock();
+      if (idx >= 0) {
+        writeEvent(res, "content_block_delta", {
+          type: "content_block_delta",
+          index: idx,
+          delta: { type: "thinking_delta", thinking: deltaReasoning }
+        });
+      }
     }
+    const deltaContent = delta.content;
+    const deltaText = typeof deltaContent === "string" ? deltaContent : contentToText(deltaContent);
     if (deltaText) {
       const idx = ensureTextBlock();
       writeEvent(res, "content_block_delta", {
@@ -311,8 +346,9 @@ export async function streamChatAsAnthropic(upstream, res, requestedModel, optio
   }
 
   if (terminalSeen && !streamError) {
+    stopThinking();
     if (textStarted && !textBlockStopped) {
-      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+      writeEvent(res, "content_block_stop", { type: "content_block_stop", index: textBlockIndex });
       textBlockStopped = true;
     }
     finalizeToolBlocks();

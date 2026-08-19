@@ -43,7 +43,15 @@ function sanitizeStreamLine(line) {
     return null;
   }
   if (!isValidOpenAiChatChunk(parsed)) return null;
-  return line;
+  let changed = false;
+  for (const choice of parsed.choices) {
+    const delta = choice?.delta;
+    if (!delta || typeof delta !== "object" || !Object.prototype.hasOwnProperty.call(delta, "reasoning")) continue;
+    const { reasoning, ...rest } = delta;
+    choice.delta = rest;
+    changed = true;
+  }
+  return changed ? `data: ${JSON.stringify(parsed)}` : line;
 }
 
 export const grokProtocolStrictPatch = {

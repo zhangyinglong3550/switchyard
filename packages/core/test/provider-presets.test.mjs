@@ -138,17 +138,10 @@ test("provider presets · KE uses OpenAI chat and preset models without /models"
   assert.equal(byId.get("GLM-5.2").capabilities.images, false);
 });
 
-test("provider presets · Antigravity CLI2API and Sub2API native import integrations", () => {
+test("provider presets · Sub2API native import integrations", () => {
   const presets = listProviderPresets();
   const byId = new Map(presets.map((preset) => [preset.id, preset]));
-
-  const anti = byId.get("antigravity-cli2api");
-  assert.ok(anti, "missing antigravity-cli2api preset");
-  assert.equal(anti.apiFormat, "openai_chat");
-  assert.equal(anti.baseUrl, "http://127.0.0.1:8317/v1");
-  assert.equal(anti.defaultAuthMode, "api_key");
-  assert.ok(presetModelHints(anti).has("gemini-3.1-flash-lite"));
-  assert.ok(presetModelHints(anti).has("claude-sonnet-4-6"));
+  assert.equal(byId.has("antigravity-cli2api"), false);
 
   const sub = byId.get("sub2api-codex");
   assert.ok(sub, "missing sub2api-codex preset");
@@ -158,33 +151,4 @@ test("provider presets · Antigravity CLI2API and Sub2API native import integrat
   assert.equal(sub.poolKind, "codex_oauth");
   assert.ok(presetModelHints(sub).has("gpt-5.5"));
   assert.ok(presetModelHints(sub).has("gpt-5.4"));
-});
-
-test("provider presets · enable Cursor subscription bridge by default with explicit local-only warning", () => {
-  const cursor = providerPresetFor("cursor-subscription");
-  assert.ok(cursor);
-  assert.equal(cursor.providerType, "cursor_subscription");
-  assert.equal(cursor.apiFormat, "cursor_subscription");
-  assert.equal(cursor.defaultAuthMode, "cursor_subscription");
-  assert.equal(cursor.enabled, true);
-  assert.equal(cursor.maxConcurrentRequests, 2);
-  assert.equal(cursor.label, "Cursor 订阅桥接");
-  assert.equal(cursor.experimental, undefined);
-  assert.match(cursor.riskNote, /仅个人本机使用/);
-  assert.ok(cursor.models.length >= 8);
-  assert.ok(cursor.models.some((model) => model.id === "grok-4.5"));
-  assert.ok(cursor.models.some((model) => model.id === "gpt-5.6-sol"));
-});
-
-test("provider presets · cursor subscription account pool preset uses account_pool auth", () => {
-  const pool = providerPresetFor("cursor-subscription-account-pool");
-  assert.ok(pool);
-  assert.equal(pool.providerType, "cursor_subscription");
-  assert.equal(pool.apiFormat, "cursor_subscription");
-  assert.equal(pool.defaultAuthMode, "account_pool");
-  assert.deepEqual(pool.authModes, ["account_pool"]);
-  assert.equal(pool.poolKind, "cursor_subscription");
-  assert.equal(pool.baseUrl, "https://agentn.api5.cursor.sh");
-  assert.equal(pool.enabled, true);
-  assert.ok(pool.models.length >= 8);
 });

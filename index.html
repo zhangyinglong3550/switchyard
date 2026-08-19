@@ -228,7 +228,7 @@
               <input type="checkbox" id="sensitive-guard-enabled">
               <span>
                 <strong>发送前脱敏敏感信息</strong>
-                <div class="tiny muted">识别手机号、身份证、银行卡、邮箱、常见 API Key / Token、内网 IP 等，替换为占位符后再发给上游（含 Cursor 订阅）。</div>
+                <div class="tiny muted">识别手机号、身份证、银行卡、邮箱、常见 API Key / Token、内网 IP 等，替换为占位符后再发给上游。</div>
               </span>
             </label>
             <label class="import-provider-check" style="display:flex; gap:8px; align-items:flex-start;">
@@ -376,7 +376,6 @@
                   <option value="openai_responses">OpenAI Responses</option>
                   <option value="anthropic_messages">Anthropic Messages</option>
                   <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
-          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
                 </select>
               </label>
             </div>
@@ -1032,7 +1031,6 @@
           <option value="openai_responses">OpenAI Responses（Codex / 新版 OpenAI）</option>
           <option value="anthropic_messages">Anthropic Messages（Claude / Claude Code）</option>
           <option value="antigravity">OpenAI 接入（Antigravity 自动转换）</option>
-          <option value="cursor_subscription">Cursor 订阅桥接（本机 Cursor 登录）</option>
         </select>
       </label>
       <label>Base URL <input class="field" name="baseUrl" required placeholder="https://example.com/v1"></label>
@@ -1155,30 +1153,6 @@
           </div>
           <div class="tiny muted" style="margin-top:6px;">高级凭证写入 <code>~/.switchyard/oauth/</code>，不会覆盖 Claude Code 的 Keychain / .credentials.json。</div>
         </details>
-      </div>
-      <div class="callout" id="provider-cursor-subscription-panel" style="display:none;">
-        <div class="callout-title">Cursor 订阅桥接</div>
-        <div class="callout-body">仅个人本机使用。普通文本对话优先调用本机 Cursor Agent CLI（官方客户端路径、只读 Ask 模式），工具调用仍使用兼容桥接；凭据不会写入配置或日志。不要共享账号、不要远程暴露。</div>
-        <label style="margin-top:10px;"><input type="checkbox" name="cursorSubscriptionEnabled" id="provider-cursor-subscription-enabled" checked> 启用订阅桥接</label>
-        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
-          <button class="btn primary" type="button" id="btn-cursor-subscription-import-local">从本机已登录 Cursor 自动导入</button>
-          <span id="provider-cursor-local-status" class="tiny muted">正在检测本机 Cursor 登录态…</span>
-        </div>
-        <details style="margin-top:10px;"><summary class="tiny muted">无法自动导入？手动填写凭据</summary><div class="row" style="margin-top:8px;">
-          <label>访问凭据 <input class="field" id="provider-cursor-access-token" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
-          <label>本机标识 <input class="field" id="provider-cursor-machine-id" type="password" autocomplete="off" placeholder="仅保存到本机 Keychain"></label>
-        </div></details>
-        <div class="row">
-          <label>并发请求数<input class="field" name="maxConcurrentRequests" type="number" min="1" max="3" value="2"></label>
-          <label>流静默超时（毫秒）<input class="field" name="streamIdleTimeoutMs" type="number" min="60000" value="90000"></label>
-        </div>
-        <div id="provider-cursor-subscription-status" class="tiny muted" style="margin-top:8px;">未配置</div>
-        <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
-          <button class="btn primary" type="button" id="btn-cursor-subscription-connect">连接并安全保存</button>
-          <button class="btn" type="button" id="btn-cursor-subscription-test">测试连接</button>
-          <button class="btn" type="button" id="btn-cursor-subscription-show-creds">显示凭据</button>
-          <button class="btn" type="button" id="btn-cursor-subscription-clear">清除凭据</button>
-        </div>
       </div>
       <div class="callout" id="provider-account-pool-panel" style="display:none;">
         <div class="callout-title" id="provider-pool-title">账号池</div>

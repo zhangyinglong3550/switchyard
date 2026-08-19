@@ -2,6 +2,11 @@
 
 ## 2.3.4 — 2026-08-17
 
+### Removed
+
+- **Cursor 订阅供应商**：不再作为上游接入。Cursor 模型请在 Cursor 客户端内直接使用；旧配置里的 `cursor_subscription` 供应商会在加载时忽略。
+- **Antigravity 外挂 CLIProxyAPI**：去掉 `antigravity-cli2api` 预设（本机 8317）。原生 Antigravity 账号池仍直连 Google。
+
 ### Feat
 
 - **Cursor 订阅账号池**：新增 `cursor_subscription` 池类型与「Cursor 订阅账号池」预设，支持粘贴导入 `email----…----userId::JWT` / JSON / NDJSON，多号加权轮询、失败换号和逐号连接测试；导入账号统一复用本机 Cursor machine id，凭证仅保存到 `~/.switchyard/pools/cursor_subscription/`，不写入 `config.json`。
