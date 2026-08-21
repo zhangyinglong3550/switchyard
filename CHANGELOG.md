@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.5 — 2026-08-21
+
+### Fix
+
+- **用户显式选择推理等级时不再降级为 none**：`reasoning-state` 适配规则此前在「多轮历史缺失 thinking 块」时会无条件把 `reasoning.effort` 覆盖为 `none`。若用户明确选择了推理等级（`reasoning_effort` / `reasoning.effort` 非 off），或因模型能力/OpenRouter stealth 等强制推理模型不能被关闭时，现在均原样保留并发往上游，避免 Ox Alpha 等模型在第二问起收到 `none` 被上游 400。
+
 ## 2.3.4 — 2026-08-17
 
 ### Removed
