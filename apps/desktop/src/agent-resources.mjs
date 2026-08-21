@@ -74,6 +74,14 @@ export function agentDefinitions() {
       sessionRoots: ["~/.grok/sessions"],
       skillRoots: ["~/.grok/skills"],
       coreFiles: ["config.toml", "AGENTS.md"]
+    },
+    {
+      id: "deepseek-harness",
+      label: "DeepSeek Harness",
+      root: "~/.dsh",
+      sessionRoots: [],
+      skillRoots: ["~/.dsh/skills"],
+      coreFiles: ["settings.yaml"]
     }
   ].map((agent) => ({
     ...agent,
