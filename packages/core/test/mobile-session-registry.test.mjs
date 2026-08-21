@@ -258,6 +258,30 @@ test("registry accepts messages immediately, records visible state and runs the 
   ]);
 });
 
+test("registry keeps disk-index sessions running across list and detail reads", async (t) => {
+  const { registry } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  await registry.perform(sessionId, "sendMessage", { text: "继续", messageId: "m-live" }, "phone-1");
+  const listed = await registry.listSessions();
+  assert.equal(listed.find((row) => row.id === sessionId)?.state, "running");
+  const detail = await registry.readSession(sessionId);
+  assert.equal(detail.state, "running");
+});
+
+test("registry records the user bubble before awaiting setModel", async (t) => {
+  const { registry, ledger, runtime } = fixture(t);
+  let release;
+  runtime.setModel = () => new Promise((resolve) => { release = resolve; });
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  const result = await registry.perform(sessionId, "sendMessage", { text: "继续", messageId: "m-slow" }, "phone-1");
+  assert.equal(result.state, "running");
+  assert.deepEqual(ledger.list({ after: 0 }).map((event) => [event.type, event.summary]), [
+    ["message", "继续"],
+    ["status", "running"]
+  ]);
+  release();
+});
+
 test("registry persists image and arbitrary-file attachments across final history reloads", async (t) => {
   const { registry, runtime, calls, ledger } = fixture(t);
   const sessionId = encodeMobileSessionId("codex", "native-1");
@@ -488,6 +512,34 @@ test("registry exposes one-shot ACP approvals to mobile", async (t) => {
     "respond",
     42,
     { outcome: { outcome: "selected", optionId: "allow" } }
+  ]);
+  assert.equal(registry.listApprovals().length, 0);
+});
+
+test("registry exposes ACP approvals that only identify options by optionId", async (t) => {
+  const { registry, runtime, calls } = fixture(t);
+  runtime.emit({
+    sessionId: "native-1",
+    type: "approval",
+    summary: "等待操作审批",
+    requestId: 77,
+    request: {
+      method: "session/request_permission",
+      command: "git status --short",
+      options: [
+        { optionId: "allow_once", name: "Allow once" },
+        { optionId: "reject_once", name: "Reject" }
+      ]
+    }
+  });
+  const approvals = registry.listApprovals();
+  assert.equal(approvals.length, 1);
+  assert.deepEqual(approvals[0].actions, ["allow_once", "allow_session", "deny_once"]);
+  await registry.resolveApproval(approvals[0].id, "allow_once");
+  assert.deepEqual(calls.at(-1), [
+    "respond",
+    77,
+    { outcome: { outcome: "selected", optionId: "allow_once" } }
   ]);
   assert.equal(registry.listApprovals().length, 0);
 });

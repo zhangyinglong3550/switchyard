@@ -242,7 +242,7 @@ const POOL_KIND_UI = {
     label: "Antigravity",
     chip: "账号池 · Antigravity",
     title: "Antigravity OAuth（OpenAI 接入）",
-    body: "对 Codex、OpenAI 客户端统一暴露 OpenAI 兼容接口；Switchyard 在网关内部自动转为 Google Cloud Code Assist。导入 CPA 的 Antigravity 凭证后，会自动复用 ~/.cli-proxy-api 中已刷新的 access token；同一任务会固定账号，并自动保持工具调用所需的 thought signature。",
+    body: "对 Codex、OpenAI 客户端统一暴露 OpenAI 兼容接口；Switchyard 在网关内部自动转为 Google Cloud Code Assist。请求前会优先使用本机 Antigravity / agy 的当前登录态；Access 过期则自动用 Refresh 续约。同一任务会固定账号，并自动保持工具调用所需的 thought signature。",
     importPlaceholder: "（可从现有 Antigravity 凭证目录导入 antigravity-*.json）",
     importBtn: "导入本机 Antigravity 凭证",
     showPaste: false,

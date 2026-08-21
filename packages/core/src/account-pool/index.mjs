@@ -1,3 +1,23 @@
+import {
+  POOL_KINDS,
+  POOL_STRATEGIES,
+  poolsRoot,
+  poolFilePath,
+  createEmptyPool,
+  normalizeAccount,
+  normalizePool,
+  loadPool,
+  savePool,
+  listPoolAccountsPublic as listPoolAccountsPublicStored,
+  publicAccountView,
+  isAccessExpired,
+  upsertAccounts,
+  patchAccounts,
+  deleteAccounts,
+  updateAccountRuntime
+} from "./store.mjs";
+import { applyAntigravityLiveAccess } from "./import-multi.mjs";
+
 export {
   POOL_KINDS,
   POOL_STRATEGIES,
@@ -8,14 +28,24 @@ export {
   normalizePool,
   loadPool,
   savePool,
-  listPoolAccountsPublic,
   publicAccountView,
   isAccessExpired,
   upsertAccounts,
   patchAccounts,
   deleteAccounts,
   updateAccountRuntime
-} from "./store.mjs";
+};
+
+export function listPoolAccountsPublic(providerId, opts = {}) {
+  const pool = listPoolAccountsPublicStored(providerId, opts);
+  if (pool.poolKind !== "antigravity_oauth") return pool;
+  return {
+    ...pool,
+    accounts: loadPool(providerId, opts).accounts.map((account) =>
+      publicAccountView(applyAntigravityLiveAccess(account, opts))
+    )
+  };
+}
 
 export {
   parseXaiImportPayload,
@@ -33,7 +63,10 @@ export {
   syncAntigravityPoolToCliproxyDir,
   accountFromAntigravityJson,
   accountFromCodexAuthJson,
-  looksLikeCodexAuthJson
+  looksLikeCodexAuthJson,
+  parseAntigravityCliSecret,
+  readAntigravityCliCredential,
+  applyAntigravityLiveAccess
 } from "./import-multi.mjs";
 
 export {

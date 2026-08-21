@@ -670,6 +670,7 @@ export const PROVIDER_PRESETS = [
     riskNote: "账号和 OAuth token 仅保存在本机。请求直连 Google Cloud Code Assist；请仅使用自己有权使用的 Google / Antigravity 账号。",
     note: "对 Codex / OpenAI 客户端统一提供 OpenAI 兼容接口；Switchyard 自动转换到 Google 上游。导入含 project_id 的 Antigravity OAuth 凭证后即可使用，无需启动 CLIProxyAPI。",
     models: [
+      { id: "gemini-3.7-flash", displayName: "Gemini 3.7 Flash", contextWindow: 1048576, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "gemini-3.6-flash", displayName: "Gemini 3.6 Flash", contextWindow: 1048576, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro", contextWindow: 1048576, capabilities: { reasoning: true, tools: true, stream: true, multimodal: true, images: true } },
       { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", contextWindow: 200000, capabilities: { tools: true, stream: true, multimodal: true, images: true } },

@@ -5,7 +5,7 @@ import {
   savePool,
   updateAccountRuntime
 } from "./store.mjs";
-import { readAntigravityCpaCredential } from "./import-multi.mjs";
+import { applyAntigravityLiveAccess } from "./import-multi.mjs";
 import { refreshXaiTokens, XAI_API_BASE_URL } from "./oauth-xai.mjs";
 import { refreshGoogleTokens } from "./oauth-google.mjs";
 import { refreshCodexAccountTokens, CODEX_API_BASE_URL } from "./oauth-codex.mjs";
@@ -165,7 +165,8 @@ export async function ensureFreshAccount(account, {
   fetchImpl,
   force = false,
   skewMs = 60_000,
-  home
+  home,
+  getAntigravityCliSecret
 } = {}) {
   if (!account) return { ok: false, error: "no-account" };
   const kind = poolKindOf(provider);
@@ -174,39 +175,28 @@ export async function ensureFreshAccount(account, {
     return { ok: true, account: current, refreshed: false };
   }
   if (kind === "antigravity_oauth") {
-    const cpaCredential = readAntigravityCpaCredential(account, {
-      authDir: provider?.antigravityAuthDir || undefined
+    const fromLocal = applyAntigravityLiveAccess(account, {
+      authDir: provider?.antigravityAuthDir || undefined,
+      getAntigravityCliSecret,
+      skewMs
     });
-    if (cpaCredential) {
-      const fromCpa = {
-        ...account,
-        accessToken: cpaCredential.accessToken,
-        refreshToken: cpaCredential.refreshToken || account.refreshToken,
-        tokenType: cpaCredential.tokenType || account.tokenType,
-        expiresAt: cpaCredential.expiresAt || account.expiresAt,
-        projectId: cpaCredential.projectId || account.projectId,
-        email: cpaCredential.email || account.email,
-        health: "healthy",
-        lastError: ""
-      };
-      if (
-        isAccessExpired(account, skewMs)
-        || fromCpa.accessToken !== account.accessToken
-        || fromCpa.expiresAt !== account.expiresAt
-      ) {
-        current = fromCpa;
-        if (provider?.id) {
-          updateAccountRuntime(provider.id, account.id, {
-            accessToken: current.accessToken,
-            refreshToken: current.refreshToken,
-            tokenType: current.tokenType,
-            expiresAt: current.expiresAt,
-            projectId: current.projectId,
-            email: current.email,
-            health: "healthy",
-            lastError: ""
-          }, { poolKind: kind, home });
-        }
+    if (!isAccessExpired(fromLocal, skewMs) && (
+      isAccessExpired(account, skewMs)
+      || fromLocal.accessToken !== account.accessToken
+      || fromLocal.expiresAt !== account.expiresAt
+    )) {
+      current = fromLocal;
+      if (provider?.id) {
+        updateAccountRuntime(provider.id, account.id, {
+          accessToken: current.accessToken,
+          refreshToken: current.refreshToken,
+          tokenType: current.tokenType,
+          expiresAt: current.expiresAt,
+          projectId: current.projectId,
+          email: current.email,
+          health: "healthy",
+          lastError: ""
+        }, { poolKind: kind, home });
       }
     }
   }

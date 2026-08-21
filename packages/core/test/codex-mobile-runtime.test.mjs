@@ -758,6 +758,38 @@ test("Codex runtime normalizes notifications and tracks the active turn", async 
   ]);
 });
 
+test("Codex runtime treats service-tier and skill-budget notices as status, not send failures", () => {
+  const client = fakeRuntimeClient(() => ({}));
+  const runtime = createCodexRuntime({ client, scanSessions: () => [] });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  client.emit({
+    kind: "notification",
+    method: "error",
+    params: {
+      threadId: "t1",
+      message: "Configured service tier `priority` is not advertised as supported for model `blank-gpt/gpt-5.6-luna` and will be omitted from requests."
+    }
+  });
+  client.emit({
+    kind: "notification",
+    method: "error",
+    params: {
+      threadId: "t1",
+      message: "Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter."
+    }
+  });
+  client.emit({
+    kind: "notification",
+    method: "error",
+    params: { threadId: "t1", message: "thread not found: t1" }
+  });
+  assert.deepEqual(events.map((event) => event.type), ["status", "status", "error"]);
+  assert.match(events[0].summary, /service tier/);
+  assert.match(events[1].summary, /Skill descriptions were shortened/);
+  assert.equal(events[2].summary, "thread not found: t1");
+});
+
 test("Codex runtime maps generic item updates to streamed messages and plan tool cards", () => {
   const client = fakeRuntimeClient(() => ({}));
   const runtime = createCodexRuntime({ client, scanSessions: () => [] });
@@ -854,6 +886,49 @@ test("Codex runtime reads the bounded tail of oversized local rollouts without b
   } finally {
     fs.unlinkSync(filePath);
   }
+});
+
+test("Codex readSession skips thread/read while a shared turn is starting", async () => {
+  let releaseTurn;
+  const client = fakeRuntimeClient((method) => {
+    if (method === "turn/start") {
+      return new Promise((resolve) => {
+        releaseTurn = () => resolve({ turn: { id: "turn-1" } });
+      });
+    }
+    if (method === "thread/read") return new Promise(() => {});
+    return {};
+  });
+  const runtime = createCodexRuntime({ client, scanSessions: () => [] });
+  const sending = runtime.sendMessage("t-new", { text: "查询用量" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const started = Date.now();
+  const detail = await runtime.readSession("t-new");
+  assert.ok(Date.now() - started < 500);
+  assert.equal(detail.id, "t-new");
+  assert.equal(detail.state, "running");
+  assert.deepEqual(detail.messages, []);
+  assert.equal(client.calls.some((call) => call.method === "thread/read"), false);
+  releaseTurn();
+  assert.deepEqual(await sending, { accepted: true, turnId: "turn-1" });
+});
+
+test("Codex readSession times out a stuck thread/read and returns a running stub", async () => {
+  const client = fakeRuntimeClient((method) => {
+    if (method === "thread/read") return new Promise(() => {});
+    return {};
+  });
+  const runtime = createCodexRuntime({
+    client,
+    scanSessions: () => [],
+    threadReadTimeoutMs: 40
+  });
+  const started = Date.now();
+  const detail = await runtime.readSession("brand-new");
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(detail.id, "brand-new");
+  assert.equal(detail.state, "running");
+  assert.deepEqual(detail.messages, []);
 });
 
 test("Codex goal projection ignores ordinary tools before the first goal", async () => {

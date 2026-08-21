@@ -58,6 +58,8 @@ test("Android never serves stale mobile UI after app updates", () => {
   assert.match(worker, /clients\.claim\(\)/);
   assert.doesNotMatch(activity, /LOAD_NO_CACHE/);
   assert.doesNotMatch(activity, /clearCache\(true\)/);
+  assert.match(activity, /recoverDesktopConnection/);
+  assert.match(activity, /SwitchyardResume/);
 });
 
 test("Android shell resizes the WebView when the keyboard opens", () => {

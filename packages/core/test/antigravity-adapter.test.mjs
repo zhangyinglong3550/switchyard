@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { dispatchChat } from "../src/upstream/dispatch.mjs";
 import { upsertAccounts, resetRoundRobinCursors } from "../src/account-pool/index.mjs";
-import { __resetAntigravityReplayCache } from "../src/antigravity-adapter.mjs";
+import { __resetAntigravityReplayCache, collapseFetchedAntigravityModels, publicAntigravityModelId, resolveAntigravityWireModel } from "../src/antigravity-adapter.mjs";
 import {
   buildAntigravityUserAgent,
   detectAntigravityCliVersion,
+  fetchAntigravityAvailableModels,
   parseAntigravityCliVersion
 } from "../src/upstream/clients.mjs";
 
@@ -31,6 +32,63 @@ function nativeProvider(overrides = {}) {
     ...overrides
   };
 }
+
+test("Antigravity catalog collapses effort variants into picker ids", () => {
+  assert.equal(publicAntigravityModelId("gemini-3.7-flash-tiered"), "gemini-3.7-flash");
+  assert.equal(publicAntigravityModelId("gemini-3.6-flash-high"), "gemini-3.6-flash");
+  assert.equal(publicAntigravityModelId("gemini-pro-agent"), "gemini-3.1-pro");
+  assert.equal(publicAntigravityModelId("tab_flash_lite_preview"), "");
+  const collapsed = collapseFetchedAntigravityModels({
+    models: {
+      "gemini-3.7-flash-tiered": { displayName: "Gemini 3.7 Flash", maxTokens: 1048576 },
+      "gemini-3.6-flash-low": { displayName: "Gemini 3.6 Flash Low", maxTokens: 1048576 },
+      "gemini-3.6-flash-high": { displayName: "Gemini 3.6 Flash High", maxTokens: 1048576 },
+      "gemini-pro-agent": { displayName: "Gemini 3.1 Pro" },
+      "tab_jump_flash_lite_preview": { displayName: "Tab jump" },
+      "claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", maxTokens: 200000 }
+    }
+  }, new Map([
+    ["gemini-3.7-flash", { id: "gemini-3.7-flash", displayName: "Gemini 3.7 Flash" }],
+    ["gemini-3.6-flash", { id: "gemini-3.6-flash", displayName: "Gemini 3.6 Flash" }],
+    ["gemini-3.1-pro", { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro" }]
+  ]));
+  assert.deepEqual(collapsed.map((item) => item.id), [
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-pro",
+    "claude-sonnet-4-6"
+  ]);
+});
+
+test("Antigravity fetches the live CCA model catalog", async () => {
+  let received = null;
+  const result = await fetchAntigravityAvailableModels(nativeProvider(), {
+    fetchImpl: async (url, init) => {
+      received = { url: String(url), body: JSON.parse(init.body) };
+      return new Response(JSON.stringify({
+        models: { "gemini-3.7-flash-tiered": { displayName: "Gemini 3.7 Flash" } }
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+  });
+  assert.equal(received.url, "https://cca.example.test/v1internal:fetchAvailableModels");
+  assert.deepEqual(received.body, { project: "project-123" });
+  assert.equal(result.payload.models["gemini-3.7-flash-tiered"].displayName, "Gemini 3.7 Flash");
+});
+
+test("Antigravity Gemini 3.7 Flash routes through the tiered CCA runtime", () => {
+  assert.deepEqual(resolveAntigravityWireModel("gemini-3.7-flash", "high"), {
+    wireModel: "gemini-3.7-flash-tiered",
+    thinkingLevel: "high"
+  });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-3.7-flash"), {
+    wireModel: "gemini-3.7-flash-tiered",
+    thinkingLevel: "medium"
+  });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-3.7-flash-low"), {
+    wireModel: "gemini-3.7-flash-tiered",
+    thinkingLevel: "low"
+  });
+});
 
 test("Antigravity CLI fingerprint follows the locally installed agy version", () => {
   assert.equal(parseAntigravityCliVersion("antigravity 1.2.3\n"), "1.2.3");

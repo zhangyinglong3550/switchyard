@@ -542,20 +542,14 @@ export async function callAnthropicMessages(provider, body, opts) {
   return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "anthropic", opts), { ...opts, provider });
 }
 
-/**
- * Native Google Antigravity / Cloud Code Assist transport.
- *
- * The adapter has already converted the canonical Chat body into CCA's
- * `v1internal:generateContent` envelope. Do not use the generic bearer client
- * here: CCA needs its own endpoint and a first-party-shaped User-Agent.
- */
-export async function callAntigravity(provider, envelope, opts = {}) {
-  const baseUrl = String(provider?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
-  const method = opts.stream ? "streamGenerateContent?alt=sse" : "generateContent";
-  const url = `${baseUrl}/v1internal:${method}`;
+function antigravityBaseUrl(provider) {
+  return String(provider?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+}
+
+function antigravityRequestHeaders(provider, opts = {}) {
   const token = String(provider?._antigravityAccessToken || resolveApiKey(provider) || "").trim();
   if (!token) throw new Error("Antigravity OAuth access token is missing");
-  const headers = {
+  return {
     Authorization: `Bearer ${token}`,
     // The HTTP UA is intentionally distinct from CCA envelope.userAgent.
     // Match the locally installed `agy` version instead of pinning the
@@ -564,7 +558,19 @@ export async function callAntigravity(provider, envelope, opts = {}) {
     "User-Agent": String(process.env.SWITCHYARD_ANTIGRAVITY_USER_AGENT || defaultAntigravityUserAgent()),
     ...requestOverrideHeaders(opts)
   };
-  return postJson(url, envelope, headers, {
+}
+
+/**
+ * Native Google Antigravity / Cloud Code Assist transport.
+ *
+ * The adapter has already converted the canonical Chat body into CCA's
+ * `v1internal:generateContent` envelope. Do not use the generic bearer client
+ * here: CCA needs its own endpoint and a first-party-shaped User-Agent.
+ */
+export async function callAntigravity(provider, envelope, opts = {}) {
+  const method = opts.stream ? "streamGenerateContent?alt=sse" : "generateContent";
+  const url = `${antigravityBaseUrl(provider)}/v1internal:${method}`;
+  return postJson(url, envelope, antigravityRequestHeaders(provider, opts), {
     ...opts,
     provider,
     acceptSse: Boolean(opts.stream),
@@ -573,6 +579,30 @@ export async function callAntigravity(provider, envelope, opts = {}) {
     noKeepAlive: opts.noKeepAlive ?? true,
     retryOnFetchError: opts.retryOnFetchError ?? true
   });
+}
+
+function antigravityErrorDetail(payload) {
+  const error = payload?.error;
+  if (typeof error === "string" && error.trim()) return error.trim();
+  const message = error?.message || payload?.message;
+  return typeof message === "string" ? message.trim() : "";
+}
+
+/** POST v1internal:fetchAvailableModels。返回 { url, payload }，调用方负责折叠 runtime id。 */
+export async function fetchAntigravityAvailableModels(provider, opts = {}) {
+  const url = `${antigravityBaseUrl(provider)}/v1internal:fetchAvailableModels`;
+  const projectId = String(provider?._antigravityProjectId || provider?.projectId || provider?.project || "").trim();
+  const resp = await postJson(url, projectId ? { project: projectId } : {}, antigravityRequestHeaders(provider, opts), {
+    ...opts,
+    provider,
+    noKeepAlive: opts.noKeepAlive ?? true
+  });
+  const payload = await readJsonResponse(resp);
+  if (!resp.ok) {
+    const detail = antigravityErrorDetail(payload);
+    throw new Error(`fetchAvailableModels ${resp.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`);
+  }
+  return { url, payload };
 }
 
 export function providerReady(provider) {

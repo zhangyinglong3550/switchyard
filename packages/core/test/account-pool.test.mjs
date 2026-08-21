@@ -21,7 +21,9 @@ import {
   accountFromAntigravityJson,
   accountFromCodexAuthJson,
   poolKindOf,
+  parseAntigravityCliSecret,
   ensureFreshAccount,
+  refreshGoogleTokens,
   markAccountFailure,
   isWebSsoJwt
 } from "../src/account-pool/index.mjs";
@@ -599,6 +601,193 @@ test("picker · Antigravity CPA imports reuse the local refreshed credential wit
     assert.equal(result.account.projectId, "fresh-project");
     const stored = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
     assert.equal(stored.accessToken, "fresh-local-access");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+test("picker · Antigravity reuses local agy login when CPA access token is expired", async () => {
+  const home = tmpHome();
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-cpa-stale-"));
+  try {
+    const email = "fresh@x.com";
+    const fileName = `antigravity-${email}.json`;
+    fs.writeFileSync(path.join(authDir, fileName), JSON.stringify({
+      type: "antigravity",
+      email,
+      access_token: "stale-cpa-access",
+      refresh_token: "stale-cpa-refresh",
+      expired: new Date(Date.now() - 3600_000).toISOString(),
+      project_id: "old-project"
+    }));
+    upsertAccounts("antigravity-pool", [{
+      email,
+      accessToken: "expired-pool-access",
+      refreshToken: "expired-pool-refresh",
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+      projectId: "old-project",
+      source: `cpa-file:${fileName}`
+    }], { home, poolKind: "antigravity_oauth" });
+    const account = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
+    const cliExpiry = new Date(Date.now() + 3600_000).toISOString();
+    const secret = "go-keyring-base64:" + Buffer.from(JSON.stringify({
+      token: {
+        access_token: "agy-live-access",
+        refresh_token: "agy-live-refresh",
+        token_type: "Bearer",
+        expiry: cliExpiry
+      },
+      auth_method: "consumer"
+    })).toString("base64");
+    const parsed = parseAntigravityCliSecret(secret);
+    assert.equal(parsed.accessToken, "agy-live-access");
+    const result = await ensureFreshAccount(account, {
+      home,
+      provider: {
+        id: "antigravity-pool",
+        authMode: "account_pool",
+        poolKind: "antigravity_oauth",
+        antigravityAuthDir: authDir
+      },
+      getAntigravityCliSecret: () => secret,
+      fetchImpl: async () => {
+        throw new Error("Google refresh should not run when agy already has a fresh access token");
+      }
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.account.accessToken, "agy-live-access");
+    assert.equal(result.account.projectId, "old-project");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+test("list overlays live agy expiry instead of the stale CPA snapshot", () => {
+  const home = tmpHome();
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-cpa-list-"));
+  try {
+    const email = "fresh@x.com";
+    const fileName = `antigravity-${email}.json`;
+    fs.writeFileSync(path.join(authDir, fileName), JSON.stringify({
+      type: "antigravity",
+      email,
+      access_token: "stale-cpa-access",
+      refresh_token: "stale-cpa-refresh",
+      expired: "2026-08-07T11:09:26.000Z",
+      project_id: "old-project"
+    }));
+    upsertAccounts("antigravity-pool", [{
+      email,
+      accessToken: "expired-pool-access",
+      refreshToken: "expired-pool-refresh",
+      expiresAt: "2026-08-07T11:09:26.000Z",
+      projectId: "old-project",
+      source: `cpa-file:${fileName}`
+    }], { home, poolKind: "antigravity_oauth" });
+    const cliExpiry = new Date(Date.now() + 3600_000).toISOString();
+    const secret = "go-keyring-base64:" + Buffer.from(JSON.stringify({
+      token: {
+        access_token: "agy-live-access",
+        refresh_token: "agy-live-refresh",
+        token_type: "Bearer",
+        expiry: cliExpiry
+      }
+    })).toString("base64");
+    const pub = listPoolAccountsPublic("antigravity-pool", {
+      home,
+      poolKind: "antigravity_oauth",
+      authDir,
+      getAntigravityCliSecret: () => secret
+    });
+    assert.equal(pub.accounts[0].accessExpired, false);
+    assert.equal(pub.accounts[0].expiresAt, cliExpiry);
+    assert.match(pub.accounts[0].accessStatusLabel, /有效至/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+test("Google refresh uses the public Antigravity desktop OAuth client", async () => {
+  let body = "";
+  const tokens = await refreshGoogleTokens("google-refresh-token", {
+    fetchImpl: async (_url, init) => {
+      body = String(init.body);
+      return new Response(JSON.stringify({
+        access_token: "new-access",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+  });
+  assert.equal(tokens.accessToken, "new-access");
+  assert.match(body, /grant_type=refresh_token/);
+  assert.match(body, /client_id=1071006060591/);
+});
+
+test("picker · Antigravity refreshes expired access without a live agy login", async () => {
+  const home = tmpHome();
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-cpa-refresh-"));
+  try {
+    const email = "fresh@x.com";
+    const fileName = `antigravity-${email}.json`;
+    fs.writeFileSync(path.join(authDir, fileName), JSON.stringify({
+      type: "antigravity",
+      email,
+      access_token: "stale-cpa-access",
+      refresh_token: "stale-cpa-refresh",
+      expired: new Date(Date.now() - 3600_000).toISOString(),
+      project_id: "old-project"
+    }));
+    upsertAccounts("antigravity-pool", [{
+      email,
+      accessToken: "expired-pool-access",
+      refreshToken: "pool-refresh-token",
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+      projectId: "old-project",
+      source: `cpa-file:${fileName}`
+    }], { home, poolKind: "antigravity_oauth" });
+    const account = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
+    const secret = "go-keyring-base64:" + Buffer.from(JSON.stringify({
+      token: {
+        access_token: "expired-agy-access",
+        refresh_token: "agy-refresh-token",
+        token_type: "Bearer",
+        expiry: new Date(Date.now() - 3600_000).toISOString()
+      }
+    })).toString("base64");
+    const result = await ensureFreshAccount(account, {
+      home,
+      provider: {
+        id: "antigravity-pool",
+        authMode: "account_pool",
+        poolKind: "antigravity_oauth",
+        antigravityAuthDir: authDir
+      },
+      getAntigravityCliSecret: () => secret,
+      fetchImpl: async (_url, init) => {
+        assert.match(String(init.body), /refresh_token=/);
+        return new Response(JSON.stringify({
+          access_token: "refreshed-access",
+          expires_in: 3600,
+          token_type: "Bearer"
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.refreshed, true);
+    assert.equal(result.account.accessToken, "refreshed-access");
+    const stored = loadPool("antigravity-pool", { home, poolKind: "antigravity_oauth" }).accounts[0];
+    assert.equal(stored.accessToken, "refreshed-access");
+    const pub = listPoolAccountsPublic("antigravity-pool", {
+      home,
+      poolKind: "antigravity_oauth",
+      authDir,
+      getAntigravityCliSecret: () => secret
+    });
+    assert.equal(pub.accounts[0].accessExpired, false);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(authDir, { recursive: true, force: true });

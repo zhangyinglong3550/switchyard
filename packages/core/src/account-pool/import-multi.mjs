@@ -2,7 +2,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { normalizeAccount, upsertAccounts, loadPool } from "./store.mjs";
+import { isAccessExpired, normalizeAccount, upsertAccounts, loadPool } from "./store.mjs";
+import { getKeychainSecret } from "../keychain-store.mjs";
 
 export function expandHome(p) {
   return String(p || "").replace(/^~(?=\/|$)/, os.homedir());
@@ -81,6 +82,112 @@ export function readAntigravityCpaCredential(account, {
     }
   }
   return null;
+}
+
+/** 列表/发请求前：在池内凭证、CPA、agy 中取尚未过期且最晚到期的一份；都过期则取更新的一份只用于展示。 */
+export function applyAntigravityLiveAccess(account, {
+  authDir,
+  home,
+  getSecret,
+  getAntigravityCliSecret,
+  skewMs = 0
+} = {}) {
+  if (!account) return account;
+  const pool = account.accessToken ? {
+    accessToken: account.accessToken,
+    refreshToken: account.refreshToken,
+    tokenType: account.tokenType,
+    expiresAt: account.expiresAt,
+    projectId: account.projectId,
+    email: account.email
+  } : null;
+  const cpa = readAntigravityCpaCredential(account, { authDir });
+  const cli = readAntigravityCliCredential({
+    home,
+    getSecret: getAntigravityCliSecret || getSecret,
+    accountEmail: account.email
+  });
+  const candidates = [pool, cpa, cli].filter((item) => item?.accessToken);
+  if (!candidates.length) return account;
+  const freshest = (left, right) => (
+    Date.parse(right.expiresAt || 0) > Date.parse(left.expiresAt || 0) ? right : left
+  );
+  const live = candidates.filter((item) => !isAccessExpired(item, skewMs));
+  const chosen = live.length ? live.reduce(freshest) : candidates.reduce(freshest);
+  return {
+    ...account,
+    accessToken: chosen.accessToken,
+    refreshToken: chosen.refreshToken || account.refreshToken,
+    tokenType: chosen.tokenType || account.tokenType,
+    expiresAt: chosen.expiresAt || account.expiresAt,
+    projectId: chosen.projectId || account.projectId,
+    email: chosen.email || account.email,
+    ...(live.length ? { health: "healthy", lastError: "" } : {})
+  };
+}
+
+const GO_KEYRING_PREFIX = "go-keyring-base64:";
+
+/** 解析 agy / Antigravity CLI 登录态（Keychain 或 ~/.gemini/antigravity-cli/antigravity-oauth-token）。 */
+export function parseAntigravityCliSecret(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  let jsonText = text;
+  if (text.startsWith(GO_KEYRING_PREFIX)) {
+    try {
+      jsonText = Buffer.from(text.slice(GO_KEYRING_PREFIX.length), "base64").toString("utf8");
+    } catch {
+      return null;
+    }
+  }
+  let data;
+  try {
+    data = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  const token = data?.token && typeof data.token === "object" ? data.token : data;
+  const accessToken = String(token?.access_token || token?.accessToken || "").trim();
+  if (!accessToken) return null;
+  return {
+    accessToken,
+    refreshToken: String(token?.refresh_token || token?.refreshToken || "").trim(),
+    tokenType: String(token?.token_type || token?.tokenType || "Bearer").trim() || "Bearer",
+    expiresAt: token?.expiry || token?.expired || token?.expires_at || token?.expiresAt || "",
+    projectId: String(data?.project_id || data?.projectId || token?.project_id || token?.projectId || "").trim(),
+    email: String(data?.email || token?.email || "").trim()
+  };
+}
+
+/**
+ * 读取本机 Antigravity / agy 当前登录。
+ * ponytail: agy 本机只有一份登录态；有邮箱才按账号过滤，没有邮箱则给当前池账号用。
+ */
+export function readAntigravityCliCredential({
+  home = os.homedir(),
+  platform = process.platform,
+  getSecret,
+  accountEmail = ""
+} = {}) {
+  const wantEmail = String(accountEmail || "").trim().toLowerCase();
+  const matches = (parsed) => {
+    if (!parsed) return null;
+    const got = String(parsed.email || "").trim().toLowerCase();
+    if (wantEmail && got && wantEmail !== got) return null;
+    return parsed;
+  };
+  if (typeof getSecret === "function" || platform === "darwin") {
+    const reader = typeof getSecret === "function" ? getSecret : getKeychainSecret;
+    const parsed = matches(parseAntigravityCliSecret(reader("antigravity", { service: "gemini", platform: "darwin" })));
+    if (parsed) return parsed;
+  }
+  const file = path.join(expandHome(home), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return null;
+  try {
+    return matches(parseAntigravityCliSecret(fs.readFileSync(file, "utf8")));
+  } catch {
+    return null;
+  }
 }
 
 /** 是否像 Codex/ChatGPT OAuth 凭证（排除 antigravity/xai 等同目录其它类型） */

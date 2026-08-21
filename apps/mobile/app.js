@@ -88,6 +88,7 @@ function renameProjectPreferences(oldName, newName) {
 }
 let eventLoopStopped = false;
 let eventLoopRevoked = false;
+let eventLoopRunning = false;
 let refreshTimer = null;
 let activeAttachments = [];
 let newAttachments = [];
@@ -549,6 +550,7 @@ async function api(url, options = {}) {
   try {
     response = await fetch(url, { ...options, headers, signal: controller.signal });
   } catch (error) {
+    setConnectionStatus("未连接", false);
     if (error?.name === "AbortError") {
       const timeoutError = new Error("请求超时：桌面端可能正忙，请稍后重试");
       timeoutError.status = 0; timeoutError.code = "timeout";
@@ -1012,7 +1014,9 @@ function renderApprovalSheet() {
 function showApprovalSheet(id) { activeApprovalId = id; renderApprovalSheet(); setSheetVisible("#approval-sheet", true); }
 function hideApprovalSheet() { activeApprovalId = ""; setSheetVisible("#approval-sheet", false); }
 function renderApprovalInbox() {
-  $("#approval-inbox").innerHTML = pendingApprovals.map((approval) => approvalCardHtml(approval)).join("");
+  // 会话列表页只保留顶部「等待你审批」入口，避免和 Agent 下方卡片重复。
+  const listInbox = $("#approval-inbox");
+  if (listInbox) listInbox.innerHTML = "";
   const sessionInbox = $("#session-approval-inbox");
   if (!sessionInbox) return;
   const currentApprovals = current ? pendingApprovals.filter((approval) => approval.sessionId === current.id) : [];
@@ -2171,6 +2175,8 @@ function appendEvent(event) {
     const turn = liveTurn(); turn.insertAdjacentHTML("beforeend", renderDeliveredFile(event.delivery)); void hydrateAttachmentPreviews(turn); scrollMessages(); return;
   }
   if (event.type === "error") {
+    const summary = String(event.summary || "");
+    if (/service tier .+ is not advertised/i.test(summary) || /will be omitted from requests/i.test(summary) || /Skill descriptions were shortened/i.test(summary)) return;
     const turn = liveTurn(); let result = turn.querySelector(":scope > .turn-result"); if (!result) { turn.insertAdjacentHTML("beforeend", '<div class="turn-result"></div>'); result = turn.querySelector(":scope > .turn-result"); }
     result.insertAdjacentHTML("beforeend", renderMessage({ role: "assistant", text: `发送失败：${event.summary}` }, "failed")); toast("消息没有发送成功，请重试"); return;
   }
@@ -2243,6 +2249,17 @@ function scheduleFinalReconcile(event) {
 }
 async function handleEvent(event) {
   if (event.id > eventCursor) { eventCursor = event.id; schedulePersistEventCursor(); }
+  if (event.type === "status") {
+    const mapped = String(event.summary || "") === "canceled" ? "cancelled" : String(event.summary || "");
+    if (["queued", "running", "waiting_for_approval", "completed", "failed", "cancelled", "incomplete"].includes(mapped)) {
+      const listed = allSessions.find((session) => session.id === event.sessionId);
+      if (listed && listed.state !== mapped) {
+        listed.state = mapped;
+        renderStatusSummary();
+        if (activePageName() === "sessions") renderSessionList();
+      }
+    }
+  }
   if (event.type === "approval") {
     // Approval events may arrive while a detail response is cached. Await the
     // refresh so the fixed current-session card is rendered before the user sees a failure state.
@@ -2278,7 +2295,58 @@ async function handleEvent(event) {
   scheduleFinalReconcile(event);
 }
 async function readEventStream(response) { if (!response.ok || !response.body) throw new Error(`事件流 HTTP ${response.status}`); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let boundary; while ((boundary = buffer.indexOf("\n\n")) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (data) await handleEvent(JSON.parse(data)); } } }
-async function connectEvents() { while (token && !eventLoopStopped) { const controller = new AbortController(); const reconnect = setTimeout(() => controller.abort(), 20_000); try { await readEventStream(await fetch(`/mobile/v1/events?after=${eventCursor}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal: controller.signal })); } catch (error) { if (error.name !== "AbortError") setConnectionStatus("正在重连", false); } finally { clearTimeout(reconnect); } await new Promise((resolve) => setTimeout(resolve, 800)); } }
+let runningReconcileTimer = null;
+function scheduleRunningReconcile() {
+  const id = current?.id;
+  if (!id) return;
+  clearTimeout(runningReconcileTimer);
+  runningReconcileTimer = setTimeout(() => {
+    if (current?.id === id) openSession(id, { activate: false }).catch(() => {});
+  }, 2500);
+}
+async function syncLiveEventCursor() {
+  const status = await api("/mobile/v1/status", { timeoutMs: 8_000 });
+  const latest = Number(status.latestEventId || 0);
+  const oldest = Number(status.oldestEventId || 0);
+  if (!latest) return;
+  // 账本只留末尾窗口。游标为 0 或已落后窗口时，历史由 openSession 拉取，事件流只跟 live。
+  if (!eventCursor || (oldest && eventCursor < oldest)) {
+    eventCursor = latest;
+    flushEventCursor();
+  }
+}
+async function pollEventBatch() {
+  const rows = await api(`/mobile/v1/events?after=${eventCursor}`, { timeoutMs: 15_000 });
+  for (const event of Array.isArray(rows) ? rows : []) await handleEvent(event);
+}
+async function connectEvents() {
+  if (eventLoopRunning) return;
+  eventLoopRunning = true;
+  const poll = hasNativeTokenStore();
+  try { await syncLiveEventCursor(); } catch {}
+  try {
+    while (token && !eventLoopStopped) {
+      try {
+        if (poll) await pollEventBatch();
+        else await readEventStream(await fetch(`/mobile/v1/events?after=${eventCursor}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } }));
+      } catch (error) {
+        if (error.name !== "AbortError" && error.code !== "timeout") setConnectionStatus("正在重连", false);
+      }
+      await new Promise((resolve) => setTimeout(resolve, poll ? 1_000 : 800));
+    }
+  } finally {
+    eventLoopRunning = false;
+  }
+}
+function resumeMobileConnection() {
+  if (!token || eventLoopRevoked) return;
+  eventLoopStopped = false;
+  connectEvents();
+  refreshSessionsInBackground();
+  void loadApprovals().catch(() => {});
+  if (current) openSession(current.id, { activate: false }).catch(() => {});
+}
+window.SwitchyardResume = resumeMobileConnection;
 
 function closeWorkspaceMenus(except = null) {
   document.querySelectorAll(".group-menu:not([hidden])").forEach((menu) => { if (menu !== except) menu.hidden = true; });
@@ -2349,7 +2417,11 @@ document.addEventListener("click", async (event) => {
     if (switchSession) { closeSessionSwitcher(); await openSession(switchSession.dataset.switchSession); return; }
     const filter = event.target.closest("[data-filter]"); if (filter) { selectedFilter = filter.dataset.filter; sessionDisplayLimit = SESSION_PAGE_SIZE; hideAgentSheet(); renderFilters(); renderSessionList(); return; }
     if (event.target.closest("[data-open-active-sessions]")) { const active = activeSessionRows(); if (active.length === 1) await openSession(active[0].id); else openSessionSwitcher(); return; }
-    if (event.target.closest("[data-open-approvals]")) { document.querySelector("#approval-inbox")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
+    if (event.target.closest("[data-open-approvals]")) {
+      const approval = pendingApprovals[0];
+      if (approval) showApprovalSheet(approval.id);
+      return;
+    }
     const group = event.target.closest("[data-group]"); if (group) { const name = group.dataset.group; setGroupCollapsed(name, !isGroupCollapsed(name)); renderSessionList(); return; }
     const projectPin = event.target.closest("[data-project-pin]"); if (projectPin) { const name = projectPin.dataset.projectPin; setProjectPinned(name, projectPin.dataset.pinned !== "true"); closeWorkspaceMenus(); renderSessionList(); toast(projectPin.dataset.pinned === "true" ? "已取消置顶项目" : "已置顶项目"); return; }
     const agent = event.target.closest("[data-agent]"); if (agent) { selectedAgent = agent.dataset.agent; renderAgentPicker(); await loadModels(); if (document.activeElement === $("#prompt")) await updateCommandPicker($("#prompt")); return; }
@@ -2672,13 +2744,8 @@ window.addEventListener("popstate", () => {
   if (!$("#attachment-viewer").hidden) closeAttachmentViewer({ fromHistory: true });
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { flushEventCursor(); eventLoopStopped = true; return; }
-  if (!token || eventLoopRevoked || !eventLoopStopped) return;
-  eventLoopStopped = false;
-  connectEvents();
-  refreshSessionsInBackground();
-  void loadApprovals().catch(() => {});
-  if (current) openSession(current.id, { activate: false }).catch(() => {});
+  if (document.hidden) { flushEventCursor(); return; }
+  resumeMobileConnection();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#attachment-viewer").hidden) { event.preventDefault(); closeAttachmentViewer(); }
@@ -2712,21 +2779,33 @@ $("#new-session").addEventListener("submit", async (event) => {
     const cwd = selectedWorkspace; const promptText = $("#prompt").value.trim();
     if (!selectedAgent) throw new Error("请选择 Agent"); if (!cwd) throw new Error("请选择或输入工作区"); if (!promptText && !newAttachments.length) throw new Error("请输入任务或添加附件");
     const sent = newAttachments;
-    const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: promptText, attachments: sent.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: createClientMessageId() }) });
+    const result = await api("/mobile/v1/sessions", { method: "POST", body: JSON.stringify({ agent: selectedAgent, cwd, model: $("#model-select").value, effort: $("#effort")?.value || "", permissionMode: $("#new-permission")?.value || "", prompt: promptText, attachments: sent.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: createClientMessageId() }), timeoutMs: 60_000 });
     rememberLastTask();
-    newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; autogrowTextarea($("#prompt"), 260); sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview)); await openSession(result.sessionId);
+    newAttachments = []; renderComposerAttachments(newAttachments, $("#new-attachment-preview"), "new"); $("#prompt").value = ""; autogrowTextarea($("#prompt"), 260); sent.forEach((file) => file.preview && URL.revokeObjectURL(file.preview));
+    await openSession(result.sessionId).catch(() => {});
+    scheduleRunningReconcile();
   } catch (error) { toast(error.message); } finally { submit.disabled = false; }
 });
 async function submitComposerMessage(deliveryMode = "") {
   const input = $("#message"); const rawText = input.value.trim();
-  if ((!rawText && !pendingQuote && !activeAttachments.length) || !current) return;
+  if (!current) { toast("请先打开一个会话"); return; }
+  if (!rawText && !pendingQuote && !activeAttachments.length) return;
   const text = withQuotePrefix(rawText);
   const id = createClientMessageId(); const sentAttachments = activeAttachments; input.value = ""; autogrowTextarea(input); activeAttachments = []; renderAttachments(); $("#send").disabled = true;
   $("#messages").insertAdjacentHTML("beforeend", renderConversationTurn({ id: `live-${id}`, request: { id, role: "user", text, attachments: sentAttachments }, entries: [] })); setConnectionStatus("正在发送"); scrollMessages();
   try {
-    const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id, ...(deliveryMode ? { deliveryMode } : {}) }) });
+    const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id, ...(deliveryMode ? { deliveryMode } : {}) }), timeoutMs: 25_000 });
     if (result.queued) { toast(result.deliveryMode === "guide" ? "已添加引导，当前步骤结束后优先执行" : "已加入排队指令"); await openSession(current.id, { activate: false }); }
-    else setConnectionStatus("正在生成");
+    else {
+      current.state = "running";
+      $("#chat-state-dot").className = "running";
+      const listed = allSessions.find((session) => session.id === current.id);
+      if (listed) listed.state = "running";
+      setConnectionStatus("正在生成");
+      updateComposerQueueState();
+      renderStatusSummary();
+      scheduleRunningReconcile();
+    }
     input.blur();
   } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = rawText; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
   finally { $("#send").disabled = false; updateComposerQueueState(); }

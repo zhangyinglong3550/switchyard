@@ -51,8 +51,9 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
       calls.push(["settings", id, settings, owner]);
       return { ok: true, effectiveFrom: "next_turn", settings };
     },
-    listEvents: () => [{ id: 1, sessionId: "ms_one", type: "status", createdAt: "2026-07-23T12:00:00Z", summary: "completed" }]
-    ,
+    listEvents: () => [{ id: 1, sessionId: "ms_one", type: "status", createdAt: "2026-07-23T12:00:00Z", summary: "completed" }],
+    latestEventId: () => 42,
+    oldestEventId: () => 10,
     listApprovals: () => [{ id: "approval_1", sessionId: "ms_one", title: "低风险操作", actions: ["allow_once", "deny_once"] }],
     resolveApproval: async (id, decision, owner) => {
       calls.push(["approval", id, decision, owner]);
@@ -83,6 +84,12 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   assert.equal(pairedResponse.status, 201);
   const paired = await pairedResponse.json();
   assert.match(paired.token, /^sym_/);
+
+  const health = await fetch(`${base}/mobile/v1/status`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json().then((body) => ({ ok: body.ok, latestEventId: body.latestEventId, oldestEventId: body.oldestEventId })), {
+    ok: true, latestEventId: 42, oldestEventId: 10
+  });
 
   assert.equal((await fetch(`${base}/mobile/v1/sessions`)).status, 401);
   assert.equal((await fetch(`${base}/mobile/v1/sessions`, {

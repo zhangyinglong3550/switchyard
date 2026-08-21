@@ -564,6 +564,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       if (running?.transport === "acp") acp.notify("session/cancel", { sessionId: running.sessionId });
       else running?.kill?.("SIGTERM");
     },
+    isBusy(sessionId) { return active.has(String(sessionId)); },
     rename: overlay?.rename ? (id, title) => overlay.rename(String(id), String(title || "").trim().slice(0, 200)) : undefined,
     archive: overlay?.archive ? (id) => overlay.archive(String(id)) : undefined,
     unarchive: overlay?.unarchive ? (id) => overlay.unarchive(String(id)) : undefined,

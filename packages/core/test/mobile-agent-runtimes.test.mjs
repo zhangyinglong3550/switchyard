@@ -509,6 +509,17 @@ test("Claude, Grok and OpenCode wrappers expose overlay session management witho
   }
 });
 
+test("Grok sendMessage uses ACP prompt so the mobile ledger can stream replies", async () => {
+  const client = fakeClient();
+  const runtime = createGrokRuntime({
+    client,
+    overlay: { rename() {}, archive() {}, unarchive() {} }
+  });
+  await runtime.createSession({ cwd: "/tmp/demo" });
+  await runtime.sendMessage("s-new", { text: "hi" });
+  assert.ok(client.calls.some((call) => call.method === "session/prompt"));
+});
+
 test("OpenCode uses native run transport for historical sessions when ACP load is unreliable", async () => {
   const calls = [];
   const child = fakeChild();
@@ -712,6 +723,44 @@ test("Claude Code sends native image blocks in a complete stream-json user envel
     type: "image",
     source: { type: "base64", media_type: "image/gif", data: "aW1hZ2U=" }
   });
+});
+
+test("Claude Code forwards stream-json permission prompts to mobile approvals", async () => {
+  const child = fakeChild();
+  const runtime = createClaudeRuntime({
+    command: "claude-test",
+    scanSessions: () => [],
+    spawnProcess: (_command, args) => {
+      assert.equal(args[args.indexOf("--input-format") + 1], "stream-json");
+      assert.equal(args[args.indexOf("--permission-prompt-tool") + 1], "stdio");
+      assert.equal(args[args.indexOf("--permission-mode") + 1], "manual");
+      return child;
+    }
+  });
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  const sending = runtime.sendMessage("claude-new", { text: "列出当前目录" });
+  child.stdout.emit("data", `${JSON.stringify({
+    type: "control_request",
+    request_id: "req_1",
+    request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "ls" }, decision_reason: "Command not in allowlist" }
+  })}\n`);
+  const approval = events.find((event) => event.type === "approval");
+  assert.equal(approval.requestId, "req_1");
+  assert.equal(approval.request.command, "ls");
+  assert.equal(runtime.capabilities.approve, true);
+  await runtime.respond("req_1", { outcome: { outcome: "selected", optionId: "allow" } });
+  assert.deepEqual(JSON.parse(child.stdin.writes.at(-1)), {
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: "req_1",
+      response: { behavior: "allow", updatedInput: { command: "ls" } }
+    }
+  });
+  child.stdout.emit("data", `${JSON.stringify({ type: "result", is_error: false, result: "ok" })}\n`);
+  child.emit("close", 0);
+  await sending;
 });
 
 test("grok local chat history maps user/assistant/reasoning/tool lines without ACP", () => {

@@ -139,6 +139,15 @@ export function createSessionRegistry({
   const pendingApprovals = new Map();
   const sessionDirectories = new Map();
   const activeSessions = new Set();
+  const isLiveState = (state) => ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(state));
+  const overlayLiveState = (rows = []) => {
+    const waiting = new Set([...pendingApprovals.values()].map((item) => item.sessionId));
+    return rows.map((row) => {
+      if (waiting.has(row.id)) return row.state === "waiting_for_approval" ? row : { ...row, state: "waiting_for_approval" };
+      if (activeSessions.has(row.id) && !isLiveState(row.state)) return { ...row, state: "running" };
+      return row;
+    });
+  };
   // 目标面板的会话内累积状态：任何 Agent 的 create/update_goal、update_plan、
   // TodoWrite / todo_write 工具流都会喂进来，手机端因此都能显示目标与步骤。
   const liveGoals = new Map();
@@ -417,10 +426,7 @@ export function createSessionRegistry({
     // still loading the initial HTML/CSS/JS bundle. On large histories that
     // scan can monopolize the desktop process and make the phone appear stuck.
     const refresh = new Promise((resolve) => setTimeout(resolve, 2_500)).then(async () => {
-      const fresh = await listSessionsFresh({ agent, archived });
-      sessionsCache.set(key, { at: Date.now(), rows: fresh });
-      if (!agent && !archived) saveDiskIndex(fresh);
-      return fresh;
+      return listSessionsFresh({ agent, archived });
     }).catch(() => null).finally(() => sessionRefreshes.delete(key));
     sessionRefreshes.set(key, refresh);
     return refresh;
@@ -431,7 +437,7 @@ export function createSessionRegistry({
     if (cached && Date.now() - cached.at < SESSIONS_CACHE_TTL_MS) {
       const visibleCachedRows = filterVisibleRows(cached.rows, archived);
       if (visibleCachedRows.length !== cached.rows.length) sessionsCache.set(key, { at: Date.now(), rows: visibleCachedRows });
-      return visibleCachedRows;
+      return overlayLiveState(visibleCachedRows);
     }
 
     // A phone must never wait for every local Agent history scan before it can
@@ -443,7 +449,7 @@ export function createSessionRegistry({
         const visibleWarmRows = filterVisibleRows(warm.rows, archived);
         sessionsCache.set(key, { at: Date.now(), rows: visibleWarmRows });
         void queueSessionRefresh({ agent, archived });
-        return visibleWarmRows;
+        return overlayLiveState(visibleWarmRows);
       }
     }
     return listSessionsFresh({ agent, archived });
@@ -484,8 +490,10 @@ export function createSessionRegistry({
         }
         const directory = String(row.directory || row.cwd || "");
         if (directory) sessionDirectories.set(id, directory);
-        if (["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(projected.state))) activeSessions.add(id);
-        else activeSessions.delete(id);
+        // 磁盘历史（Claude/OpenCode/Grok）常把进行中的会话标成 completed。
+        // 有 isBusy 的 runtime 以进程占用为准；没有则保留 sendMessage 写入的占用。
+        if (runtime.isBusy?.(row.id) || isLiveState(projected.state)) activeSessions.add(id);
+        else if (typeof runtime.isBusy === "function") activeSessions.delete(id);
         if (overlay?.hidden) continue;
         if (projected.archived === Boolean(archived)) rows.push(projected);
       }
@@ -501,12 +509,12 @@ export function createSessionRegistry({
       // Warm only a few recent settled conversations after the list has already
       // been returned. Most taps then hit memory rather than a local transcript scan.
       setTimeout(() => void Promise.allSettled(
-        rows.filter((row) => !["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(row.state))
+        overlayLiveState(rows).filter((row) => !isLiveState(row.state))
           .slice(0, 3)
           .map((row) => readSession(row.id, { messageLimit: 120 }))
       ), 2_500);
     }
-    return rows;
+    return overlayLiveState(rows);
   };
 
   const detailCache = new Map();
@@ -515,7 +523,6 @@ export function createSessionRegistry({
   // conversations warm longer; runtime events and every write invalidate this cache.
   const DETAIL_CACHE_TTL_MS = 10 * 60_000;
   const MAX_MOBILE_DETAIL_MESSAGES = 500;
-  const isLiveState = (state) => ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(state));
   const requestedMessageLimit = (value) => Math.min(
     MAX_MOBILE_DETAIL_MESSAGES,
     Math.max(1, Number(value) || MAX_MOBILE_DETAIL_MESSAGES)
@@ -537,6 +544,8 @@ export function createSessionRegistry({
     const workspaceRoot = String(detail.directory || detail.cwd || "");
     const allMessages = Array.isArray(detail.messages) ? detail.messages : [];
     if (workspaceRoot) sessionDirectories.set(mobileSessionId, workspaceRoot);
+    const waiting = [...pendingApprovals.values()].some((item) => item.sessionId === mobileSessionId);
+    const busy = waiting || activeSessions.has(mobileSessionId) || Boolean(runtime.isBusy?.(nativeId));
     const base = {
       ...projectMobileSession({
         ...detail,
@@ -551,10 +560,10 @@ export function createSessionRegistry({
       queue: store.listQueue?.(mobileSessionId) || [],
       queuePaused: isQueuePaused(mobileSessionId),
       goal: detail.goal || deriveGoalFromMessages(allMessages),
-      ...(activeSessions.has(mobileSessionId) ? { state: "running" } : {})
+      ...(waiting ? { state: "waiting_for_approval" } : busy ? { state: "running" } : {})
     };
     if (isLiveState(base.state)) activeSessions.add(mobileSessionId);
-    else activeSessions.delete(mobileSessionId);
+    else if (typeof runtime.isBusy === "function") activeSessions.delete(mobileSessionId);
     // Keep the raw tail, rather than eagerly projecting 500 messages. The
     // initial phone paint only transforms its 120-row window; loading older
     // messages still reuses this same runtime read rather than rescanning disk.
@@ -831,14 +840,14 @@ export function createSessionRegistry({
     activeSessions.add(mobileSessionId);
     try {
       const attachments = runtimeAttachmentsFor(item.attachments || []);
-      const effectiveModel = store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id);
-      if (effectiveModel && typeof runtime.setModel === "function") await runtime.setModel(nativeId, effectiveModel);
       const remembered = store.rememberMobileMessage({ sessionId: mobileSessionId, messageId: item.messageId, text: item.text, attachments: item.attachments || [] });
       detailCache.delete(mobileSessionId);
       if (!remembered.duplicate) {
         ledger.append({ sessionId: mobileSessionId, type: "message", role: "user", summary: item.text, messageId: item.messageId, ...(item.attachments?.length ? { attachments: item.attachments } : {}) });
       }
       ledger.append({ sessionId: mobileSessionId, type: "status", summary: "running" });
+      const effectiveModel = store.getOverlay(mobileSessionId).model || defaultModelFor(runtime.id);
+      if (effectiveModel && typeof runtime.setModel === "function") await runtime.setModel(nativeId, effectiveModel);
       void Promise.resolve().then(() => runtime.sendMessage(nativeId, {
         text: item.text,
         ...(attachments.length ? { attachments } : {}),
@@ -1146,6 +1155,8 @@ export function createSessionRegistry({
     resolveApproval,
     resolveAsset: (assetId) => store.resolveAsset?.(assetId) || null,
     listEvents: (filters) => ledger.list(filters),
+    latestEventId: () => ledger.latestId(),
+    oldestEventId: () => ledger.oldestId(),
     subscribeEvents: (handler) => ledger.subscribe(handler),
     recordGatewayRequest,
     listUnmatchedGatewayRequests,

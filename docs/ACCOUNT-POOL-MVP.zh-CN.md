@@ -58,22 +58,18 @@ node /path/to/import-helper.mjs --dir ./codex-jsons
 | UI / IPC | `apps/desktop/renderer/*` · `apps/desktop/src/main.mjs` |
 | 测试 | `packages/core/test/account-pool.test.mjs` |
 
-## Antigravity 刷新（常规无需配置）
+## Antigravity 刷新
 
-从 CLIProxyAPI / CPA 导入的 Antigravity 账号，Switchyard 会在请求前读取本机
-`~/.cli-proxy-api/antigravity-*.json` 中已经刷新的 access token，并同步回自己的账号池。
-因此常规使用**不需要**设置 Google OAuth client 环境变量，也不会把 OAuth client_secret 写进仓库。
-
-只有在你脱离本机 Antigravity / CLIProxyAPI，单独托管一份原始 Google `refresh_token` 时，
-才需要配置你自己管理的 OAuth client：
+请求前会依次尝试：本机尚未过期的 agy / CPA Access，再用 Refresh 换新票。
+默认使用已公开的 Antigravity 桌面端 OAuth client（与 CLIProxyAPI / agy 相同）。
+可用环境变量覆盖：
 
 ```bash
 export SWITCHYARD_ANTIGRAVITY_CLIENT_ID="..."
 export SWITCHYARD_ANTIGRAVITY_CLIENT_SECRET="..."
 ```
 
-Grok / Codex / Cursor 池**不依赖**上述变量。若本机凭证已过期，先在 Antigravity 或 CLIProxyAPI 完成登录/刷新，
-再由 Switchyard 自动同步。
+Grok / Codex 池不依赖上述变量。
 
 ## 安全
 

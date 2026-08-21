@@ -228,3 +228,70 @@ test("reasoning-options uses catalog clamp for deepseek xhigh→high", () => {
   assert.equal(out._switchyardReasoningEffortTrace?.clamped, true);
   resetPatches();
 });
+
+test("reasoning-state keeps reasoning on force-reasoning OpenRouter stealth models", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  // 复现 Ox Alpha 报错场景：第二轮带 assistant 历史、无 thinking 可回传，upstream 命中 stealth。
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "测试" },
+        { role: "assistant", content: "收到，测试正常 ✅" }
+      ],
+      reasoning_effort: "high"
+    },
+    {
+      provider: { id: "openrouter", presetId: "openrouter", apiFormat: "openai_chat", baseUrl: "https://openrouter.ai/api/v1" },
+      model: { id: "openrouter/stealth/ox-alpha", providerId: "openrouter", upstreamModel: "stealth/ox-alpha" }
+    }
+  );
+  // 强制推理模型：历史缺 thinking 时不得被降级为 reasoning.effort="none"
+  assert.notEqual(out.reasoning?.effort, "none");
+  resetPatches();
+});
+
+test("reasoning-state keeps explicit user reasoning level even without passable thinking history", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  // 核心原则：用户显式选了 high（reasoning.effort="high"），即便历史无法回传 thinking 也必须原样传 high，绝不降级成 none。
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "测试" },
+        { role: "assistant", content: "收到，测试正常 ✅" }
+      ],
+      reasoning: { effort: "high" }
+    },
+    {
+      provider: { id: "deepseek", presetId: "deepseek", apiFormat: "openai_chat", baseUrl: "https://api.deepseek.com/v1" },
+      model: { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" }
+    }
+  );
+  // 显式选择了推理等级 → 不得降级
+  assert.notEqual(out.reasoning?.effort, "none");
+  assert.notEqual(out.thinking?.type, "disabled");
+  resetPatches();
+});
+
+test("reasoning-state disables thinking when history lacks thinking and no explicit effort", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  // 非显式场景：thinking 由内部启发式开启，但历史里没有 thinking 可回传 → 允许降级关闭（原行为保留）。
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "ok" }
+      ],
+      thinking: { type: "enabled" }
+    },
+    {
+      provider: { id: "deepseek", presetId: "deepseek", apiFormat: "openai_chat", baseUrl: "https://api.deepseek.com/v1" },
+      model: { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" }
+    }
+  );
+  // 非显式且可关闭推理 → 维持原有“降级关闭”行为（以 thinking.type=disabled 体现）
+  assert.equal(out.thinking?.type, "disabled");
+  resetPatches();
+});

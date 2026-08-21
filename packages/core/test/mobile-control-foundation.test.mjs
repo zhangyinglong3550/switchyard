@@ -334,6 +334,7 @@ test("event ledger replays strictly after cursor without duplicates", (t) => {
 
   const reloaded = createEventLedger({ file, now: () => now, maxEvents: 3 });
   assert.equal(reloaded.latestId(), four.id);
+  assert.equal(reloaded.oldestId(), two.id);
   assert.deepEqual(reloaded.list({ after: 0 }).map((event) => event.id), [
     two.id,
     three.id,

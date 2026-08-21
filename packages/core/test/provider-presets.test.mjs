@@ -142,6 +142,10 @@ test("provider presets · Sub2API native import integrations", () => {
   const presets = listProviderPresets();
   const byId = new Map(presets.map((preset) => [preset.id, preset]));
   assert.equal(byId.has("antigravity-cli2api"), false);
+  const anti = byId.get("antigravity-account-pool");
+  assert.ok(anti);
+  assert.ok(presetModelHints(anti).has("gemini-3.7-flash"));
+  assert.ok(presetModelHints(anti).has("gemini-3.6-flash"));
 
   const sub = byId.get("sub2api-codex");
   assert.ok(sub, "missing sub2api-codex preset");

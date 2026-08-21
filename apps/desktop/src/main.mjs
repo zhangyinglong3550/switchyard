@@ -105,6 +105,7 @@ import {
 import { unifyCodexHistory } from "../../../packages/core/src/history-unify.mjs";
 import {
   CODEX_OAUTH_CLIENT_VERSION,
+  fetchAntigravityAvailableModels,
   providerAuthHeaders,
   providerReady,
   proxyDispatcher,
@@ -115,6 +116,7 @@ import {
   isAccountPoolProvider,
   readAnthropicOAuthAuth
 } from "../../../packages/core/src/upstream/clients.mjs";
+import { collapseFetchedAntigravityModels } from "../../../packages/core/src/antigravity-adapter.mjs";
 import {
   anthropicOAuthAuthPath,
   anthropicOAuthStatus,
@@ -2187,6 +2189,18 @@ async function discoverModelsForProvider(provider) {
   const preset = providerPresetFor({ ...provider, ...probe, authMode: provider.authMode });
   const hints = presetModelHints(preset);
   const presetModels = Array.from(hints.values()).map((model) => normalizeHintModel(model));
+  if ((probe.apiFormat || provider.apiFormat) === "antigravity") {
+    try {
+      const { url, payload } = await fetchAntigravityAvailableModels(probe);
+      const models = mergeDiscoveredWithPresetModels(collapseFetchedAntigravityModels(payload, hints), hints);
+      if (models.length) return { ok: true, url, models };
+      if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: `${url} -> empty` };
+      return { ok: false, error: `${url} -> empty` };
+    } catch (err) {
+      if (presetModels.length) return { ok: true, url: "preset:fallback", models: presetModels, warning: errorSummary(err) };
+      return { ok: false, error: errorSummary(err) };
+    }
+  }
   // 无 /models 的内网网关：直接返回预制模型，避免先打失败接口
   if (preset?.preferPresetModels && presetModels.length) {
     return { ok: true, url: "preset:models", models: presetModels };
@@ -3049,17 +3063,24 @@ async function testProviderConnectivity(provider) {
   }
   const apiFormat = probe.apiFormat || "openai_chat";
   if (apiFormat === "antigravity") {
-    const token = String(probe._antigravityAccessToken || probe.apiKey || "").trim();
-    const projectId = String(probe._antigravityProjectId || probe.projectId || probe.project || "").trim();
-    if (!token) return { ok: false, error: "Antigravity OAuth access token 不可用" };
-    if (!projectId) return { ok: false, error: "Antigravity 凭证缺少 Cloud Code Assist projectId" };
-    return {
-      ok: true,
-      status: 200,
-      url: `${baseUrl}/v1internal:generateContent`,
-      bodyPreview: "Antigravity OAuth 凭证与 Cloud Code Assist projectId 已就绪；客户端可通过 Switchyard 的 OpenAI 兼容接口调用，实际模型连通性会在首次请求时验证。",
-      ...(resolved.accountEmail ? { accountEmail: resolved.accountEmail } : {})
-    };
+    try {
+      const { url, payload } = await fetchAntigravityAvailableModels(probe);
+      const count = collapseFetchedAntigravityModels(payload).length;
+      return {
+        ok: true,
+        status: 200,
+        url,
+        bodyPreview: `已从 Cloud Code Assist 读取 ${count} 个可用模型。`,
+        ...(resolved.accountEmail ? { accountEmail: resolved.accountEmail } : {})
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        url: `${baseUrl}/v1internal:fetchAvailableModels`,
+        error: errorSummary(err),
+        ...(resolved.accountEmail ? { accountEmail: resolved.accountEmail } : {})
+      };
+    }
   }
   const headers = buildProviderHeaders(probe);
   // 1. 模型列表探测

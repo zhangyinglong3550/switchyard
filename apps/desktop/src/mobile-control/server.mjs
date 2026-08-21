@@ -148,6 +148,8 @@ export function createMobileControlServer({
           version: 1,
           port,
           agents: registry.agents?.() || [],
+          latestEventId: registry.latestEventId?.() || 0,
+          oldestEventId: registry.oldestEventId?.() || 0,
           uptimeMs: Date.now() - startedAt
         });
       }

@@ -69,16 +69,18 @@ test("mergeWithDefaults collapses persisted reasoning variants into one Agent-se
 
   assert.deepEqual(cfg.models.map((model) => model.id), [
     "codex-pool/gpt-5.4-mini",
+    "antigravity/gemini-3.7-flash",
     "antigravity/gemini-3.6-flash"
   ]);
   assert.deepEqual(cfg.models.map((model) => model.upstreamModel), [
     "gpt-5.4-mini",
+    "gemini-3.7-flash",
     "gemini-3.6-flash"
   ]);
   assert.equal(cfg.models[0].enabled, true);
   assert.equal(cfg.models[0].capabilities.reasoning, true);
   assert.ok(cfg.models[0].aliases.includes("codex-pool/gpt-5.4-mini-high"));
-  assert.ok(cfg.models[1].aliases.includes("gemini-3.6-flash-low"));
+  assert.ok(cfg.models[2].aliases.includes("gemini-3.6-flash-low"));
 });
 
 test("mergeWithDefaults drops retired Cursor subscription providers and their models", () => {
@@ -114,7 +116,7 @@ test("mergeWithDefaults drops retired Antigravity CLIProxyAPI providers and thei
     ]
   });
   assert.deepEqual(cfg.providers.map((provider) => provider.id), ["antigravity-pool", "ok"]);
-  assert.deepEqual(cfg.models.map((model) => model.id), ["antigravity-pool/gemini-3.6-flash", "ok/gpt"]);
+  assert.deepEqual(cfg.models.map((model) => model.id), ["antigravity-pool/gemini-3.7-flash", "antigravity-pool/gemini-3.6-flash", "ok/gpt"]);
 });
 
 test("validateConfig rejects duplicate provider id", () => {

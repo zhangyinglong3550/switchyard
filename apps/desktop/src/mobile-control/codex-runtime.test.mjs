@@ -104,17 +104,17 @@ test("Codex mobile runtime · never turn/starts on private app-server when a loc
   assert.deepEqual(client.calls.map((call) => call.method), []);
 });
 
-test("Codex mobile runtime · refuses private sends when no shared proxy and no local rollout", async () => {
+test("Codex mobile runtime · phone-created threads send on the current private app-server", async () => {
   const client = fakeClient({ usingProxy: false });
+  let reconnects = 0;
+  client.reconnect = async () => { reconnects += 1; };
   const runtime = createCodexRuntime({
     client,
     scanSessions: () => []
   });
-  await assert.rejects(
-    () => runtime.sendMessage("ghost-thread", { text: "hello" }),
-    (error) => error?.code === "CODEX_DESKTOP_SYNC_UNAVAILABLE"
-  );
-  assert.deepEqual(client.calls.map((call) => call.method), []);
+  assert.deepEqual(await runtime.sendMessage("t-new", { text: "hello" }), { accepted: true, turnId: "turn-1" });
+  assert.equal(reconnects, 0);
+  assert.deepEqual(client.calls.map((call) => call.method), ["turn/start"]);
 });
 
 

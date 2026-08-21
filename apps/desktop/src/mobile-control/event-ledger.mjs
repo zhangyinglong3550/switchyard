@@ -108,6 +108,7 @@ export function createEventLedger({
       subscribers.add(handler);
       return () => subscribers.delete(handler);
     },
-    latestId: () => events.at(-1)?.id || 0
+    latestId: () => events.at(-1)?.id || 0,
+    oldestId: () => events[0]?.id || 0
   };
 }

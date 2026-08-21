@@ -250,6 +250,19 @@ export function parseCodexRollout(lines, { limit = 500 } = {}) {
 
 const LOCAL_ROLLOUT_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
 const LOCAL_ROLLOUT_TAIL_BYTES = 6 * 1024 * 1024;
+// 同一条 app-server 连接上 turn/start 会堵住后续 thread/read。手机打开详情
+// 不能等这一轮生成结束；超时后走本地 rollout 或返回 running 空壳。
+const THREAD_READ_TIMEOUT_MS = 8_000;
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]);
+}
 
 function readRolloutLines(filePath, maxBytes = LOCAL_ROLLOUT_FULL_READ_MAX_BYTES) {
   const stat = fs.statSync(filePath);
@@ -337,6 +350,22 @@ function notificationItemType(frame = {}) {
   return String(notificationItem(frame)?.type || "").toLowerCase();
 }
 
+function isCodexAdvisory(frame = {}) {
+  const params = frame.params || {};
+  const item = notificationItem(frame);
+  const text = [
+    params.message,
+    params.error?.message,
+    params.error,
+    item?.message,
+    item?.text
+  ].map((value) => String(value || "")).join("\n");
+  // Codex 会把可忽略的配置提示也打成 error 通知；当失败会让手机显示「发送失败」并结束会话。
+  return /service tier .+ is not advertised/i.test(text)
+    || /will be omitted from requests/i.test(text)
+    || /Skill descriptions were shortened/i.test(text);
+}
+
 function eventType(frame = {}) {
   const name = String(frame.method || "");
   const itemType = notificationItemType(frame);
@@ -347,11 +376,11 @@ function eventType(frame = {}) {
   if (itemType === "agent_message" || itemType === "agentmessage" || itemType === "message") return "message";
   if (itemType.includes("reasoning") || itemType.includes("thought")) return "thinking";
   if (itemType === "function_call" || itemType === "custom_tool_call" || itemType.includes("tool") || itemType.includes("command")) return "tool";
-  if (itemType === "error") return "error";
+  if (itemType === "error") return isCodexAdvisory(frame) ? "status" : "error";
   if (name.toLowerCase().includes("reasoning") || name.toLowerCase().includes("thought")) return "thinking";
   if (name.includes("agentMessage") || name.includes("message")) return "message";
   if (name.includes("command") || name.includes("tool")) return "tool";
-  if (name.includes("failed") || name.includes("error")) return "error";
+  if (name.includes("failed") || name.includes("error")) return isCodexAdvisory(frame) ? "status" : "error";
   return "status";
 }
 
@@ -394,7 +423,8 @@ export function createCodexRuntime({
   env,
   spawnProcess = spawnChild,
   scanSessions = scanCodexSessions,
-  scanArchived = archivedCodexSessionIds
+  scanArchived = archivedCodexSessionIds,
+  threadReadTimeoutMs = THREAD_READ_TIMEOUT_MS
 } = {}) {
   if (!client?.request || !client?.subscribe) throw new Error("Codex runtime 需要已连接的 app-server client");
   const subscribers = new Set();
@@ -618,11 +648,43 @@ export function createCodexRuntime({
         goal: (() => { const value = deriveGoalFromMessages(messages); if (value) liveGoals.set(sid, value); return value; })()
       };
     }
+    const runningStub = () => ({
+      id: sid,
+      agentId: "codex",
+      name: cleanCodexSessionTitle(sid),
+      state: "running",
+      updatedAt: new Date().toISOString(),
+      model: selectedModels.get(sid) || "",
+      directory: "",
+      project: "",
+      archived: false,
+      capabilities: { ...CAPABILITIES },
+      messages: []
+    });
+    // turn/start 进行中不要再发 thread/read，否则会排在同一条连接后面一直等到超时。
+    if (activeTurns.has(sid)) {
+      if (local) {
+        const row = localThread(local);
+        const messages = localMessages(local, { limit });
+        return {
+          ...row,
+          state: "running",
+          model: selectedModels.get(sid) || row.model,
+          messages,
+          goal: (() => { const value = deriveGoalFromMessages(messages); if (value) liveGoals.set(sid, value); return value; })()
+        };
+      }
+      return runningStub();
+    }
     let nativeError;
     // Always try the shared app-server first. This works for both threads
     // created on the phone and threads created in the desktop Codex UI.
     try {
-      const result = await client.request("thread/read", { threadId: sid, includeTurns: true });
+      const result = await withTimeout(
+        client.request("thread/read", { threadId: sid, includeTurns: true }, threadReadTimeoutMs),
+        threadReadTimeoutMs,
+        `Codex app-server 请求超时：thread/read`
+      );
       const thread = result?.thread || result || {};
       if (thread.id || result?.thread) {
         return {
@@ -645,6 +707,7 @@ export function createCodexRuntime({
         goal: (() => { const value = deriveGoalFromMessages(localMessages(local, { limit: 500 })); if (value) liveGoals.set(sid, value); return value; })()
       };
     }
+    if (/超时|timeout|timed out/i.test(String(nativeError?.message || ""))) return runningStub();
     throw nativeError || new Error(`Codex 线程不存在：${sid}`);
   };
 
@@ -660,10 +723,10 @@ export function createCodexRuntime({
     const sessionId = String(result?.thread?.id || result?.id || "");
     if (!sessionId) throw new Error("Codex 未返回 thread id");
     if (String(title || "").trim()) {
-      await client.request("thread/name/set", {
+      void client.request("thread/name/set", {
         threadId: sessionId,
         name: String(title).trim().slice(0, 200)
-      });
+      }).catch(() => {});
     }
     if (model) selectedModels.set(sessionId, String(model));
     if (effort) selectedEfforts.set(sessionId, String(effort));
@@ -722,10 +785,16 @@ export function createCodexRuntime({
   };
 
   const startSharedTurn = async (sid, turnParams) => {
-    const result = await client.request("turn/start", turnParams, 60_000);
-    const turnId = String(result?.turn?.id || result?.id || "");
-    if (turnId) activeTurns.set(sid, turnId);
-    return { accepted: true, turnId };
+    if (!activeTurns.has(sid)) activeTurns.set(sid, "starting");
+    try {
+      const result = await client.request("turn/start", turnParams, 60_000);
+      const turnId = String(result?.turn?.id || result?.id || "");
+      if (turnId) activeTurns.set(sid, turnId);
+      return { accepted: true, turnId };
+    } catch (error) {
+      if (activeTurns.get(sid) === "starting") activeTurns.delete(sid);
+      throw error;
+    }
   };
 
   const sendMessage = async (sessionId, { text, attachments = [] } = {}) => {
@@ -775,18 +844,23 @@ export function createCodexRuntime({
       }
     }
 
-    // Explicit private fallback: never turn/start into a void Desktop can't see.
-    // Reconnect once; still private → durable CLI resume, or refuse.
+    // Explicit private fallback.
+    // 有本地 rollout 的桌面/CLI 会话：先抢共享代理，抢不到就走 CLI resume，绝不在
+    // private 进程里 turn/start（Desktop 看不见）。
+    // 手机刚 thread/start 的会话没有本地文件：线程只活在当前 private 进程里。
+    // 这里再 reconnect 会先杀掉它，再空等 5 秒 Desktop proxy，最后把消息打回暂停队列。
     if (client.usingProxy === false) {
-      if (await ensureSharedProxy()) {
-        try {
-          return await startSharedTurn(sid, turnParams);
-        } catch (error) {
-          return nativeFallback(error);
+      if (local) {
+        if (await ensureSharedProxy()) {
+          try {
+            return await startSharedTurn(sid, turnParams);
+          } catch (error) {
+            return nativeFallback(error);
+          }
         }
+        return sendNativeMessage(sid, local, { text, attachments });
       }
-      if (local) return sendNativeMessage(sid, local, { text, attachments });
-      throw syncUnavailableError();
+      return startSharedTurn(sid, turnParams);
     }
 
     // usingProxy unset（测试/旧注入）：保留 probe → native / turn/start 兼容行为。
@@ -905,6 +979,9 @@ export function createCodexRuntime({
     // intentionally a cheap local membership check rather than another RPC.
     isArchivedSession(sessionId) {
       return scanArchived().has(String(sessionId));
+    },
+    isBusy(sessionId) {
+      return activeTurns.has(String(sessionId));
     },
     readSession,
     createSession,

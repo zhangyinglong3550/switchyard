@@ -46,6 +46,17 @@ function approvalDetail(input = {}, command = "") {
   };
 }
 
+function optionKind(option) {
+  const kind = String(option?.kind || "").trim();
+  if (kind) return kind;
+  const token = String(option?.optionId || option?.name || "").toLowerCase().replace(/[-\s]+/g, "_");
+  if (/allow_always|always/.test(token) && !/once/.test(token)) return "allow_always";
+  if (/reject_always|deny_always/.test(token)) return "reject_always";
+  if (/allow/.test(token)) return "allow_once";
+  if (/reject|deny/.test(token)) return "reject_once";
+  return "";
+}
+
 export function classifyMobileApproval(input = {}) {
   const method = String(input.method || input.runtimeEvent || "");
   const options = Array.isArray(input.options)
@@ -53,8 +64,8 @@ export function classifyMobileApproval(input = {}) {
     : Array.isArray(input.toolCall?.options)
       ? input.toolCall.options
       : [];
-  const allow = options.find((option) => option?.kind === "allow_once");
-  const reject = options.find((option) => option?.kind === "reject_once");
+  const allow = options.find((option) => optionKind(option) === "allow_once");
+  const reject = options.find((option) => optionKind(option) === "reject_once");
   const command = commandText(input);
   const dangerous = HIGH_RISK.some((pattern) => pattern.test(command));
   const lowRisk = Boolean(command) && LOW_RISK.some((pattern) => pattern.test(command));

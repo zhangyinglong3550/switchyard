@@ -8,6 +8,20 @@ const options = [
   { kind: "reject_once", name: "Reject", optionId: "reject" }
 ];
 
+test("mobile approval infers ACP option kinds from optionId when kind is missing", () => {
+  const result = classifyMobileApproval({
+    command: "git status --short",
+    options: [
+      { optionId: "allow_once", name: "Allow once" },
+      { optionId: "reject_once", name: "Reject" }
+    ]
+  });
+  assert.equal(result.mobileAllowed, true);
+  assert.equal(result.allowOptionId, "allow_once");
+  assert.equal(result.rejectOptionId, "reject_once");
+  assert.deepEqual(result.actions, ["allow_once", "allow_session", "deny_once"]);
+});
+
 test("mobile approval permits only one-shot low-risk commands", () => {
   const safe = classifyMobileApproval({
     title: "Run command",

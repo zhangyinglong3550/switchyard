@@ -428,9 +428,33 @@ public final class MainActivity extends Activity {
   @Override protected void onResume() {
     super.onResume();
     isForeground = true;
-    // Returning to the app means the user has seen the inbox; reset so a new
-    // approval arriving later notifies again.
     lastApprovalCount = -1;
+    recoverDesktopConnection();
+  }
+
+  private void recoverDesktopConnection() {
+    if (trustedOrigin == null || trustedOrigin.isEmpty() || webView == null) return;
+    final String origin = trustedOrigin;
+    new Thread(() -> {
+      boolean ok = false;
+      try {
+        HttpURLConnection connection = (HttpURLConnection) new URL(origin + "/mobile/v1/status").openConnection();
+        connection.setConnectTimeout(4_000);
+        connection.setReadTimeout(4_000);
+        ok = connection.getResponseCode() == 200;
+        connection.disconnect();
+      } catch (Exception ignored) {}
+      final boolean reachable = ok;
+      runOnUiThread(() -> {
+        if (webView == null) return;
+        if (reachable) {
+          webView.evaluateJavascript("window.SwitchyardResume&&window.SwitchyardResume()", null);
+        } else {
+          Toast.makeText(this, "桌面端未连接，正在重新加载", Toast.LENGTH_SHORT).show();
+          webView.reload();
+        }
+      });
+    }).start();
   }
 
   @Override protected void onPause() {

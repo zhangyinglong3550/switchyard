@@ -159,10 +159,13 @@ export function mergeWithDefaults(input) {
           .map((provider) => provider.id)
       );
       out.models = normalizeKnownVisionFallbacks(
-        collapseReasoningVariantModels(
-          input.models
-            .filter((model) => !retiredIds.has(model.providerId))
-            .map((model) => normalizeKnownModel(model, out.providers)),
+        seedAntigravityFlash37(
+          collapseReasoningVariantModels(
+            input.models
+              .filter((model) => !retiredIds.has(model.providerId))
+              .map((model) => normalizeKnownModel(model, out.providers)),
+            out.providers
+          ),
           out.providers
         ),
         out.providers
@@ -187,6 +190,31 @@ export function mergeWithDefaults(input) {
     }
   }
   return out;
+}
+
+function seedAntigravityFlash37(models = [], providers = []) {
+  const list = [...(models || [])];
+  for (const provider of providers || []) {
+    if (provider?.apiFormat !== "antigravity") continue;
+    const has37 = list.some((model) =>
+      model?.providerId === provider.id
+      && /(?:^|\/)gemini-3\.7-flash(?:-tiered)?$/.test(String(model.upstreamModel || model.id || ""))
+    );
+    if (has37) continue;
+    const entry = {
+      id: `${provider.id}/gemini-3.7-flash`,
+      providerId: provider.id,
+      upstreamModel: "gemini-3.7-flash",
+      displayName: "Gemini 3.7 Flash",
+      enabled: true,
+      capabilities: { text: true, reasoning: true, tools: true, stream: true, images: true, multimodal: true },
+      contextWindow: 1048576
+    };
+    const idx = list.findIndex((model) => model?.providerId === provider.id);
+    if (idx < 0) list.push(entry);
+    else list.splice(idx, 0, entry);
+  }
+  return list;
 }
 
 // Reasoning level is a runtime choice made by the Agent (`reasoning_effort`),

@@ -6,7 +6,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { scanClaudeSessions } from "./local-session-scan.mjs";
 import { mergeTool, toolFrom, toolMessage } from "./message-parts.mjs";
 
-const CAPABILITIES = Object.freeze({ sendMessage: true, setModel: true, setEffort: true, cancel: true, rename: true, archive: true, unarchive: true, delete: false, fork: false, compact: false, approve: false });
+const CAPABILITIES = Object.freeze({ sendMessage: true, setModel: true, setEffort: true, cancel: true, rename: true, archive: true, unarchive: true, delete: false, fork: false, compact: false, approve: true });
 
 function localRows(scanSessions = scanClaudeSessions) {
   return scanSessions({ limit: 500 }).map((session) => ({
@@ -74,6 +74,49 @@ function localMessages(sessionId, scanSessions = scanClaudeSessions) {
 }
 function splitLines(onLine) { let buffer = ""; return (chunk) => { buffer += String(chunk); let at; while ((at = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, at).trim(); buffer = buffer.slice(at + 1); if (line) onLine(line); } }; }
 
+function claudeControlId(frame = {}) {
+  return String(frame.request_id || frame.request?.request_id || "");
+}
+
+function writeClaudeControl(stdin, requestId, body) {
+  if (!stdin || !requestId) return;
+  stdin.write(`${JSON.stringify({
+    type: "control_response",
+    response: { subtype: "success", request_id: String(requestId), response: body }
+  })}\n`);
+}
+
+function isClaudePermissionRequest(frame = {}) {
+  const type = String(frame.type || "");
+  const subtype = String(frame.request?.subtype || "");
+  return (type === "control_request" || type === "sdk_control_request")
+    && (subtype === "can_use_tool" || subtype === "permission");
+}
+
+function claudeApprovalEvent(sessionId, frame = {}) {
+  const request = frame.request || {};
+  const input = request.input || request.tool_input || {};
+  return {
+    sessionId,
+    type: "approval",
+    summary: "等待操作审批",
+    runtimeEvent: "claude/can_use_tool",
+    requestId: claudeControlId(frame),
+    request: {
+      method: "claude/can_use_tool",
+      toolName: request.tool_name,
+      command: input.command,
+      reason: request.decision_reason || request.tool_name || "Claude 请求权限",
+      files: input.file_path ? [input.file_path] : undefined,
+      input,
+      options: [
+        { kind: "allow_once", optionId: "allow" },
+        { kind: "reject_once", optionId: "reject" }
+      ]
+    }
+  };
+}
+
 /**
  * Mobile Claude uses the installed Claude CLI directly, not claude-agent-acp.
  * ACP is useful for IDE integration but can terminate while another Claude
@@ -81,8 +124,15 @@ function splitLines(onLine) { let buffer = ""; return (chunk) => { buffer += Str
  */
 export function createClaudeRuntime({ overlay, command, env, spawnProcess = spawnChild, scanSessions = scanClaudeSessions } = {}) {
   const binary = command || process.env.SWITCHYARD_CLAUDE_BINARY || path.join(os.homedir(), "npm-global", "bin", "claude");
-  const subscribers = new Set(); const sessions = new Map(); const selectedModels = new Map(); const selectedEfforts = new Map(); const selectedPermissions = new Map(); const active = new Map();
+  const subscribers = new Set(); const sessions = new Map(); const selectedModels = new Map(); const selectedEfforts = new Map(); const selectedPermissions = new Map(); const active = new Map(); const pendingApprovals = new Map();
   const emit = (event) => { for (const handler of subscribers) try { handler(event); } catch {} };
+  const finishApprovals = (sid) => {
+    for (const [id, item] of pendingApprovals) {
+      if (item.sid !== sid) continue;
+      pendingApprovals.delete(id);
+      emit({ sessionId: sid, type: "approval_resolved", summary: "cancelled", runtimeEvent: "claude/approval-resolved" });
+    }
+  };
   const remember = (row) => { sessions.set(String(row.id), row); return row; };
   const sessionFor = (id) => sessions.get(String(id)) || localRows(scanSessions).find((row) => row.id === String(id));
   const listSessions = async ({ cwd } = {}) => localRows(scanSessions).filter((row) => !cwd || row.directory === cwd).map(remember);
@@ -91,36 +141,39 @@ export function createClaudeRuntime({ overlay, command, env, spawnProcess = spaw
     const sid = String(sessionId); const row = sessionFor(sid); const cwd = row?.directory || process.cwd();
     const images = attachments.filter((item) => item.kind === "image");
     const textAttachments = attachments.filter((item) => item.kind !== "image");
-    const useStdin = images.length > 0;
     const context = textAttachments
       .map((item) => `\n\n<attachment name="${item.name}">\n${item.text}\n</attachment>`).join("");
     const exists = Boolean(scanSessions({ limit: 1000 }).find((item) => item.sessionId === sid));
-    const args = ["-p", "--verbose", exists ? "--resume" : "--session-id", sid, "--output-format", "stream-json", "--include-partial-messages"];
-    const model = selectedModels.get(sid) || row?.model; const effort = selectedEfforts.get(sid); const permissionMode = selectedPermissions.get(sid);
+    const args = ["-p", "--verbose", exists ? "--resume" : "--session-id", sid, "--output-format", "stream-json", "--include-partial-messages", "--input-format", "stream-json", "--permission-prompt-tool", "stdio"];
+    const model = selectedModels.get(sid) || row?.model; const effort = selectedEfforts.get(sid); const permissionMode = selectedPermissions.get(sid) || "manual";
     if (model) args.push("--model", model);
     if (effort) args.push("--effort", effort);
-    if (permissionMode) args.push("--permission-mode", permissionMode);
-    let stdinPayload = null;
-    if (useStdin) {
-      args.push("--input-format", "stream-json");
-      const content = [];
-      const prompt = `${String(text || "")}${context}`;
-      if (prompt) content.push({ type: "text", text: prompt });
-      for (const image of images) {
-        content.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } });
-      }
-      // Claude's stream-json input expects a complete SDK message envelope.
-      // A bare { role, content } object is treated as deferred tool input.
-      stdinPayload = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
-    } else {
-      args.push(`${String(text || "")}${context}`);
+    args.push("--permission-mode", permissionMode);
+    const content = [];
+    const prompt = `${String(text || "")}${context}`;
+    if (prompt) content.push({ type: "text", text: prompt });
+    for (const image of images) {
+      content.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } });
     }
-    const child = spawnProcess(binary, args, { cwd, env: { ...process.env, HOME: os.homedir(), ...(env || {}) }, stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"] });
-    if (stdinPayload) { child.stdin.write(stdinPayload); child.stdin.end(); }
+    // Claude 的 stream-json 输入必须是完整 SDK envelope；裸 { role, content } 会被当成延期工具输入。
+    // stdin 保持打开：权限请求走 control_response，不能在发出 user 后立刻 end。
+    const child = spawnProcess(binary, args, { cwd, env: { ...process.env, HOME: os.homedir(), ...(env || {}) }, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`);
     active.set(sid, child); let stderr = "";
     child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
     child.stdout?.on("data", splitLines((line) => { try {
-      const frame = JSON.parse(line); const event = frame.event || {}; const delta = event.delta || {};
+      const frame = JSON.parse(line);
+      if (frame.type === "control_request" || frame.type === "sdk_control_request") {
+        if (isClaudePermissionRequest(frame)) {
+          const event = claudeApprovalEvent(sid, frame);
+          if (event.requestId) pendingApprovals.set(event.requestId, { sid, stdin: child.stdin, input: event.request.input || {} });
+          emit(event);
+          return;
+        }
+        writeClaudeControl(child.stdin, claudeControlId(frame), {});
+        return;
+      }
+      const event = frame.event || {}; const delta = event.delta || {};
       const thinking = delta.thinking || ""; const answer = delta.text || "";
       if (thinking) emit({ sessionId: sid, type: "thinking", role: "assistant", summary: String(thinking), runtimeEvent: "claude/native-thinking" });
       if (answer) emit({ sessionId: sid, type: "message", role: "assistant", summary: String(answer), runtimeEvent: "claude/native-text" });
@@ -132,9 +185,16 @@ export function createClaudeRuntime({ overlay, command, env, spawnProcess = spaw
         const tool = toolFrom({ ...event.content_block, status: "completed" });
         emit({ sessionId: sid, type: "tool", role: "tool", summary: tool.name, tool, runtimeEvent: "claude/native-tool" });
       }
-      if (frame.type === "result") emit({ sessionId: sid, type: frame.is_error ? "error" : "status", summary: frame.is_error ? String(frame.result || "Claude Code 执行失败") : "completed", runtimeEvent: "claude/native-completed" });
+      if (frame.type === "result") {
+        try { child.stdin.end(); } catch {}
+        emit({ sessionId: sid, type: frame.is_error ? "error" : "status", summary: frame.is_error ? String(frame.result || "Claude Code 执行失败") : "completed", runtimeEvent: "claude/native-completed" });
+      }
     } catch {} }));
-    await new Promise((resolve, reject) => child.once("error", reject).once("close", (code) => { active.delete(sid); code === 0 ? resolve() : reject(new Error(`Claude Code 执行失败（${code}）：${stderr.trim().slice(-1000) || "无错误输出"}`)); }));
+    await new Promise((resolve, reject) => child.once("error", reject).once("close", (code) => {
+      active.delete(sid);
+      finishApprovals(sid);
+      code === 0 ? resolve() : reject(new Error(`Claude Code 执行失败（${code}）：${stderr.trim().slice(-1000) || "无错误输出"}`));
+    }));
     return { accepted: true };
   };
   return {
@@ -143,6 +203,15 @@ export function createClaudeRuntime({ overlay, command, env, spawnProcess = spaw
     async readSession(sessionId) { const row = sessionFor(sessionId) || { id: String(sessionId), agentId: "claude-code", name: String(sessionId), state: "completed", updatedAt: null, model: "", directory: "", project: "", archived: false, capabilities: { ...CAPABILITIES } }; return { ...row, model: selectedModels.get(String(sessionId)) || row.model, messages: localMessages(sessionId, scanSessions) }; },
     async createSession({ cwd, model, effort, permissionMode, title } = {}) { const id = randomUUID(); remember({ id, agentId: "claude-code", name: String(title || "").trim().slice(0, 60) || id, state: "completed", updatedAt: new Date().toISOString(), model: model || "", directory: String(cwd || process.cwd()), project: path.basename(String(cwd || process.cwd())), archived: false, capabilities: { ...CAPABILITIES } }); if (model) selectedModels.set(id, String(model)); if (effort) selectedEfforts.set(id, String(effort)); if (permissionMode) selectedPermissions.set(id, String(permissionMode)); return { sessionId: id }; },
     sendMessage,
+    async respond(requestId, payload = {}) {
+      const pending = pendingApprovals.get(String(requestId));
+      if (!pending) throw new Error("审批请求不存在或已过期");
+      const optionId = String(payload?.outcome?.optionId || "");
+      pendingApprovals.delete(String(requestId));
+      writeClaudeControl(pending.stdin, String(requestId), optionId === "allow"
+        ? { behavior: "allow", updatedInput: pending.input || {} }
+        : { behavior: "deny", message: "用户已拒绝本次操作" });
+    },
     async setModel(id, model, effort) { selectedModels.set(String(id), String(model)); if (effort) selectedEfforts.set(String(id), String(effort)); },
     async setSettings(id, { effort, permissionMode } = {}) { if (effort) selectedEfforts.set(String(id), String(effort)); if (permissionMode) selectedPermissions.set(String(id), String(permissionMode)); },
     getSettings(id) { return { effort: selectedEfforts.get(String(id)) || "medium", permissionMode: selectedPermissions.get(String(id)) || "manual" }; },
@@ -157,6 +226,7 @@ export function createClaudeRuntime({ overlay, command, env, spawnProcess = spaw
       ]
     },
     async cancel(id) { const child = active.get(String(id)); if (!child) throw new Error("该 Claude Code 会话没有运行中的任务"); child.kill("SIGTERM"); },
+    isBusy(id) { return active.has(String(id)); },
     rename: overlay?.rename ? (id, title) => overlay.rename(String(id), String(title || "").trim().slice(0, 200)) : undefined,
     archive: overlay?.archive ? (id) => overlay.archive(String(id)) : undefined, unarchive: overlay?.unarchive ? (id) => overlay.unarchive(String(id)) : undefined,
     subscribe(handler) { subscribers.add(handler); return () => subscribers.delete(handler); },

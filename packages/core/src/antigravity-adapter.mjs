@@ -351,6 +351,11 @@ export function resolveAntigravityWireModel(model, effort = "") {
   if (/^gemini-3\.6-flash-(low|medium|high)$/.test(id) || id === "gemini-3.1-pro-low" || id === "gemini-pro-agent") {
     return { wireModel: id, thinkingLevel: "" };
   }
+  if (id === "gemini-3.7-flash" || id === "gemini-3.7-flash-tiered" || /^gemini-3\.7-flash-(low|medium|high)$/.test(id)) {
+    const fromSuffix = (id.match(/^gemini-3\.7-flash-(low|medium|high)$/) || [])[1];
+    const level = fromSuffix || (["low", "medium", "high"].includes(effort) ? effort : "medium");
+    return { wireModel: "gemini-3.7-flash-tiered", thinkingLevel: level };
+  }
   if (id === "gemini-3.6-flash") {
     const level = ["low", "medium", "high"].includes(effort) ? effort : "medium";
     return { wireModel: `gemini-3.6-flash-${level}`, thinkingLevel: effort ? level : "" };
@@ -363,6 +368,90 @@ export function resolveAntigravityWireModel(model, effort = "") {
     return { wireModel: id, thinkingLevel: ["low", "medium", "high", "max"].includes(effort) ? effort : "" };
   }
   return { wireModel: id, thinkingLevel: "" };
+}
+
+const SKIP_FETCHED_ANTIGRAVITY_MODELS = new Set([
+  "gemini-2.5-flash-thinking",
+  "gemini-2.5-pro"
+]);
+
+/** CCA fetchAvailableModels 的 runtime id → Switchyard 选择器 id。effort 变体收成一条。 */
+export function publicAntigravityModelId(wireId) {
+  const id = String(wireId || "").trim();
+  if (!id || /^(chat_|tab_)/.test(id) || SKIP_FETCHED_ANTIGRAVITY_MODELS.has(id)) return "";
+  if (id === "gemini-3.7-flash-tiered" || /^gemini-3\.7-flash-(low|medium|high)$/.test(id)) return "gemini-3.7-flash";
+  if (/^gemini-3\.6-flash-(low|medium|high)$/.test(id) || id === "gemini-3-flash-agent") return "gemini-3.6-flash";
+  if (id === "gemini-3.1-pro-low" || id === "gemini-pro-agent") return "gemini-3.1-pro";
+  const aliased = COMPAT_MODEL_ALIASES[id];
+  if (aliased) return publicAntigravityModelId(aliased) || aliased;
+  return id;
+}
+
+function fetchedAntigravityEntries(payload) {
+  const source = payload?.models;
+  if (Array.isArray(source)) {
+    return source.map((item) => [item?.id || item?.name || item?.model, item]);
+  }
+  if (source && typeof source === "object") return Object.entries(source);
+  return [];
+}
+
+function positiveNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return undefined;
+}
+
+/** 把 CCA models map 收成选择器列表；hints 用来补显示名和能力。 */
+export function collapseFetchedAntigravityModels(payload, hints = new Map()) {
+  const byId = new Map();
+  for (const [wireId, meta] of fetchedAntigravityEntries(payload)) {
+    const id = publicAntigravityModelId(wireId);
+    if (!id) continue;
+    const hint = hints.get(id);
+    const contextWindow = positiveNumber(meta?.maxTokens, meta?.contextLength, meta?.context_length);
+    const maxOutputTokens = positiveNumber(meta?.maxOutputTokens, meta?.max_output_tokens);
+    const existing = byId.get(id);
+    if (!existing) {
+      const caps = hint?.capabilities || {};
+      byId.set(id, {
+        id,
+        displayName: hint?.displayName || String(meta?.displayName || meta?.display_name || "").trim() || id,
+        contextWindow: contextWindow || hint?.contextWindow,
+        maxOutputTokens: maxOutputTokens || hint?.maxOutputTokens,
+        capabilities: {
+          text: caps.text !== false,
+          tools: caps.tools !== false,
+          reasoning: hint ? Boolean(caps.reasoning) : true,
+          images: hint ? Boolean(caps.images) : true,
+          stream: caps.stream !== false,
+          multimodal: hint ? Boolean(caps.multimodal) : true
+        },
+        raw: meta
+      });
+      continue;
+    }
+    if (contextWindow && (!existing.contextWindow || contextWindow > existing.contextWindow)) {
+      existing.contextWindow = contextWindow;
+    }
+    if (maxOutputTokens && (!existing.maxOutputTokens || maxOutputTokens > existing.maxOutputTokens)) {
+      existing.maxOutputTokens = maxOutputTokens;
+    }
+  }
+  const ordered = [];
+  const seen = new Set();
+  for (const id of hints.keys()) {
+    const item = byId.get(id);
+    if (!item) continue;
+    ordered.push(item);
+    seen.add(id);
+  }
+  for (const item of byId.values()) {
+    if (!seen.has(item.id)) ordered.push(item);
+  }
+  return ordered;
 }
 
 function firstUserText(messages) {
