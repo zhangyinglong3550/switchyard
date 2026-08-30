@@ -112,6 +112,8 @@ export function projectMobileSession(row = {}, overlay = {}) {
   return {
     id: String(row.id || ""),
     agent: String(row.agent || row.agentId || ""),
+    ...(row.source ? { source: cleanMobileText(row.source, 80) } : {}),
+    ...(row.originator ? { originator: cleanMobileText(row.originator, 80) } : {}),
     title: cleanMobileText(overlay.title || row.title || row.name || row.id || "未命名任务", 200),
     state,
     updatedAt: updatedAt ? String(updatedAt) : null,
@@ -165,13 +167,14 @@ function projectGoal(value) {
 }
 
 export function projectMobileEvent(event = {}) {
+  const summary = event.summary ?? event.text ?? event.content ?? event.delta ?? event.reasoning ?? "";
   return {
     id: Number(event.id) || 0,
     sessionId: String(event.sessionId || ""),
     type: EVENT_TYPES.has(event.type) ? event.type : "status",
     role: ["user", "assistant", "tool", "system"].includes(event.role) ? event.role : null,
     createdAt: event.createdAt ? String(event.createdAt) : null,
-    summary: cleanMobileText(event.summary || "", 4000),
+    summary: cleanMobileText(typeof summary === "string" ? summary : JSON.stringify(summary), 4000),
     // 客户端乐观渲染用的 messageId；与 ledger 数字 id 分离，便于 SSE 去重。
     ...(event.messageId ? { messageId: cleanMobileText(event.messageId, 240) } : {}),
     ...(event.approval && typeof event.approval === "object" ? {

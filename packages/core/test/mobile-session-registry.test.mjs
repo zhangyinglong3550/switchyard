@@ -240,13 +240,12 @@ test("registry accepts messages immediately, records visible state and runs the 
     text: "继续",
     messageId: "m1"
   }, "phone-1"), { accepted: true, duplicate: true });
-  await assert.rejects(
-    () => registry.perform(sessionId, "sendMessage", { text: "桌面输入", messageId: "m2" }, "desktop"),
-    (error) => error?.code === "SESSION_WRITE_CONFLICT"
-  );
+  const queued = await registry.perform(sessionId, "sendMessage", { text: "桌面输入", messageId: "m2" }, "desktop");
+  assert.equal(queued.queued, true);
   assert.deepEqual(ledger.list({ after: 0 }).map((event) => [event.type, event.role, event.summary]), [
     ["message", "user", "继续"],
-    ["status", null, "running"]
+    ["status", null, "running"],
+    ["status", null, "已排队第 1 条后续指令"]
   ]);
   await new Promise((resolve) => setImmediate(resolve));
   await registry.setSessionModel(sessionId, "p1/m1", "high", "phone-1");
@@ -256,6 +255,39 @@ test("registry accepts messages immediately, records visible state and runs the 
     ["sendMessage", "native-1", { text: "继续", messageId: "m1" }],
     ["setModel", "native-1", "p1/m1", "high"]
   ]);
+});
+
+test("registry shares one writer across devices and serializes concurrent sends", async (t) => {
+  const { registry, runtime, calls, store } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  let release;
+  runtime.sendMessage = async (id, payload) => {
+    calls.push(["sendMessage", id, payload]);
+    await new Promise((resolve) => { release = resolve; });
+  };
+
+  const first = await registry.perform(sessionId, "sendMessage", { text: "手机先发", messageId: "m-phone" }, "phone-1");
+  const second = await registry.perform(sessionId, "sendMessage", { text: "桌面继续", messageId: "m-desktop" }, "desktop");
+  assert.equal(first.state, "running");
+  assert.equal(second.queued, true);
+  assert.deepEqual(store.listQueue(sessionId).map((item) => item.text), ["桌面继续"]);
+  assert.equal(calls.filter(([name]) => name === "sendMessage").length, 1);
+
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.emit({ sessionId: "native-1", type: "status", summary: "completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter(([name]) => name === "sendMessage").map(([, , payload]) => payload.text), ["手机先发", "桌面继续"]);
+});
+
+test("registry queues a cross-device send when the desktop already holds the lease", async (t) => {
+  const { registry, runtime, store } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  store.acquireLease({ sessionId, ownerId: "desktop", ttlMs: 60_000 });
+  const result = await registry.perform(sessionId, "sendMessage", { text: "手机接续", messageId: "m-follow" }, "phone-1");
+  assert.equal(result.queued, true);
+  assert.deepEqual(store.listQueue(sessionId).map((item) => item.text), ["手机接续"]);
+  assert.equal(runtime.isBusy?.("native-1"), undefined);
 });
 
 test("registry keeps disk-index sessions running across list and detail reads", async (t) => {
@@ -427,6 +459,28 @@ test("registry publishes an error event when asynchronous message startup fails"
   assert.deepEqual(ledger.list({ after: 0 }).map((event) => [event.type, event.summary]), [
     ["message", "继续"], ["status", "running"], ["error", "Agent 未连接"]
   ]);
+});
+
+test("registry queues native writer conflicts for cross-device continuation", async (t) => {
+  const { registry, runtime, store, ledger, calls } = fixture(t);
+  const sessionId = encodeMobileSessionId("codex", "native-1");
+  let attempts = 0;
+  runtime.sendMessage = async (id, payload) => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error("thread-store conflict: already has an active writer"), { code: "ACTIVE_WRITER" });
+    calls.push(["sendMessage", id, payload]);
+  };
+
+  const result = await registry.perform(sessionId, "sendMessage", { text: "手机接续", messageId: "m-cross-device" }, "phone-1");
+  assert.equal(result.state, "running");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(store.listQueue(sessionId).map((item) => item.text), ["手机接续"]);
+  assert.match(ledger.list({ after: 0 }).at(-2).summary, /电脑端正在处理/);
+
+  runtime.emit({ sessionId: "native-1", type: "status", summary: "completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter(([name]) => name === "sendMessage").map(([, , payload]) => payload.text), ["手机接续"]);
 });
 
 test("registry projects live route diagnostics into mobile events without credentials", async (t) => {

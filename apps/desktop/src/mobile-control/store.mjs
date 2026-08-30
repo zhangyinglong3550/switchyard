@@ -234,7 +234,8 @@ export function createMobileControlStore({
       createdAt,
       lastSeenAt: null,
       revokedAt: null,
-      conversationSendMode: "ask"
+      conversationSendMode: "ask",
+      lastReadEventId: 0
     };
     save();
     return { ...publicDevice(state.devices[id]), token };
@@ -285,6 +286,15 @@ export function createMobileControlStore({
     }
     save();
     return getDevicePreferences(deviceId);
+  };
+
+  const getDeviceReadCursor = (deviceId) => Number(state.devices[String(deviceId || "")]?.lastReadEventId || 0);
+  const markDeviceRead = (deviceId, eventId) => {
+    const device = state.devices[String(deviceId || "")];
+    if (!device) throw new Error("设备不存在");
+    device.lastReadEventId = Math.max(getDeviceReadCursor(deviceId), Number(eventId) || 0);
+    save();
+    return { lastReadEventId: device.lastReadEventId };
   };
 
   const getOverlay = (sessionId) => {
@@ -351,6 +361,19 @@ export function createMobileControlStore({
     delete state.leases[id];
     save();
     return { released: true };
+  };
+
+  const listActiveLeases = () => {
+    const nowMs = now();
+    return Object.values(state.leases || {})
+      .filter((lease) => Date.parse(lease.expiresAt || "") > nowMs)
+      .map((lease) => ({
+        sessionId: String(lease.sessionId || ""),
+        ownerId: String(lease.ownerId || ""),
+        deviceName: state.devices[lease.ownerId]?.name || "移动设备",
+        acquiredAt: lease.acquiredAt || null,
+        expiresAt: lease.expiresAt || null
+      }));
   };
 
   const rememberMessage = ({ sessionId, messageId } = {}) => {
@@ -568,10 +591,13 @@ export function createMobileControlStore({
     revokeDevice,
     getDevicePreferences,
     updateDevicePreferences,
+    getDeviceReadCursor,
+    markDeviceRead,
     getOverlay,
     patchOverlay,
     acquireLease,
     releaseLease,
+    listActiveLeases,
     rememberMessage,
     putAttachment,
     rememberMobileMessage,

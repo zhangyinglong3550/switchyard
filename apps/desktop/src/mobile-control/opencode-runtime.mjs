@@ -193,7 +193,7 @@ export function readOpenCodeDbMessages(sessionId, dbPath = DEFAULT_DB_PATH) {
     if (!data || typeof data !== "object") continue;
     projected.push(...projectOpenCodeParts(data, partsByMessage.get(String(row.id)) || []));
   }
-  return projected.slice(-500);
+  return projected.slice(-2000);
 }
 
 function localOpenCodeMessagesFromJson(sessionId, storageRoot = STORAGE_ROOT) {
@@ -213,7 +213,7 @@ function localOpenCodeMessagesFromJson(sessionId, storageRoot = STORAGE_ROOT) {
       .sort((a, b) => Number(a.time?.start || a.time?.created || 0) - Number(b.time?.start || b.time?.created || 0));
     rows.push(...projectOpenCodeParts(message, parts));
   }
-  return rows.slice(-500);
+  return rows.slice(-2000);
 }
 
 function localOpenCodeMessages(sessionId, storageRoot = STORAGE_ROOT, dbPath = DEFAULT_DB_PATH) {
@@ -338,14 +338,14 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       const last = rows.at(-1);
       if (last?.role === "assistant" && last.kind === "text") last.text += text;
       else rows.push({ role: "assistant", text, kind: "text" });
-      runtimeMessages.set(sid, rows.slice(-500));
+      runtimeMessages.set(sid, rows.slice(-2000));
       emit({ sessionId: sid, type: "message", role: "assistant", summary: text, runtimeEvent: "opencode/acp-text" });
     } else if ((kind === "agent_thought_chunk" || kind === "agent_thought") && text) {
       const rows = runtimeMessages.get(sid) || [];
       const last = rows.at(-1);
       if (last?.kind === "thinking") last.text += text;
       else rows.push({ role: "assistant", text, kind: "thinking" });
-      runtimeMessages.set(sid, rows.slice(-500));
+      runtimeMessages.set(sid, rows.slice(-2000));
       emit({ sessionId: sid, type: "thinking", role: "assistant", summary: text, runtimeEvent: "opencode/acp-thinking" });
     } else if (kind === "tool_call" || kind === "tool_call_update") {
       const tool = toolFrom({
@@ -411,7 +411,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
     ];
     // 磁盘已有完整历史时不再叠内存尾，避免重开出现重复气泡。
     const merged = messages.length ? messages : ephemeral;
-    return { ...session, messages: merged.slice(-500) };
+    return { ...session, messages: merged.slice(-2000) };
   };
 
   const createSession = async ({ cwd, model } = {}) => {
@@ -430,7 +430,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
   const sendAcpMessage = async (sid, acpSessionId, { text, attachments }) => {
     const rows = runtimeMessages.get(sid) || [];
     rows.push({ role: "user", text: String(text || ""), kind: "text" });
-    runtimeMessages.set(sid, rows.slice(-500));
+      runtimeMessages.set(sid, rows.slice(-2000));
     const request = acp.request("session/prompt", {
       sessionId: acpSessionId,
       prompt: [
@@ -477,7 +477,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
       // from consuming the positional user message as another file path.
       for (const image of materialized.files) args.push(`--file=${image.path}`);
       const currentMessages = runtimeMessages.get(sid) || [];
-      runtimeMessages.set(sid, [...currentMessages, { role: "user", text: String(text || ""), kind: "text" }].slice(-500));
+      runtimeMessages.set(sid, [...currentMessages, { role: "user", text: String(text || ""), kind: "text" }].slice(-2000));
       const child = spawnProcess(binary, args, {
         cwd,
         env: runtimeEnv(),
@@ -500,7 +500,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
             const last = rows.at(-1);
             if (last?.kind === "thinking") last.text += String(part.text);
             else rows.push({ role: "assistant", text: String(part.text), kind: "thinking" });
-            runtimeMessages.set(sid, rows.slice(-500));
+            runtimeMessages.set(sid, rows.slice(-2000));
             emit({ sessionId: sid, type: "thinking", role: "assistant", summary: String(part.text), runtimeEvent: "opencode/reasoning" });
           } else if (frame.type === "text" && part.text) {
             for (const split of splitThinkingText(part.text)) {
@@ -508,7 +508,7 @@ export function createOpenCodeRuntime({ client, overlay, command, env, spawnProc
               const last = rows.at(-1);
               if (last?.role === "assistant" && last.kind === split.kind) last.text += split.text;
               else rows.push({ role: "assistant", text: split.text, kind: split.kind });
-              runtimeMessages.set(sid, rows.slice(-500));
+            runtimeMessages.set(sid, rows.slice(-2000));
               emit({
                 sessionId: sid,
                 type: split.kind === "thinking" ? "thinking" : "message",

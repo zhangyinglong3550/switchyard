@@ -66,12 +66,13 @@ function projectMessages(messages = [], {
   workspaceRoot = "",
   mobileMessages = []
 } = {}) {
-  const rows = messages.slice(-500).map((message) => ({
+  const rows = messages.slice(-2000).map((message) => ({
     id: message.id ? String(message.id).slice(0, 240) : null,
     role: ["user", "assistant", "tool", "system"].includes(message.role) ? message.role : "assistant",
     text: String(message.text || "").slice(0, 20_000),
     kind: String(message.kind || "message"),
     timestamp: message.timestamp || null,
+    source: message.role === "user" ? "desktop" : message.role === "system" ? "system" : message.role === "tool" ? "agent" : "agent",
     ...(message.turnId ? { turnId: String(message.turnId).slice(0, 240) } : {}),
     ...(Array.isArray(message.attachments) ? {
       attachments: projectMobileEvent({ type: "message", attachments: message.attachments }).attachments
@@ -84,16 +85,22 @@ function projectMessages(messages = [], {
   let cursor = 0;
   for (const mobile of mobileMessages) {
     const text = String(mobile.text || "");
+    const attachmentCount = Array.isArray(mobile.attachments) ? mobile.attachments.length : 0;
     let index = rows.findIndex((row, rowIndex) => rowIndex >= cursor
       && row.role === "user"
-      && !row.attachments?.length
+      && (row.attachments?.length || 0) === attachmentCount
       && (!text || row.text === text || row.text.startsWith(text)));
     if (index < 0) {
-      index = rows.findIndex((row, rowIndex) => rowIndex >= cursor && row.role === "user" && !row.attachments?.length);
+      index = rows.findIndex((row, rowIndex) => rowIndex >= cursor && row.role === "user" && (row.attachments?.length || 0) === attachmentCount);
+    }
+    if (index < 0) {
+      // 部分 runtime 不会把附件写回历史，仍按顺序标记来源，避免手机消息在接续后退回“电脑发送”。
+      index = rows.findIndex((row, rowIndex) => rowIndex >= cursor && row.role === "user");
     }
     if (index < 0) continue;
     rows[index] = {
       ...rows[index],
+      source: "mobile",
       ...(mobile.messageId ? { id: String(mobile.messageId).slice(0, 240) } : {}),
       attachments: projectMobileEvent({ type: "message", attachments: mobile.attachments }).attachments
     };
@@ -139,6 +146,8 @@ export function createSessionRegistry({
   const pendingApprovals = new Map();
   const sessionDirectories = new Map();
   const activeSessions = new Set();
+  // 普通消息共享同一个会话队列；不同端只竞争控制操作，不竞争 Agent writer。
+  const sendCoordinators = new Map();
   const isLiveState = (state) => ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(state));
   const overlayLiveState = (rows = []) => {
     const waiting = new Set([...pendingApprovals.values()].map((item) => item.sessionId));
@@ -153,6 +162,12 @@ export function createSessionRegistry({
   const liveGoals = new Map();
   const isQueuePaused = (sessionId) => store.isQueuePaused?.(sessionId) || false;
   const setQueuePaused = (sessionId, paused) => store.setQueuePaused?.(sessionId, paused);
+  const isWriterConflict = (error) => {
+    const code = String(error?.code || "").toUpperCase();
+    const message = String(error?.message || error || "");
+    return code === "SESSION_WRITE_CONFLICT" || code === "SEND_ACTIVE"
+      || /active writer|active send|already has active work|thread-store conflict|multiple writers|只能有一个写入/i.test(message);
+  };
   const commandCatalog = createMobileCommandCatalog();
   // Listing sessions scans each Agent's local history and (for Codex) talks to
   // its app-server. Doing that serially on every request made the phone UI wait
@@ -304,7 +319,7 @@ export function createSessionRegistry({
       ledger.append(projectMobileEvent({
         sessionId: mobileSessionId,
         type: event.type,
-        summary: event.summary,
+        summary: event.summary ?? event.text ?? event.content ?? event.delta ?? event.reasoning ?? "",
         role: event.role,
         goal: event.goal,
         attachments: event.attachments,
@@ -522,7 +537,7 @@ export function createSessionRegistry({
   // Agent runtimes may need to rescan large local transcripts. Keep completed
   // conversations warm longer; runtime events and every write invalidate this cache.
   const DETAIL_CACHE_TTL_MS = 10 * 60_000;
-  const MAX_MOBILE_DETAIL_MESSAGES = 500;
+  const MAX_MOBILE_DETAIL_MESSAGES = 2000;
   const requestedMessageLimit = (value) => Math.min(
     MAX_MOBILE_DETAIL_MESSAGES,
     Math.max(1, Number(value) || MAX_MOBILE_DETAIL_MESSAGES)
@@ -867,6 +882,19 @@ export function createSessionRegistry({
           ledger.append({ sessionId: mobileSessionId, type: "status", summary: "queued" });
           return;
         }
+        if (isWriterConflict(error)) {
+          // 原生 CLI/桌面端不经过 Switchyard lease；底层 writer 冲突是跨端接续的正常忙状态。
+          // 不丢消息、不再并发重试，等共享 runtime 发出完成事件后由 dispatchNext 接续。
+          store.prependQueueItem?.({ sessionId: mobileSessionId, ...item });
+          detailCache.delete(mobileSessionId);
+          ledger.append({
+            sessionId: mobileSessionId,
+            type: "status",
+            summary: "电脑端正在处理，消息已排队，电脑端完成后自动继续"
+          });
+          ledger.append({ sessionId: mobileSessionId, type: "status", summary: "queued" });
+          return;
+        }
         ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
       });
     } catch (error) {
@@ -892,7 +920,7 @@ export function createSessionRegistry({
     }
   };
 
-  const queueMessage = async (mobileSessionId, payload, ownerId) => {
+  const queueMessageNow = async (mobileSessionId, payload, ownerId) => {
     const text = String(payload.text || "").trim();
     const attachments = normalizeAttachments(payload.attachments);
     if (!text && !attachments.length) throw new Error("消息或附件不能为空");
@@ -903,7 +931,6 @@ export function createSessionRegistry({
     if (remembered.duplicate) return { accepted: true, duplicate: true };
     const storedAttachments = attachments.map((attachment, index) => store.putAttachment({ sessionId: mobileSessionId, messageId, index, name: attachment.name, mimeType: attachment.mimeType, kind: attachment.kind, data: attachment.data }));
     const item = { id: `queue_${randomUUID()}`, messageId, text, attachments: storedAttachments };
-    acquire(mobileSessionId, ownerId);
     let busy = activeSessions.has(mobileSessionId);
     // After a desktop restart, the in-memory active set is empty while a native
     // turn may still be running. Ask the runtime before deciding to start a
@@ -915,6 +942,16 @@ export function createSessionRegistry({
         busy = ["running", "queued", "waiting_for_approval", "waiting_for_desktop_approval"].includes(String(detail?.state || ""));
         if (busy) activeSessions.add(mobileSessionId);
       } catch {}
+    }
+    if (!busy && !isQueuePaused(mobileSessionId)) {
+      // 读历史期间桌面端可能刚好启动了 turn。把 lease 冲突视为“已忙”，
+      // 让消息进入同一队列，而不是把跨端接续暴露成 409。
+      try {
+        acquire(mobileSessionId, ownerId);
+      } catch (error) {
+        if (error?.code !== "SESSION_WRITE_CONFLICT") throw error;
+        busy = true;
+      }
     }
     if (busy || isQueuePaused(mobileSessionId)) {
       const guided = deliveryMode === "guide";
@@ -937,6 +974,18 @@ export function createSessionRegistry({
       ledger.append({ sessionId: mobileSessionId, type: "error", summary: error?.message || String(error) });
     });
     return { accepted: true, duplicate: false, state: "running" };
+  };
+
+  const queueMessage = (mobileSessionId, payload, ownerId) => {
+    const previous = sendCoordinators.get(mobileSessionId) || Promise.resolve();
+    const current = previous.catch(() => {}).then(() => queueMessageNow(mobileSessionId, payload, ownerId));
+    sendCoordinators.set(mobileSessionId, current);
+    void current.then(() => {
+      if (sendCoordinators.get(mobileSessionId) === current) sendCoordinators.delete(mobileSessionId);
+    }, () => {
+      if (sendCoordinators.get(mobileSessionId) === current) sendCoordinators.delete(mobileSessionId);
+    });
+    return current;
   };
 
   const perform = async (mobileSessionId, action, payload = {}, ownerId) => {
@@ -1035,6 +1084,18 @@ export function createSessionRegistry({
       actions: [...approval.actions],
       createdAt: approval.createdAt
     }));
+
+  const listAttention = ({ after = 0 } = {}) => {
+    const terminal = new Set(["completed", "failed", "cancelled", "canceled", "incomplete"]);
+    const rows = ledger.list({ after, limit: 2000 }).filter((event) =>
+      event.type === "approval" || event.type === "file_delivery" || event.type === "error"
+      || (event.type === "status" && (terminal.has(String(event.summary || "").toLowerCase())
+        || String(event.summary || "").toLowerCase() === "waiting_for_input"))
+    );
+    const latest = new Map();
+    for (const event of rows) latest.set(event.sessionId || `event:${event.id}`, event);
+    return [...latest.values()].sort((a, b) => b.id - a.id).slice(0, 100);
+  };
 
   const resolveApproval = async (approvalId, decision) => {
     const approval = pendingApprovals.get(String(approvalId || ""));
@@ -1152,6 +1213,7 @@ export function createSessionRegistry({
     removeQueueItem,
     resumeQueue,
     listApprovals,
+    listAttention,
     resolveApproval,
     resolveAsset: (assetId) => store.resolveAsset?.(assetId) || null,
     listEvents: (filters) => ledger.list(filters),

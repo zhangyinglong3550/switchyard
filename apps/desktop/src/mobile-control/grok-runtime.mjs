@@ -60,7 +60,7 @@ export function parseGrokChatHistory(lines) {
     const text = raw.trim();
     if (text && type === "assistant") messages.push({ role: "assistant", text, kind: "text" });
   }
-  return messages.slice(-500);
+  return messages.slice(-2000);
 }
 
 function localGrokMessages(sessionId) {
@@ -119,8 +119,13 @@ function mergeGrokLiveTail(diskMessages = [], liveMessages = []) {
   if (!diskAssistant) return disk.concat(liveTail);
   // Grok 偶发只落盘很短的半截回答；若 live 明显更长，用 live 替换本轮助手尾。
   if (liveAssistant.length > diskAssistant.length + 16) {
-    const kept = diskTail.filter((message) => !(message.role === "assistant" && message.kind !== "thinking" && !message.tool));
-    return disk.slice(0, lastUser + 1).concat(kept, liveTail);
+    const answer = liveTail.find((message) => message.role === "assistant" && message.kind !== "thinking" && !message.tool);
+    const lastAnswerIndex = diskTail.findLastIndex((message) => message.role === "assistant" && message.kind !== "thinking" && !message.tool);
+    const replaced = diskTail.map((message, index) => index === lastAnswerIndex
+      ? { ...message, text: answer?.text || message.text }
+      : message);
+    const extra = liveTail.filter((message) => message.kind === "thinking" || message.kind === "tool" || message.tool);
+    return disk.slice(0, lastUser + 1).concat(replaced, extra);
   }
   return disk;
 }

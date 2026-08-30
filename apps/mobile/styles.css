@@ -99,6 +99,11 @@ svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 /* ---------- approval inbox ---------- */
 .approval-inbox{display:grid;gap:9px;margin-bottom:10px}
 .approval-inbox:empty{display:none;margin:0}
+.attention-card{border:1px solid var(--line);border-radius:14px;background:var(--card);overflow:hidden}
+.attention-head{display:flex;align-items:center;justify-content:space-between;padding:2px 2px 0;color:var(--muted);font-size:11px}.attention-head button{border:0;background:transparent;color:var(--accent);font-size:11px;font-weight:750}
+.attention-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;min-height:52px;padding:8px 10px;border:0;background:transparent;color:var(--text);text-align:left}
+.attention-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:850}
+.attention-row b,.attention-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attention-row b{font-size:12.5px}.attention-row small{margin-top:2px;color:var(--dim);font-size:10.5px}.attention-row em{color:var(--accent);font-size:11px;font-style:normal;font-weight:750}
 .approval-card{border:1px solid var(--amber-line);border-radius:16px;background:var(--card);padding:12px 13px;box-shadow:0 4px 14px rgba(194,98,47,.07)}
 .approval-card .r1{display:flex;gap:8px;align-items:center;font-size:13px;font-weight:700}
 .approval-card .r1 i{width:8px;height:8px;border-radius:50%;background:#d08a1d;flex:none;animation:pulse 1.8s infinite}
@@ -845,6 +850,7 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 /* ---------- diff card ---------- */
 .diff{border-radius:11px}
 .diff-head{letter-spacing:.2px}
+.diff-files{display:flex;gap:5px;overflow:auto;padding:7px 9px;border-top:1px solid var(--line-soft);background:var(--card-soft);scrollbar-width:none}.diff-files::-webkit-scrollbar{display:none}.diff-files span{flex:0 0 auto;padding:3px 7px;border-radius:6px;background:var(--line-soft);color:var(--dim);font:10px var(--mono)}
 /* ---------- composer ---------- */
 .composer textarea{transition:border-color .18s ease,box-shadow .18s ease}
 .composer textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 14%,transparent)}
@@ -976,6 +982,25 @@ html,body{width:100%;max-width:100%;overflow-x:hidden}
 :root[data-scheme="dark"] .attach-control{background:rgba(255,255,255,.045)}
 :root[data-scheme="dark"] .think{background:color-mix(in srgb,var(--accent) 6%,var(--card-soft))}
 :root[data-scheme="dark"] .tl{border-bottom-color:rgba(255,255,255,.05)}
+
+/* v90: 让接续状态在消息本身可见，不依赖顶部连接提示。 */
+.message-origin{display:flex;align-items:center;gap:7px;margin:0 2px 5px;color:var(--faint);font-size:10px;font-weight:750}
+.message-origin span{display:inline-flex;align-items:center;gap:5px}
+.message-origin span::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted)}
+.me[data-message-source="mobile"] .message-origin span::before{background:var(--accent)}
+.message-origin small{color:var(--green);font-size:10px;font-weight:700}
+.delivery-failed .message-origin small{color:var(--danger)}
+.turn-events{display:flex;align-items:center;gap:0;margin:0 0 8px;padding:0 3px;color:var(--faint);font-size:10px;overflow:auto;scrollbar-width:none}
+.turn-events::-webkit-scrollbar{display:none}
+.turn-event{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.turn-event:not(:last-child)::after{content:"";width:18px;height:1px;margin:0 7px;background:var(--line-input)}
+.turn-event i{width:6px;height:6px;border-radius:50%;background:var(--line-input);flex:none}
+.turn-event.current{color:var(--text);font-weight:750}
+.turn-event.current i{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 14%,transparent)}
+.tool-detail-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px;padding:7px 9px;border-radius:9px;background:var(--card-soft);color:var(--faint);font-size:10px}
+.tool-detail-meta small{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:10px}
+.diff-controls button[data-copy-value],.diff-controls button[data-quote-value]{color:var(--accent)}
+:root[data-scheme="dark"] .tool-detail-meta{background:rgba(255,255,255,.04)}
 
 /* ============================================================
    v89: bottom task panel — DSH 桌面端「可收起任务卡」的手机形态。

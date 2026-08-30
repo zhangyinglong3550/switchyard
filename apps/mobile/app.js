@@ -62,6 +62,7 @@ let selectedWorkspace = "";
 let browsedWorkspace = null;
 let selectedFilter = "all";
 let pendingApprovals = [];
+let attentionItems = [];
 let archivedView = false;
 let sessionSelectionMode = false;
 const selectedSessionIds = new Set();
@@ -198,6 +199,26 @@ function setConnectionStatus(text, ok = true) {
     detail.textContent = show ? `· ${text}` : "";
     detail.classList.toggle("off", !ok);
   }
+}
+function attentionLabel(event = {}) {
+  const summary = String(event.summary || "");
+  if (event.type === "approval") return "等待审批";
+  if (event.type === "file_delivery") return "有文件交付";
+  if (event.type === "error" || summary === "failed") return "任务失败";
+  if (summary === "waiting_for_input") return "等待你的输入";
+  if (summary === "completed") return "任务已完成";
+  return summary || "有新的任务状态";
+}
+function renderAttentionInbox() {
+  const host = $("#approval-inbox");
+  if (!host) return;
+  const approvals = pendingApprovals.map((approval) => approvalCardHtml(approval));
+  const rows = attentionItems.filter((item) => item.type !== "approval");
+  const content = approvals.concat(rows.map((item) => {
+    const session = allSessions.find((row) => row.id === item.sessionId);
+    return `<article class="attention-card"><button type="button" class="attention-row" data-attention-session="${escapeHtml(item.sessionId)}" data-attention-event="${item.id}"><span class="attention-mark">${item.type === "file_delivery" ? "↧" : item.type === "error" ? "!" : "•"}</span><span><b>${escapeHtml(session?.title || "任务")}</b><small>${escapeHtml(attentionLabel(item))} · ${escapeHtml(item.summary || "")}</small></span><em>查看</em></button></article>`;
+  }).join(""));
+  host.innerHTML = content ? `<div class="attention-head"><strong>待处理事项</strong><button type="button" data-attention-read-all>全部已读</button></div>${content}` : "";
 }
 function toast(message) { const el = $("#toast"); el.textContent = message; el.classList.add("toast-show"); clearTimeout(toast.timer); toast.timer = setTimeout(() => el.classList.remove("toast-show"), 2900); }
 
@@ -762,7 +783,7 @@ function sessionRowHtml(session) {
   const agentTagText = agentLabel(session.agent).replace(" Build", "").replace(" Code", "");
   const tag = running ? '<span class="tag tag-run">运行中</span>' : waiting ? '<span class="tag tag-wait">待审批</span>' : session.state === "failed" ? '<span class="tag tag-fail">已失败</span>' : `<span class="tag tag-agent"><i class="tag-dot ${agentClass(session.agent)}"></i>${escapeHtml(agentTagText)}</span>`;
   const pinned = session.pinned ? '<span class="session-pinned" aria-label="已置顶">⌖</span>' : "";
-  const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""} swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""}</span></span><span class="session-meta">${pinned}<time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
+  const row = `<button class="session-row${sessionSelectionMode ? " selection-mode" : ""} swipe-content" data-state="${escapeHtml(session.state)}" data-id="${escapeHtml(session.id)}" type="button">${sessionSelectionMode ? `<span class="session-select-indicator${selected ? " selected" : ""}" data-session-select="${escapeHtml(session.id)}" aria-label="${selected ? "取消选择" : "选择"}">${selected ? "✓" : ""}</span>` : ""}<span class="session-copy"><span class="session-title">${escapeHtml(session.title)}</span><span class="session-subtitle">${escapeHtml(agentLabel(session.agent))}${session.model ? ` · ${escapeHtml(session.model)}` : ""} · 电脑可继续</span></span><span class="session-meta">${pinned}<time>${formatSessionTime(session.updatedAt)}</time>${tag}</span></button>`;
   if (sessionSelectionMode) return `<div class="session-select-item">${row}</div>`;
   return `<div class="swipe-item" data-swipe-id="${escapeHtml(session.id)}"><div class="swipe-actions"><button type="button" class="swipe-btn pin" data-session-action="pin" data-pinned="${session.pinned ? "true" : "false"}" data-id="${escapeHtml(session.id)}">${session.pinned ? "取消置顶" : "置顶"}</button><button type="button" class="swipe-btn rename" data-session-action="rename" data-id="${escapeHtml(session.id)}">重命名</button><button type="button" class="swipe-btn archive" data-session-action="archive" data-id="${escapeHtml(session.id)}">${archivedView ? "取消归档" : "归档"}</button><button type="button" class="swipe-btn danger" data-session-action="delete" data-id="${escapeHtml(session.id)}">删除</button></div>${row}</div>`;
 }
@@ -895,9 +916,10 @@ function renderStatusSummary() {
   const strip = $("#status-strip");
   const running = allSessions.filter((session) => ["running", "queued"].includes(session.state)).length;
   const waiting = pendingApprovals.length;
-  if (!running && !waiting) { strip.hidden = true; strip.innerHTML = ""; return; }
+  const attention = attentionItems.filter((item) => item.type !== "approval").length;
+  if (!running && !waiting && !attention) { strip.hidden = true; strip.innerHTML = ""; return; }
   strip.hidden = false;
-  strip.innerHTML = `${running ? `<button type="button" class="status-strip-action" data-open-active-sessions><span class="spin"></span><span>${running} 个任务正在运行</span><span class="status-strip-arrow">›</span></button>` : ""}${running && waiting ? '<span class="status-strip-divider">·</span>' : ""}${waiting ? `<button type="button" class="status-strip-action status-strip-approvals" data-open-approvals><b>${waiting} 个等待你审批</b><span class="status-strip-arrow">›</span></button>` : ""}`;
+  strip.innerHTML = `${running ? `<button type="button" class="status-strip-action" data-open-active-sessions><span class="spin"></span><span>${running} 个任务正在运行</span><span class="status-strip-arrow">›</span></button>` : ""}${running && (waiting || attention) ? '<span class="status-strip-divider">·</span>' : ""}${waiting ? `<button type="button" class="status-strip-action status-strip-approvals" data-open-approvals><b>${waiting} 个等待你审批</b><span class="status-strip-arrow">›</span></button>` : ""}${attention ? `<span class="status-strip-divider">·</span><button type="button" class="status-strip-action" data-open-attention><b>${attention} 个待处理事项</b><span class="status-strip-arrow">›</span></button>` : ""}`;
 }
 
 function requestSessionDeletion(ids) {
@@ -1016,7 +1038,7 @@ function hideApprovalSheet() { activeApprovalId = ""; setSheetVisible("#approval
 function renderApprovalInbox() {
   // 会话列表页只保留顶部「等待你审批」入口，避免和 Agent 下方卡片重复。
   const listInbox = $("#approval-inbox");
-  if (listInbox) listInbox.innerHTML = "";
+  if (listInbox) renderAttentionInbox();
   const sessionInbox = $("#session-approval-inbox");
   if (!sessionInbox) return;
   const currentApprovals = current ? pendingApprovals.filter((approval) => approval.sessionId === current.id) : [];
@@ -1407,7 +1429,7 @@ function renderProducedFiles(messages = []) {
   if (!files.length) return "";
   return `<section class="produced-files" aria-label="本轮产物"><div class="produced-files-head"><span>本轮产物</span><small>${files.length} 个文件</small></div><div class="message-attachments">${files.map((file) => {
     const metadata = `data-asset-name="${escapeHtml(file.name || "文件")}" data-asset-mime="${escapeHtml(file.mimeType || "application/octet-stream")}" data-asset-kind="${escapeHtml(file.kind || "workspace_file")}"`;
-    return `<button type="button" class="message-attachment file produced-file" data-file-open="${escapeHtml(file.id)}" ${metadata}><i>${escapeHtml(attachmentIcon(file))}</i><span><strong>${escapeHtml(file.name || "文件")}</strong><small>点击预览或下载</small></span></button>`;
+    return `<button type="button" class="message-attachment file produced-file" data-file-open="${escapeHtml(file.id)}" ${metadata}><i>${escapeHtml(attachmentIcon(file))}</i><span><strong>${escapeHtml(file.name || "文件")}</strong><small>${escapeHtml(assetMetadataLabel(file))} · 点击预览或下载</small></span></button>`;
   }).join("")}</div></section>`;
 }
 function isToolMessage(message) { return message?.role === "tool" || message?.kind === "tool"; }
@@ -1536,8 +1558,7 @@ function parseEditPatch(source) {
   const text = String(source || "");
   if (!text) return null;
   if (text.includes("*** Begin Patch")) {
-    const fileMatch = text.match(/\*\*\* (?:Update File|Add File|Delete File): (.+)/);
-    const fileCount = (text.match(/\*\*\* (?:Update File|Add File|Delete File): /g) || []).length;
+    const fileNames = [...text.matchAll(/\*\*\* (?:Update File|Add File|Delete File): (.+)/g)].map((match) => match[1].trim()).filter(Boolean);
     let adds = 0; let dels = 0; const rows = [];
     for (const line of text.split("\n")) {
       if (line.startsWith("***")) continue;
@@ -1547,7 +1568,7 @@ function parseEditPatch(source) {
       else if (line.startsWith(" ")) rows.push({ type: "ctx", text: line.slice(1) });
     }
     if (!adds && !dels && !rows.length) return null;
-    return { fileName: (fileMatch?.[1] || "修改内容").trim() + (fileCount > 1 ? ` 等 ${fileCount} 个文件` : ""), adds, dels, rows: rows.slice(0, 240) };
+    return { fileName: fileNames[0] || "修改内容", files: fileNames, adds, dels, rows: rows.slice(0, 240) };
   }
   if (/^--- /m.test(text) && /^\+\+\+ /m.test(text)) {
     let adds = 0; let dels = 0; const rows = []; let fileName = "";
@@ -1560,7 +1581,7 @@ function parseEditPatch(source) {
       else if (line.startsWith(" ")) rows.push({ type: "ctx", text: line.slice(1) });
     }
     if (!adds && !dels) return null;
-    return { fileName: fileName || "修改内容", adds, dels, rows: rows.slice(0, 240) };
+    return { fileName: fileName || "修改内容", files: fileName ? [fileName] : [], adds, dels, rows: rows.slice(0, 240) };
   }
   return null;
 }
@@ -1572,7 +1593,15 @@ function renderDiffCard(patch) {
     return `<tr class="${row.type}"><td class="ln">${ln}</td><td>${escapeHtml(row.text)}</td></tr>`;
   }).join("");
   const stat = `${patch.adds ? `<span class="plus">+${patch.adds}</span>` : ""}${patch.dels ? ` <span class="minus">−${patch.dels}</span>` : ""}`;
-  return `<div class="diff" data-diff><div class="diff-head"><span class="fname">${escapeHtml(patch.fileName || "修改内容")}</span><span class="stat">${stat}</span></div><div class="diff-controls"><button type="button" data-diff-filter="all" class="selected">全部</button><button type="button" data-diff-filter="changes">仅变更</button><button type="button" data-diff-context-toggle>折叠未变内容</button></div><div class="diff-table-wrap"><table>${rows}</table></div></div>`;
+  const files = Array.isArray(patch.files) && patch.files.length > 1 ? `<div class="diff-files">${patch.files.map((file) => `<span>${escapeHtml(file)}</span>`).join("")}</div>` : "";
+  const quote = patch.rows.filter((row) => row.type !== "ctx").map((row) => `${row.type === "add" ? "+" : row.type === "del" ? "-" : ""}${row.text}`).join("\n");
+  return `<div class="diff" data-diff><div class="diff-head"><span class="fname">${escapeHtml(patch.fileName || "修改内容")}${patch.files?.length > 1 ? ` 等 ${patch.files.length} 个文件` : ""}</span><span class="stat">${stat}</span></div>${files}<div class="diff-controls"><button type="button" data-diff-filter="all" class="selected">全部</button><button type="button" data-diff-filter="changes">仅变更</button><button type="button" data-diff-context-toggle>折叠未变内容</button><button type="button" data-copy-value="${encodeURIComponent(quote)}" data-copy-success="已复制变更">复制变更</button><button type="button" data-quote-value="${encodeURIComponent(quote)}">引用变更</button></div><div class="diff-table-wrap"><table>${rows}</table></div></div>`;
+}
+
+function toolMetaHtml(tool, activity) {
+  const files = Array.isArray(tool.files) ? tool.files.length : 0;
+  const values = [toolStatusLabel(tool.status), formatDuration(tool.durationMs), Number.isFinite(Number(tool.exitCode)) ? `退出码 ${tool.exitCode}` : "", files ? `${files} 个相关文件` : ""].filter(Boolean);
+  return values.length ? `<div class="tool-detail-meta"><span>${escapeHtml(activity === "command" ? "执行信息" : "操作信息")}</span><small>${escapeHtml(values.join(" · "))}</small></div>` : "";
 }
 
 function toolRowSubtitle(tool, activity) {
@@ -1615,7 +1644,7 @@ ${text.slice(-500)}` : text;
   const text = stripAnsi(tool.output).trim() || stripAnsi(tool.error).trim() || String(tool.arguments || "").trim() || stripAnsi(tool.command).trim();
   if (text) blocks.push(`<div class="pv"><div class="pv-head">${escapeHtml(head)}</div><pre>${escapeHtml(text.slice(0, 5000))}</pre></div>`);
   blocks.push(filesHtml);
-  return blocks.join("") || '<div class="pv"><pre>Agent 未提供命令或参数详情</pre></div>';
+    return toolMetaHtml(tool, activity) + blocks.join("") || '<div class="pv"><pre>Agent 未提供命令或参数详情</pre></div>';
 }
 
 function renderToolItem(message, key, position = "") {
@@ -1711,7 +1740,7 @@ function renderMessageInner(message, extraClass = "", index = 0) {
   const kind = message.kind || "message"; const key = messageKey(message, index); const text = String(message.text || "");
   if (kind === "thinking") return `<details class="think" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"><summary><i></i><b>思考摘要</b><span class="preview">${escapeHtml(firstLine(text)).slice(0, 120)}</span><span class="fold">展开</span><span class="chevron">⌄</span></summary><div class="think-body">${renderRichText(text)}</div></details>`;
   if (isToolMessage(message)) return renderToolGroup([message], index);
-  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
+  if (message.role === "user") return `<div class="me ${extraClass}" data-message-key="${escapeHtml(key)}" data-raw="${escapeHtml(text)}" data-message-source="${escapeHtml(message.source || "desktop")}" data-message-status="${escapeHtml(message.deliveryStatus || "")}"${message.id ? ` data-message-id="${escapeHtml(message.id)}"` : ""}${extraClass.includes("failed") ? ` data-retry-text="${escapeHtml(text)}"` : ""}><div class="message-origin"><span>${message.source === "mobile" ? "手机发送" : "电脑发送"}</span>${message.deliveryStatus ? `<small>${escapeHtml(message.deliveryStatus === "sending" ? "正在发送" : message.deliveryStatus === "accepted" ? "已送达桌面" : message.deliveryStatus === "running" ? "执行中" : message.deliveryStatus === "failed" ? "发送失败" : "")}</small>` : ""}</div><div class="msg-body">${escapeHtml(text)}</div>${renderMessageAttachments(message.attachments)}${extraClass.includes("failed") ? '<button type="button" class="retry-send" data-retry>重试</button>' : ""}</div>`;
   const segments = splitStructuredContent(text);
   const hasStructured = segments.some((segment) => segment.type === "notification" || segment.type === "context");
   if (hasStructured) {
@@ -1852,7 +1881,22 @@ function renderConversationTurn(turn) {
   const attachments = turn.entries.filter(({ message }) => message.delivery).map(({ message }) => renderDeliveredFile(message.delivery)).join("");
   const completion = work.summary ? `<div class="turn-completion ${escapeHtml(work.summary.state)}"><i>${work.summary.state === "failed" ? "!" : work.summary.state === "running" ? "…" : "✓"}</i><span><b>${escapeHtml(work.summary.text)}</b><small>${escapeHtml(work.summary.detail || "")}</small></span></div>` : "";
   const timeChip = turnTimeLabel(turn);
-  return `<section class="conversation-turn${turn.request ? " has-request" : ""}" data-turn-id="${escapeHtml(turn.id)}">${timeChip}${request}${work.html}${completion}${finals ? `<div class="turn-result">${finals}</div>` : ""}${attachments}</section>`;
+  const events = [];
+  if (turn.request) events.push("已发起");
+  if (work.summary?.state === "running") events.push("执行中");
+  if (work.summary?.state === "failed") events.push("执行失败");
+  if (attachments) events.push("文件已交付");
+  if (work.summary?.state === "completed" && !attachments) events.push("已完成");
+  const timeline = events.length > 1 ? `<div class="turn-events" aria-label="本轮事件">${events.map((label, index) => `<span class="turn-event${index === events.length - 1 ? " current" : ""}"><i></i>${escapeHtml(label)}</span>`).join("")}</div>` : "";
+  return `<section class="conversation-turn${turn.request ? " has-request" : ""}" data-turn-id="${escapeHtml(turn.id)}">${timeChip}${timeline}${request}${work.html}${completion}${finals ? `<div class="turn-result">${finals}</div>` : ""}${attachments}</section>`;
+}
+function updateMessageDeliveryStatus(messageId, status) {
+  const node = document.querySelector(`[data-message-id="${CSS.escape(String(messageId || ""))}"]`);
+  if (!node) return;
+  node.dataset.messageStatus = status;
+  const label = node.querySelector(".message-origin small");
+  if (label) label.textContent = ({ sending: "正在发送", accepted: "已送达桌面", running: "执行中", failed: "发送失败" })[status] || "";
+  node.classList.toggle("delivery-failed", status === "failed");
 }
 /** 每轮一条轻量时间提示：有用户消息时间就用它，否则用该轮第一条消息时间。 */
 function turnTimeLabel(turn) {
@@ -1950,6 +1994,11 @@ async function loadSessions({ background = false } = {}) {
 }
 async function loadWorkspaces() { workspaces = await api("/mobile/v1/workspaces"); renderWorkspaces(); renderSessionList(); }
 async function loadApprovals() { pendingApprovals = await api("/mobile/v1/approvals"); renderApprovalInbox(); renderStatusSummary(); }
+async function loadAttention() {
+  const result = await api("/mobile/v1/attention");
+  attentionItems = Array.isArray(result?.items) ? result.items : [];
+  renderAttentionInbox(); renderStatusSummary();
+}
 
 function cacheSessionDetail(detail) {
   if (!detail?.id) return;
@@ -1969,7 +2018,7 @@ function scheduleDetailPreload(rows = []) {
 function applySessionDetail(detail, { activate = true, instant = false, anchor = false } = {}) {
   current = detail;
   $("#detail-title").textContent = current.title;
-  $("#detail-meta").textContent = `${agentLabel(current.agent)}${current.model ? ` · ${current.model}` : ""}`;
+  $("#detail-meta").textContent = `${agentLabel(current.agent)}${current.model ? ` · ${current.model}` : ""} · 电脑可继续`;
   $("#chat-state-dot").className = current.state || "";
   renderRuntimeShortcut(); renderApprovalInbox(); renderSessionQueue(); renderGoalPanel(); renderTaskPanel(); updateComposerQueueState();
   const options = { hasMore: Boolean(current.hasMoreMessages), total: current.messagesTotal };
@@ -2030,7 +2079,7 @@ async function loadEarlierMessages() {
   // Anchor the viewport: older messages insert above, so compensate for the
   // height delta instead of jumping to the newest message.
   const distanceFromBottom = document.documentElement.scrollHeight - window.scrollY;
-  await openSession(current.id, { messageLimit: 500, anchor: true });
+  await openSession(current.id, { messageLimit: 2000, anchor: true });
   requestAnimationFrame(() => window.scrollTo({ top: Math.max(0, document.documentElement.scrollHeight - distanceFromBottom), behavior: "auto" }));
 }
 
@@ -2120,6 +2169,10 @@ function liveTurnWork(turn) {
 }
 function appendEvent(event) {
   if (!current || event.sessionId !== current.id) return;
+  event = {
+    ...event,
+    summary: event.summary ?? event.text ?? event.content ?? event.delta ?? event.reasoning ?? ""
+  };
   sessionDetailCache.delete(current.id);
   if (event.goal) { current.goal = event.goal; renderGoalPanel(); renderTaskPanel(); }
   if (event.route) updateLiveRouteCard(event.route);
@@ -2138,8 +2191,9 @@ function appendEvent(event) {
         : null;
       if (existing || duplicateByText) {
         if (duplicateByText && clientId) duplicateByText.dataset.messageId = clientId;
+        if (clientId) updateMessageDeliveryStatus(clientId, "accepted");
       } else {
-        host.insertAdjacentHTML("beforeend", renderConversationTurn({ id: clientId || event.id || `live-${Date.now()}`, request: { id: clientId || event.id, role, text: event.summary, attachments: event.attachments || [] }, entries: [] }));
+        host.insertAdjacentHTML("beforeend", renderConversationTurn({ id: clientId || event.id || `live-${Date.now()}`, request: { id: clientId || event.id, role, text: event.summary, attachments: event.attachments || [], source: event.messageId ? "mobile" : "desktop", deliveryStatus: event.messageId ? "accepted" : "" }, entries: [] }));
       }
     } else {
       const turn = liveTurn(); let result = turn.querySelector(":scope > .turn-result");
@@ -2260,6 +2314,10 @@ async function handleEvent(event) {
       }
     }
   }
+  if (["approval", "file_delivery", "error"].includes(event.type) || (event.type === "status" && ["completed", "failed", "waiting_for_input", "cancelled", "incomplete"].includes(String(event.summary || "").toLowerCase()))) {
+    attentionItems = [event, ...attentionItems.filter((item) => item.sessionId !== event.sessionId)].slice(0, 100);
+    renderAttentionInbox(); renderStatusSummary();
+  }
   if (event.type === "approval") {
     // Approval events may arrive while a detail response is cached. Await the
     // refresh so the fixed current-session card is rendered before the user sees a failure state.
@@ -2294,7 +2352,7 @@ async function handleEvent(event) {
   appendEvent(event);
   scheduleFinalReconcile(event);
 }
-async function readEventStream(response) { if (!response.ok || !response.body) throw new Error(`事件流 HTTP ${response.status}`); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let boundary; while ((boundary = buffer.indexOf("\n\n")) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2); const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (data) await handleEvent(JSON.parse(data)); } } }
+async function readEventStream(response) { if (!response.ok || !response.body) throw new Error(`事件流 HTTP ${response.status}`); const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; const consume = async (frame) => { const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (data) await handleEvent(JSON.parse(data)); }; while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let boundary; while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(buffer.match(/\r?\n\r?\n/)[0].length + boundary); await consume(frame); } } buffer += decoder.decode(); if (buffer.trim()) await consume(buffer); }
 let runningReconcileTimer = null;
 function scheduleRunningReconcile() {
   const id = current?.id;
@@ -2323,14 +2381,16 @@ async function connectEvents() {
   if (eventLoopRunning) return;
   eventLoopRunning = true;
   const poll = hasNativeTokenStore();
+  setConnectionStatus(navigator.onLine === false ? "网络已断开" : "正在连接", false);
   try { await syncLiveEventCursor(); } catch {}
   try {
     while (token && !eventLoopStopped) {
       try {
         if (poll) await pollEventBatch();
         else await readEventStream(await fetch(`/mobile/v1/events?after=${eventCursor}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } }));
+        setConnectionStatus("已安全连接");
       } catch (error) {
-        if (error.name !== "AbortError" && error.code !== "timeout") setConnectionStatus("正在重连", false);
+        if (error.name !== "AbortError" && error.code !== "timeout") setConnectionStatus(navigator.onLine === false ? "网络已断开" : "无法连接，点击重试", false);
       }
       await new Promise((resolve) => setTimeout(resolve, poll ? 1_000 : 800));
     }
@@ -2344,9 +2404,13 @@ function resumeMobileConnection() {
   connectEvents();
   refreshSessionsInBackground();
   void loadApprovals().catch(() => {});
+  void loadAttention().catch(() => {});
   if (current) openSession(current.id, { activate: false }).catch(() => {});
 }
 window.SwitchyardResume = resumeMobileConnection;
+window.addEventListener("online", resumeMobileConnection);
+window.addEventListener("offline", () => setConnectionStatus("网络已断开", false));
+window.addEventListener("pageshow", resumeMobileConnection);
 
 function closeWorkspaceMenus(except = null) {
   document.querySelectorAll(".group-menu:not([hidden])").forEach((menu) => { if (menu !== except) menu.hidden = true; });
@@ -2365,6 +2429,27 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("click", async (event) => {
   try {
+    if (event.target.closest("#connection")) { resumeMobileConnection(); return; }
+    const attention = event.target.closest("[data-attention-session]");
+    if (attention) {
+      const eventId = Number(attention.dataset.attentionEvent || 0);
+      if (eventId) await api("/mobile/v1/attention/read", { method: "POST", body: JSON.stringify({ eventId }) }).catch(() => {});
+      attentionItems = attentionItems.filter((item) => item.id > eventId);
+      renderAttentionInbox(); renderStatusSummary();
+      await openSession(attention.dataset.attentionSession); return;
+    }
+    if (event.target.closest("[data-attention-read-all]")) {
+      const latest = Math.max(0, ...attentionItems.map((item) => Number(item.id) || 0));
+      if (latest) await api("/mobile/v1/attention/read", { method: "POST", body: JSON.stringify({ eventId: latest }) }).catch(() => {});
+      attentionItems = [];
+      renderAttentionInbox(); renderStatusSummary();
+      toast("已全部标记为已读"); return;
+    }
+    if (event.target.closest("[data-open-attention]")) {
+      const item = attentionItems.find((row) => row.type !== "approval");
+      if (item) { await openSession(item.sessionId); }
+      return;
+    }
     const commandOption = event.target.closest("[data-command-index]");
     if (commandOption) { chooseCommand(Number(commandOption.dataset.commandIndex)); return; }
     const workHead = event.target.closest(".work-head");
@@ -2374,8 +2459,10 @@ document.addEventListener("click", async (event) => {
     if (diffFilter) { const diff = diffFilter.closest("[data-diff]"); diff?.setAttribute("data-filter", diffFilter.dataset.diffFilter); diff?.querySelectorAll("[data-diff-filter]").forEach((button) => button.classList.toggle("selected", button === diffFilter)); return; }
     const diffContext = event.target.closest("[data-diff-context-toggle]");
     if (diffContext) { const diff = diffContext.closest("[data-diff]"); const collapsed = diff?.classList.toggle("context-collapsed"); diffContext.textContent = collapsed ? "显示未变内容" : "折叠未变内容"; return; }
+    const quoteValue = event.target.closest("[data-quote-value]");
+    if (quoteValue) { setQuote(decodeURIComponent(quoteValue.dataset.quoteValue || "")); $("#message")?.focus(); toast("已加入引用"); return; }
     const copyValue = event.target.closest("[data-copy-value]");
-    if (copyValue) { await navigator.clipboard?.writeText(decodeURIComponent(copyValue.dataset.copyValue || "")); toast("已复制"); return; }
+    if (copyValue) { await copyText(decodeURIComponent(copyValue.dataset.copyValue || ""), copyValue.dataset.copySuccess || "已复制"); return; }
     const approvalOpen = event.target.closest("[data-approval-open]");
     if (approvalOpen) { showApprovalSheet(approvalOpen.dataset.approvalOpen); return; }
     const taskToggle = event.target.closest("[data-task-toggle]");
@@ -2792,9 +2879,10 @@ async function submitComposerMessage(deliveryMode = "") {
   if (!rawText && !pendingQuote && !activeAttachments.length) return;
   const text = withQuotePrefix(rawText);
   const id = createClientMessageId(); const sentAttachments = activeAttachments; input.value = ""; autogrowTextarea(input); activeAttachments = []; renderAttachments(); $("#send").disabled = true;
-  $("#messages").insertAdjacentHTML("beforeend", renderConversationTurn({ id: `live-${id}`, request: { id, role: "user", text, attachments: sentAttachments }, entries: [] })); setConnectionStatus("正在发送"); scrollMessages();
+  $("#messages").insertAdjacentHTML("beforeend", renderConversationTurn({ id: `live-${id}`, request: { id, role: "user", text, attachments: sentAttachments, source: "mobile", deliveryStatus: "sending" }, entries: [] })); setConnectionStatus("正在发送"); scrollMessages();
   try {
     const result = await api(`/mobile/v1/sessions/${encodeURIComponent(current.id)}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: sentAttachments.map(({ name, mimeType, data }) => ({ name, mimeType, data })), messageId: id, ...(deliveryMode ? { deliveryMode } : {}) }), timeoutMs: 25_000 });
+    updateMessageDeliveryStatus(id, result.queued ? "accepted" : "accepted");
     if (result.queued) { toast(result.deliveryMode === "guide" ? "已添加引导，当前步骤结束后优先执行" : "已加入排队指令"); await openSession(current.id, { activate: false }); }
     else {
       current.state = "running";
@@ -2802,12 +2890,13 @@ async function submitComposerMessage(deliveryMode = "") {
       const listed = allSessions.find((session) => session.id === current.id);
       if (listed) listed.state = "running";
       setConnectionStatus("正在生成");
+      updateMessageDeliveryStatus(id, "running");
       updateComposerQueueState();
       renderStatusSummary();
       scheduleRunningReconcile();
     }
     input.blur();
-  } catch (error) { document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = rawText; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
+  } catch (error) { updateMessageDeliveryStatus(id, "failed"); document.querySelector(`[data-message-id="${id}"]`)?.classList.add("failed"); input.value = rawText; activeAttachments = sentAttachments; renderAttachments(); toast(error.message); }
   finally { $("#send").disabled = false; updateComposerQueueState(); }
 }
 $("#composer").addEventListener("submit", async (event) => {
@@ -2902,7 +2991,7 @@ async function boot() {
     // Sessions are the landing screen. Do not make their first paint wait for
     // workspaces, models, preferences, or the approval inbox.
     await loadSessions();
-    void Promise.all([loadAgents(), loadWorkspaces(), loadApprovals(), loadPreferences()]).catch((error) => {
+    void Promise.all([loadAgents(), loadWorkspaces(), loadApprovals(), loadAttention(), loadPreferences()]).catch((error) => {
       setConnectionStatus("部分数据加载失败", false);
       console.warn("mobile background bootstrap failed", error);
     });

@@ -125,7 +125,7 @@ export function projectDshHistoryEvents(events = []) {
       continue;
     }
   }
-  return rows.slice(-500);
+  return rows.slice(-2000);
 }
 
 function historyEventsOrdered(events = []) {
@@ -220,7 +220,7 @@ export function createDeepSeekRuntime({
     return rows;
   };
 
-  const readSession = async (sessionId, { messageLimit = 500 } = {}) => {
+  const readSession = async (sessionId, { messageLimit = 2000 } = {}) => {
     const sid = String(sessionId);
     let base = sessionRows.get(sid);
     if (!base) {
@@ -228,7 +228,7 @@ export function createDeepSeekRuntime({
       base = (value?.items || []).find((item) => String(item.sessionId) === sid);
       if (base) base = rememberRow(base);
     }
-    const history = await client.rpc("session.history", { sessionId: sid, maxMessages: Math.min(500, Math.max(1, messageLimit)) });
+    const history = await client.rpc("session.history", { sessionId: sid, maxMessages: Math.min(2000, Math.max(1, messageLimit)) });
     const events = historyEventsOrdered(Array.isArray(history?.events) ? history.events : []);
     const messages = projectDshHistoryEvents(events);
     const values = history?.projections?.values || {};

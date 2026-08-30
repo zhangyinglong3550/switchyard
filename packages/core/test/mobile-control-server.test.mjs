@@ -201,6 +201,17 @@ test("mobile server pairs a device, protects APIs and routes session actions", a
   const approvals = await fetch(`${base}/mobile/v1/approvals`, { headers });
   assert.equal(approvals.status, 200);
   assert.equal((await approvals.json())[0].id, "approval_1");
+  const attention = await fetch(`${base}/mobile/v1/attention`, { headers });
+  assert.equal(attention.status, 200);
+  assert.deepEqual(await attention.json(), { lastReadEventId: 0, items: [] });
+  const markedRead = await fetch(`${base}/mobile/v1/attention/read`, {
+    method: "POST", headers, body: JSON.stringify({ eventId: 12 })
+  });
+  assert.deepEqual(await markedRead.json(), { lastReadEventId: 12 });
+  const cursorDoesNotMoveBack = await fetch(`${base}/mobile/v1/attention/read`, {
+    method: "POST", headers, body: JSON.stringify({ eventId: 4 })
+  });
+  assert.deepEqual(await cursorDoesNotMoveBack.json(), { lastReadEventId: 12 });
   const approvalResult = await fetch(`${base}/mobile/v1/approvals/approval_1/resolve`, {
     method: "POST",
     headers,

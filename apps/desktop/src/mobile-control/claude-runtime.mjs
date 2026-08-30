@@ -63,7 +63,7 @@ export function parseClaudeJsonl(lines) {
       else rows.push({ role, text: content, kind: "text" });
     }
   } catch {}
-  return rows.slice(-500);
+  return rows.slice(-2000);
 }
 
 function localMessages(sessionId, scanSessions = scanClaudeSessions) {

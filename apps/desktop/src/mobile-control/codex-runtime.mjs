@@ -121,7 +121,9 @@ function normalizeThread(thread = {}) {
     directory: String(cwd || ""),
     project: cwd ? path.basename(cwd) : "",
     archived: Boolean(thread.archived),
-    capabilities: { ...CAPABILITIES }
+    capabilities: { ...CAPABILITIES },
+    source: thread.source || thread.originator || "codex-app-server",
+    ...(thread.originator ? { originator: String(thread.originator) } : {})
   };
 }
 
@@ -182,7 +184,9 @@ function localThread(row = {}) {
     directory: cwd,
     project: cwd ? path.basename(cwd) : "",
     archived: false,
-    capabilities: { ...CAPABILITIES }
+    capabilities: { ...CAPABILITIES },
+    source: row.originator || "codex-rollout",
+    ...(row.originator ? { originator: String(row.originator) } : {})
   };
 }
 
@@ -245,7 +249,7 @@ export function parseCodexRollout(lines, { limit = 500 } = {}) {
       }
     } catch {}
   }
-  return messages.slice(-Math.max(1, Number(limit) || 500));
+  return messages.slice(-Math.max(1, Number(limit) || 2000));
 }
 
 const LOCAL_ROLLOUT_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
@@ -553,11 +557,20 @@ export function createCodexRuntime({
     try {
       return await resume();
     } catch (firstError) {
+      // Codex Desktop may already own the thread writer. In that case a second
+      // thread/resume is the conflict, not evidence that the thread is broken;
+      // the shared app-server can still accept turn/start on the existing owner.
+      if (/thread-store conflict|already has an active writer|active writer/i.test(String(firstError?.message || firstError))) {
+        return { thread: { id: String(sessionId) }, alreadyActive: true };
+      }
       if (typeof client.reconnect !== "function") throw desktopUnavailable(firstError);
       try {
         await client.reconnect();
         return await resume();
       } catch (retryError) {
+        if (/thread-store conflict|already has an active writer|active writer/i.test(String(retryError?.message || retryError))) {
+          return { thread: { id: String(sessionId) }, alreadyActive: true };
+        }
         throw desktopUnavailable(retryError);
       }
     }
@@ -627,9 +640,9 @@ export function createCodexRuntime({
     return [...rows.values()];
   };
 
-  const readSession = async (sessionId, { messageLimit = 500 } = {}) => {
+  const readSession = async (sessionId, { messageLimit = 2000 } = {}) => {
     const sid = String(sessionId);
-    const limit = Math.min(500, Math.max(1, Number(messageLimit) || 500));
+  const limit = Math.min(2000, Math.max(1, Number(messageLimit) || 2000));
     const local = readNativeFallback(sid);
     // Start tailing only after the phone opened the Desktop thread. This keeps
     // idle cost bounded while giving the active conversation live updates.

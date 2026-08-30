@@ -29,6 +29,19 @@ function fakeClient({ usingProxy, reconnect } = {}) {
   };
 }
 
+test("Codex mobile runtime treats an existing Desktop thread writer as resumable", async () => {
+  const client = fakeClient({ usingProxy: true });
+  client.request = async (method, params) => {
+    client.calls.push({ method, params });
+    if (method === "thread/resume") throw new Error(`thread-store conflict: thread ${params.threadId} already has an active writer`);
+    if (method === "turn/start") return { turn: { id: "turn-1" } };
+    throw new Error(`Unexpected request: ${method}`);
+  };
+  const runtime = createCodexRuntime({ client, scanSessions: () => [desktopSession()] });
+  assert.deepEqual(await runtime.sendMessage("desktop-thread", { text: "继续" }), { accepted: true, turnId: "turn-1" });
+  assert.deepEqual(client.calls.map((call) => call.method), ["thread/resume", "turn/start"]);
+});
+
 test("Codex mobile runtime · blocks desktop-owned sends when the shared Desktop proxy is unavailable", async () => {
   const client = fakeClient({ usingProxy: false });
   const runtime = createCodexRuntime({

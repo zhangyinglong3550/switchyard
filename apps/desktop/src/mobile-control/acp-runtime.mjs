@@ -164,7 +164,7 @@ export function createAcpRuntime({
           const previous = rows.at(-1);
           if (previous && previous.role === "user" && previous.kind === "text") previous.text += event.summary;
           else rows.push({ role: "user", text: event.summary, kind: "text" });
-          messages.set(event.sessionId, rows.slice(-500));
+          messages.set(event.sessionId, rows.slice(-2000));
         }
         return;
       }
@@ -177,7 +177,7 @@ export function createAcpRuntime({
           : event.role === "assistant" ? "text" : (event.runtimeEvent || "text");
         if (previous && previous.role === event.role && previous.kind === nextKind) previous.text += event.summary;
         else rows.push({ role: event.role, text: event.summary, kind: nextKind });
-        messages.set(event.sessionId, rows.slice(-500));
+        messages.set(event.sessionId, rows.slice(-2000));
         if (event.type === "message" && event.role === "assistant" && pendingPrompts.has(event.sessionId)) {
           streamedDuringPrompt.add(event.sessionId);
         }
@@ -186,7 +186,7 @@ export function createAcpRuntime({
         const previous = event.tool.id ? rows.findLast((row) => row.kind === "tool" && row.tool?.id === event.tool.id) : null;
         if (previous) previous.tool = mergeTool(previous.tool, event.tool);
         else rows.push(toolMessage(event.tool, event.summary));
-        messages.set(event.sessionId, rows.slice(-500));
+        messages.set(event.sessionId, rows.slice(-2000));
       }
       if (event.type === "metadata" || event.type === "usage") return;
       for (const listener of subscribers) {
@@ -331,7 +331,7 @@ export function createAcpRuntime({
     if (promptText) {
       const rows = messages.get(sid) || [];
       rows.push({ role: "user", text: promptText, kind: "text" });
-      messages.set(sid, rows.slice(-500));
+      messages.set(sid, rows.slice(-2000));
     }
     const prompt = client.request("session/prompt", {
       sessionId: sid,

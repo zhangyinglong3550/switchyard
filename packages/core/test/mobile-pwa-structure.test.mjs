@@ -210,6 +210,15 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(css, /\.structured-notification\{/);
   assert.match(css, /\.execution-ring/);
   assert.match(css, /\.quote-bar\{/);
+  assert.match(js, /data-message-source/);
+  assert.match(js, /function updateMessageDeliveryStatus/);
+  assert.match(js, /已送达桌面/);
+  assert.match(js, /class="turn-events"/);
+  assert.match(js, /data-quote-value/);
+  assert.match(js, /function toolMetaHtml/);
+  assert.match(css, /\.message-origin\{/);
+  assert.match(css, /\.turn-events\{/);
+  assert.match(css, /\.tool-detail-meta\{/);
   assert.match(css, /\.quote-bar\[hidden\]\{display:none!important\}/);
   assert.match(js, /SwitchyardHandleBack/);
   assert.match(js, /bindEdgeSwipeBack/);
@@ -276,6 +285,10 @@ test("mobile PWA contains chat, create, approval and settings surfaces without p
   assert.match(js, /data-switch-session/);
   assert.match(js, /function renderMarkdownTable/);
   assert.match(js, /function renderProducedFiles/);
+  assert.match(js, /data-attention-read-all/);
+  assert.match(js, /function renderAttentionInbox/);
+  assert.match(js, /diff-files/);
+  assert.match(js, /assetMetadataLabel\(file\)/);
   assert.match(js, /function renderDeliveredFile/);
   assert.match(js, /本轮交付/);
   assert.match(js, /asset\.source/);

@@ -259,6 +259,14 @@ export function createMobileControlServer({
       if (req.method === "GET" && pathname === "/mobile/v1/approvals") {
         return json(res, 200, registry.listApprovals?.() || []);
       }
+      if (req.method === "GET" && pathname === "/mobile/v1/attention") {
+        const after = url.searchParams.has("after") ? url.searchParams.get("after") : store.getDeviceReadCursor(device.id);
+        return json(res, 200, { lastReadEventId: store.getDeviceReadCursor(device.id), items: registry.listAttention?.({ after }) || [] });
+      }
+      if (req.method === "POST" && pathname === "/mobile/v1/attention/read") {
+        const body = await readJson(req);
+        return json(res, 200, store.markDeviceRead(device.id, body.eventId));
+      }
       const approvalMatch = pathname.match(/^\/mobile\/v1\/approvals\/([^/]+)\/resolve$/);
       if (req.method === "POST" && approvalMatch) {
         const body = await readJson(req);
