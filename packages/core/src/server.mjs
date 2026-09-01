@@ -1337,9 +1337,22 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
       return;
     }
     recordResponseSummary(requestRecord, null, { stream: true, status: result.upstream?.status || 0 });
+    const streamPolicy = streamCompatibility(config, route, "responses");
     return streamChatAsResponses(result.upstream, res, body.model, {
       namespaceMap,
       idleTimeoutMs: streamIdleTimeoutMs(config, route),
+      retryUpstream: streamPolicy.retryPreludeOnEof
+        ? async () => {
+          const next = await dispatchChat(route.provider, route.upstreamModel, { ...chatBody, stream: true }, withDispatchOpts(req, { clientId, model: route.model, proxyUrl: route.model.proxyUrl }));
+          if (next.kind !== "stream") {
+            if (next.kind === "error") throw new Error(requestPayloadError(next.payload) || `status ${next.status}`);
+            throw new Error("chat stream retry did not return a stream");
+          }
+          return next.upstream;
+        }
+        : null,
+      preludeRetryAttempts: streamPolicy.preludeRetryAttempts,
+      preludeRetryBackoffMs: streamPolicy.preludeRetryBackoffMs,
       // KE's Kimi K3 relay may end with a usage footer but no `[DONE]` or
       // finish_reason. Do not convert that ambiguous terminal state into a
       // successful Codex response; keep the partial output and surface it as

@@ -85,6 +85,24 @@ test("responsesToChat keeps function_call_output image parts for the next Chat t
   assert.equal(tool.content[1].image_url.url, "data:image/png;base64,AQID");
 });
 
+test("responsesToChat dedupes a repeated image in a tool result against earlier user image", () => {
+  const chat = responsesToChat({
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "看图" }, { type: "input_image", image_url: "data:image/png;base64,AQID" }] },
+      { type: "function_call", call_id: "c1", name: "view_image", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "c1",
+        output: [{ type: "input_image", image_url: "data:image/png;base64,AQID" }]
+      }
+    ]
+  }, "u");
+  const tool = chat.messages.find((m) => m.role === "tool");
+  assert.equal(Array.isArray(tool.content), true);
+  assert.equal(tool.content.some((part) => part.type === "image_url"), false);
+  assert.match(tool.content[0].text, /重复图片已省略/);
+});
+
 test("responsesToChat folds top-level input_text/input_image items into one user turn", () => {
   const chat = responsesToChat({
     input: [
@@ -320,6 +338,36 @@ test("streamChatAsResponses closes partial output and reports adapter EOF as inc
   assert.doesNotMatch(body, /data: \[DONE\]/);
 });
 
+test("streamChatAsResponses retries an empty prelude without duplicating output", async () => {
+  let attempts = 0;
+  const empty = () => new ReadableStream({ start(controller) { controller.close(); } });
+  const complete = () => new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        'data: {"id":"chat_1","choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}',
+        "",
+        "data: [DONE]",
+        "",
+        ""
+      ].join("\n")));
+      controller.close();
+    }
+  });
+  let body = "";
+  const res = new Writable({ write(chunk, _enc, cb) { body += chunk.toString(); cb(); } });
+  res.writeHead = () => {};
+  let terminal = null;
+  await streamChatAsResponses({ body: empty(), ok: true, status: 200 }, res, "ke/gpt-5.6-sol", {
+    preludeRetryAttempts: 1,
+    retryUpstream: async () => { attempts += 1; return { body: complete(), ok: true, status: 200 }; },
+    onStreamEnd: (diagnostics) => { terminal = diagnostics; }
+  });
+  assert.equal(attempts, 1);
+  assert.equal((body.match(/"delta":"OK"/g) || []).length, 1);
+  assert.match(body, /event: response.completed/);
+  assert.equal(terminal.preludeRetryCount, 1);
+});
+
 test("streamChatAsResponses accepts a final usage footer as completion when an OpenAI relay omits terminal SSE markers", async () => {
   const stream = new ReadableStream({
     start(controller) {
@@ -389,6 +437,7 @@ test("streamChatAsResponses reports a usage-only Kimi-style tail as incomplete w
     sawUsageFooter: true,
     usageFooterAccepted: false,
     acceptUsageFooterAsTerminal: false,
+    preludeRetryCount: 0,
     terminalSeen: false,
     toolCallCount: 0,
     errorCode: "SWITCHYARD_INCOMPLETE_STREAM",

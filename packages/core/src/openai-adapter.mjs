@@ -60,12 +60,40 @@ function partsFromContentList(content) {
   return hasImage ? parts : contentToText(content);
 }
 
-function contentToChatContent(content) {
-  if (Array.isArray(content)) return partsFromContentList(content);
-  if (content && typeof content === "object" && (content.type === "input_image" || content.type === "image_url" || content.type === "input_text" || content.type === "text")) {
-    return partsFromContentList([content]);
+function contentToChatContent(content, opts = {}) {
+  let parts = Array.isArray(content)
+    ? partsFromContentList(content)
+    : (content && typeof content === "object" && (content.type === "input_image" || content.type === "image_url" || content.type === "input_text" || content.type === "text"))
+      ? partsFromContentList([content])
+      : null;
+  if (parts === null) return flattenContent(content);
+  if (Array.isArray(parts)) {
+    if (opts.seenImageUrls) {
+      parts = dedupeImageParts(parts, opts.seenImageUrls, opts.dropRepeatedImages === true);
+    }
   }
-  return flattenContent(content);
+  return parts;
+}
+
+function dedupeImageParts(parts, seenImageUrls, dropRepeated) {
+  const out = [];
+  let dropped = 0;
+  for (const part of parts) {
+    if (part?.type === "image_url" && typeof part.image_url?.url === "string") {
+      const url = part.image_url.url;
+      if (seenImageUrls.has(url)) {
+        if (dropRepeated) dropped += 1;
+        else out.push(part);
+        continue;
+      }
+      seenImageUrls.add(url);
+    }
+    out.push(part);
+  }
+  if (dropped) {
+    out.push({ type: "text", text: dropped > 1 ? `[${dropped} 张重复图片已省略：图片已在上文提供]` : "[重复图片已省略：图片已在上文提供]" });
+  }
+  return out;
 }
 
 function appendUserContent(messages, content) {
@@ -140,6 +168,11 @@ export function responsesToChat(body, upstreamModel) {
   const messages = [];
   let pendingThinking = [];
   let lastFunctionCallMessage = null;
+  // KE Sol 等上游不接受 tool 消息携带图片（尤其大图），会把重复图片
+  // 计入异常上下文并在流式下返回 200 空 SSE。这里跟踪已出现的图片：
+  // 用户/助手消息里的图片会保留；tool 结果里如果回传同一张图片（例如
+  // Codex view_image 查看用户刚粘贴的图），只保留占位文本。
+  const seenImageUrls = new Set();
   const takePendingThinking = () => {
     const out = pendingThinking;
     pendingThinking = [];
@@ -168,14 +201,14 @@ export function responsesToChat(body, upstreamModel) {
         continue;
       }
       if (item.type === "input_text" || item.type === "input_image" || item.type === "image_url" || item.type === "text") {
-        appendUserContent(messages, contentToChatContent([item]));
+        appendUserContent(messages, contentToChatContent([item], { seenImageUrls }));
         lastFunctionCallMessage = null;
         continue;
       }
       if (item.type === "message" || item.role) {
         const message = {
           role: responsesRoleToChatRole(item.role || "user"),
-          content: contentToChatContent(item.content ?? item.text ?? "")
+          content: contentToChatContent(item.content ?? item.text ?? "", { seenImageUrls })
         };
         if (message.role === "tool") {
           message.tool_call_id = item.tool_call_id || item.call_id || item.id || item.name || "";
@@ -198,7 +231,7 @@ export function responsesToChat(body, upstreamModel) {
         messages.push({
           role: "tool",
           tool_call_id: item.call_id || item.id || "",
-          content: contentToChatContent(item.output ?? item.content ?? "")
+          content: contentToChatContent(item.output ?? item.content ?? "", { seenImageUrls, dropRepeatedImages: true })
         });
         lastFunctionCallMessage = null;
       }
@@ -395,6 +428,9 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
   const namespaceMap = options.namespaceMap || {};
   const onUsage = typeof options.onUsage === "function" ? options.onUsage : null;
   const onStreamEnd = typeof options.onStreamEnd === "function" ? options.onStreamEnd : null;
+  const retryUpstream = typeof options.retryUpstream === "function" ? options.retryUpstream : null;
+  const preludeRetryAttempts = Math.max(0, Math.floor(Number(options.preludeRetryAttempts) || 0));
+  const preludeRetryBackoffMs = Array.isArray(options.preludeRetryBackoffMs) ? options.preludeRetryBackoffMs : [];
   // Some OpenAI-compatible relays omit both standard terminal markers after a
   // final usage chunk. Keep the historical compatibility by default, but let
   // callers opt out for routes where that pattern masks truncated output.
@@ -614,9 +650,10 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
       }
     }
   };
-  const parser = new SseParser((record) => {
+  const handleRecord = (record) => {
     handleData(String(record.data || "").trim());
-  });
+  };
+  let parser = new SseParser(handleRecord);
   let finalizedOutput = null;
   const finalizeOutput = () => {
     if (finalizedOutput) return finalizedOutput;
@@ -722,18 +759,30 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     intervalMs: options.heartbeatMs || CODEX_RESPONSES_HEARTBEAT_MS,
     writeHeartbeat: writeCodexResponsesHeartbeat
   });
+  let preludeRetries = 0;
   try {
-    if (!upstream?.body) throw new Error(`Chat stream empty (status ${upstream?.status || 0})`);
-    for await (const chunk of iterateUpstreamBody(upstream.body, {
-      timeoutMs: options.idleTimeoutMs,
-      label: "Chat stream"
-    })) {
-      keepalive.touch();
-      parser.push(chunk);
+    while (true) {
+      streamError = null;
+      try {
+        if (!upstream?.body) throw new Error(`Chat stream empty (status ${upstream?.status || 0})`);
+        for await (const chunk of iterateUpstreamBody(upstream.body, { timeoutMs: options.idleTimeoutMs, label: "Chat stream" })) {
+          keepalive.touch();
+          parser.push(chunk);
+        }
+        parser.flush();
+      } catch (err) {
+        streamError = err;
+      }
+      if (!terminalSeen && !text && !reasoning && !toolCalls.size && !capturedUsage && preludeRetries < preludeRetryAttempts && retryUpstream) {
+        const delayMs = Number(preludeRetryBackoffMs[Math.min(preludeRetries, preludeRetryBackoffMs.length - 1)]) || 0;
+        preludeRetries += 1;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        upstream = await retryUpstream(streamError);
+        parser = new SseParser(handleRecord);
+        continue;
+      }
+      break;
     }
-    parser.flush();
-  } catch (err) {
-    streamError = err;
   } finally {
     keepalive.stop();
   }
@@ -748,6 +797,7 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
     sawUsageFooter,
     usageFooterAccepted,
     acceptUsageFooterAsTerminal,
+    preludeRetryCount: preludeRetries,
     // 调用方（请求日志）需要知道「有没有正常收尾」和「为什么没收尾」，
     // 只有上面 5 个布尔时，Codex 流式记录会整行空白，无法区分成功与 adapter_eof。
     terminalSeen,
