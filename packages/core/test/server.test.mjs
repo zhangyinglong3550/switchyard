@@ -1706,6 +1706,65 @@ test("server includes streamed chat text in final Responses completed payload", 
   assert.equal(completed.output[0].content[0].text, "HELLO");
 });
 
+test("server records Codex chat-stream terminal state instead of a blank 200 row", async (t) => {
+  const logs = [];
+  const upstream = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const m = JSON.parse(raw || "{}").model;
+      const truncated = m === "bad";
+      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      res.end(truncated
+        ? 'data: {"choices":[{"delta":{"content":"partial","role":"assistant"},"index":0}],"object":"chat.completion.chunk"}\n\n\n'
+        : ['data: {"choices":[{"delta":{"content":"HELLO","role":"assistant"},"index":0}],"object":"chat.completion.chunk"}', "",
+           'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}', "",
+           "data: [DONE]", ""].join("\n"));
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [
+      { id: "p/bad", providerId: "p", upstreamModel: "bad" },
+      { id: "p/good", providerId: "p", upstreamModel: "good" }
+    ]
+  });
+  const server = createServer({ onLog: (entry) => logs.push(entry) });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const ask = async (model) => {
+    const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+      body: JSON.stringify({ model, stream: true, input: "ping" })
+    });
+    return resp.text();
+  };
+  await ask("p/bad");
+  await ask("p/good");
+
+  const rowFor = (model) => logs.find((entry) => entry.requestLog && entry.modelId === model);
+  const badRow = rowFor("p/bad");
+  const goodRow = rowFor("p/good");
+  assert.ok(badRow && goodRow, "两次请求都应落一行 requestLog");
+  assert.equal(badRow.responseSummary.finishReason, "incomplete", "上游提前 EOF 不能再记成空白 200");
+  assert.match(badRow.responseSummary.error, /Chat stream ended before completion|adapter_eof/);
+  assert.equal(badRow.responseSummary.chatStreamTerminal.terminalSeen, false);
+  assert.match(badRow.error, /incomplete stream/);
+  assert.equal(goodRow.responseSummary.finishReason, "completed");
+  assert.equal(goodRow.error, undefined);
+});
+
 test("server streams chat reasoning_content as Responses reasoning events", async (t) => {
   const upstream = http.createServer((req, res) => {
     req.resume();

@@ -737,20 +737,26 @@ export async function streamChatAsResponses(upstream, res, requestedModel, optio
   } finally {
     keepalive.stop();
   }
+  if (!terminalSeen && !streamError) {
+    streamError = Object.assign(new Error("Chat stream ended before completion"), {
+      code: "SWITCHYARD_INCOMPLETE_STREAM"
+    });
+  }
   const streamEndDiagnostics = {
     sawDoneMarker,
     sawFinishReason,
     sawUsageFooter,
     usageFooterAccepted,
-    acceptUsageFooterAsTerminal
+    acceptUsageFooterAsTerminal,
+    // 调用方（请求日志）需要知道「有没有正常收尾」和「为什么没收尾」，
+    // 只有上面 5 个布尔时，Codex 流式记录会整行空白，无法区分成功与 adapter_eof。
+    terminalSeen,
+    toolCallCount: toolCalls.size,
+    errorCode: streamError?.code || "",
+    errorMessage: streamError ? String(streamError.message || streamError) : ""
   };
   if (onStreamEnd) {
     try { onStreamEnd(streamEndDiagnostics); } catch {}
-  }
-  if (!terminalSeen && !streamError) {
-    streamError = Object.assign(new Error("Chat stream ended before completion"), {
-      code: "SWITCHYARD_INCOMPLETE_STREAM"
-    });
   }
   if (streamError) {
     const incomplete = streamError?.code === "SWITCHYARD_STREAM_IDLE_TIMEOUT" ||

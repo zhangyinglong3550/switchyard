@@ -1,6 +1,18 @@
 # Changelog
 
-## 2.3.8 — 2026-09-01
+## 2.3.9 — 2026-09-01
+
+### Fixed
+
+- **Codex 流式请求日志不再整行空白**：`/codex/v1/responses` 走 Chat 上游（`streamChatAsResponses`）时，`response_summary` 里 `finish_reason`/`text`/`toolCalls` 全为空，成功的流和 `adapter_eof` 截断在日志里长得一模一样。现在 `onStreamEnd` 会按流终止诊断写入 `finishReason: completed|incomplete`、`stream`、以及失败时的 `error`（带上游原始错误），请求记录 `error` 也同步标记 `incomplete stream (...)`。
+- **`streamChatAsResponses` 的 diagnostics 可判定**：新增 `terminalSeen`、`toolCallCount`、`errorCode`、`errorMessage`；并把「上游无终止标记 → 合成 `SWITCHYARD_INCOMPLETE_STREAM`」提前到 diagnostics 之前，否则调用方永远看到空错误码。
+- **顶层 `aborted` 日志可归因**：原来只有一行 `{"level":"error","msg":"aborted"}`，现在带 `clientId`、`path`、`modelId`、`requestedModel`、`ms`、`clientAborted`、`abortReason`，能区分客户端取消与上游断流。
+
+### Tests
+
+- 新增 `server records Codex chat-stream terminal state instead of a blank 200 row`（截断流记为 `incomplete`、正常流记为 `completed`）；`adapters` 两条既有测试补上 `terminalSeen`/`errorCode` 断言。`node --test packages/core/test/*.test.mjs apps/desktop/src/mobile-control/*.test.mjs` 722/722 通过。
+
+ — 2026-09-01
 
 ### Fix
 

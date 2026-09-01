@@ -273,7 +273,17 @@ export function createServer({ onLog } = {}) {
     } catch (err) {
       const message = errorMessage(err);
       requestRecord.error = message;
-      emit({ level: "error", msg: message });
+      emit({
+        level: "error",
+        msg: message,
+        clientId,
+        path: url.pathname,
+        modelId: requestRecord.modelId || "",
+        requestedModel: requestRecord.requestedModel || "",
+        ms: Date.now() - start,
+        clientAborted: Boolean(requestAbort.signal.aborted),
+        abortReason: String(requestAbort.signal.reason?.message || requestAbort.signal.reason || "")
+      });
       json(res, 500, { error: message });
     } finally {
       REQUEST_ABORT_SIGNALS.delete(req);
@@ -1346,6 +1356,18 @@ async function handleResponses(config, req, res, clientId, emit, requestRecord, 
         requestRecord.requestSummary.chatStreamTerminal = diagnostics;
         if (!requestRecord.responseSummary) requestRecord.responseSummary = {};
         requestRecord.responseSummary.chatStreamTerminal = diagnostics;
+        // 上游没给出终止标记 → 日志必须能看出来，而不是留一行 status 200 的空记录
+        const sawTerminal = Boolean(diagnostics?.terminalSeen
+          ?? (diagnostics?.sawDoneMarker || diagnostics?.sawFinishReason));
+        const rs = requestRecord.responseSummary;
+        rs.stream = true;
+        // 流式路径没有完整 payload，占位记录可能已经写了 completed；以流终止诊断为准
+        rs.finishReason = sawTerminal ? "completed" : "incomplete";
+        if (!sawTerminal) {
+          const reason = diagnostics?.errorMessage || diagnostics?.errorCode || "adapter_eof";
+          rs.error = rs.error || reason;
+          requestRecord.error = requestRecord.error || `incomplete stream (${reason})`;
+        }
       }
     });
   }

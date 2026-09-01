@@ -304,7 +304,13 @@ test("streamChatAsResponses closes partial output and reports adapter EOF as inc
   });
   res.writeHead = () => {};
 
-  await streamChatAsResponses({ body: stream, ok: true, status: 200 }, res, "chat/gpt");
+  let endDiagnostics = null;
+  await streamChatAsResponses({ body: stream, ok: true, status: 200 }, res, "chat/gpt", {
+    onStreamEnd: (d) => { endDiagnostics = d; }
+  });
+  assert.equal(endDiagnostics.terminalSeen, false, "上游提前 EOF 必须被记为未收尾");
+  assert.equal(endDiagnostics.errorCode, "SWITCHYARD_INCOMPLETE_STREAM");
+  assert.equal(typeof endDiagnostics.toolCallCount, "number");
 
   assert.match(body, /event: response.output_item.done/);
   assert.match(body, /"text":"partial"/);
@@ -382,7 +388,11 @@ test("streamChatAsResponses reports a usage-only Kimi-style tail as incomplete w
     sawFinishReason: false,
     sawUsageFooter: true,
     usageFooterAccepted: false,
-    acceptUsageFooterAsTerminal: false
+    acceptUsageFooterAsTerminal: false,
+    terminalSeen: false,
+    toolCallCount: 0,
+    errorCode: "SWITCHYARD_INCOMPLETE_STREAM",
+    errorMessage: "Chat stream ended before completion"
   });
 });
 
