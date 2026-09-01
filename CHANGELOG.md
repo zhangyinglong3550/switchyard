@@ -12,7 +12,7 @@
 
 - 新增 `server records Codex chat-stream terminal state instead of a blank 200 row`（截断流记为 `incomplete`、正常流记为 `completed`）；`adapters` 两条既有测试补上 `terminalSeen`/`errorCode` 断言。`node --test packages/core/test/*.test.mjs apps/desktop/src/mobile-control/*.test.mjs` 722/722 通过。
 
- — 2026-09-01
+## 2.3.8 — 2026-09-01
 
 ### Fix
 
