@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- **KE Sol 传图续轮必炸（`adapter_eof`）修复**：Codex 的 `view_image` 会把用户已粘贴的同一张图再回传一份，图片进入 `tool` 消息后触发 KE 上游 `context_length_exceeded`（非流式 400，流式被吞成 200 空 SSE）。现在 `responsesToChat` 跟踪上下文已出现的图片：`function_call_output` 里与上文重复的图片替换为文本占位，不再重复发给上游；用户自己传的图片（含多图）不受影响，Sol 原生视觉能力保持开启。
+- **Chat→Responses 流支持空前导重试**：`streamChatAsResponses` 在没有任何输出（文本/推理/工具调用/usage）时，按路由的 `preludeRetryAttempts`/`preludeRetryBackoffMs` 重发同一请求（KE Sol 默认 2 次、250/750ms 退避），兜底上游偶发空流；一旦已有有效输出绝不重试。
 - **Codex 流式请求日志不再整行空白**：`/codex/v1/responses` 走 Chat 上游（`streamChatAsResponses`）时，`response_summary` 里 `finish_reason`/`text`/`toolCalls` 全为空，成功的流和 `adapter_eof` 截断在日志里长得一模一样。现在 `onStreamEnd` 会按流终止诊断写入 `finishReason: completed|incomplete`、`stream`、以及失败时的 `error`（带上游原始错误），请求记录 `error` 也同步标记 `incomplete stream (...)`。
 - **`streamChatAsResponses` 的 diagnostics 可判定**：新增 `terminalSeen`、`toolCallCount`、`errorCode`、`errorMessage`；并把「上游无终止标记 → 合成 `SWITCHYARD_INCOMPLETE_STREAM`」提前到 diagnostics 之前，否则调用方永远看到空错误码。
 - **顶层 `aborted` 日志可归因**：原来只有一行 `{"level":"error","msg":"aborted"}`，现在带 `clientId`、`path`、`modelId`、`requestedModel`、`ms`、`clientAborted`、`abortReason`，能区分客户端取消与上游断流。
