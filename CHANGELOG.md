@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.8 — 2026-09-01
+
+### Fix
+
+- **聚合/代理型 provider 不再原样透传思考档位**：`reasoning-effort-catalog.mjs` 把 `ke`、`bai`、`command`、`blank-gpt` 这类 provider 归成 `chatPassthrough`，Codex 的 `medium`/`xhigh` 会原样发给上游，GLM 系因此报 `该模型始终思考，不支持关闭思考；请使用 low、high 或 max`（上游 code 1210）。现在只在落到「透传形态」时按模型族（`glm|zhipu|z-ai`）回退到新组 `thinkingWithEffort`：只发 `reasoning_effort` 且值钳在 `low/high/max`，能力表不再暴露 `none`（强制思考模型不给关闭档）。已按 provider 精调过的组（如 `zhipu-glm`、`kimi-coding`）行为不变。
+- **KE Claude 全系恢复可用**：`compat/patches/ke.mjs` 的 Bedrock 适配判定原先写死 `claude-opus-4-8`，该模型下线后补丁对 `ke/claude-sonnet-5`、`ke/claude-opus-5` 零覆盖，任何带 `reasoning_effort` 的请求都被 KE 转成 `thinking.type.enabled` 并被 Bedrock 400（`"thinking.type.enabled" is not supported for this model`）。判定放宽为 `claude-` 前缀，effort 取值额外兼容 `output_config.effort`。
+- **`mapDeepseekWire` 尊重 `thinkingParam: "none"`**：复用 DeepSeek 的 `low/high/max` 钳制时不再强制附带 `thinking` 开关，避免出现上游判成「关闭思考」的 `thinking.disabled`。
+- 全站回归：17 个启用模型 × `low/medium/high/xhigh` 共 68 组逐档探测通过（`bai/deepseek-v4-flash-vision-exp` 仅在 5 路并发下抖动，单发正常）。新增 3 条单测覆盖族回退、非 GLM 保持透传、KE Claude adaptive 改写。
+
 ## 2.3.6 — 2026-08-30
 
 - 统一桌面端与 Android 安装包版本号。

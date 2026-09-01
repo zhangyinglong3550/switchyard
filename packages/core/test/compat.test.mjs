@@ -165,6 +165,24 @@ test("KE injects the SSO system ID and adapts Claude Opus 4.8 reasoning", () => 
   resetPatches();
 });
 
+test("KE adapts every KE Claude model to Bedrock adaptive thinking", () => {
+  resetPatches();
+  registerBuiltinPatches();
+  for (const upstream of ["claude-sonnet-5", "claude-opus-5", "claude-opus-4-8"]) {
+    const out = applyOutbound(
+      { messages: [{ role: "user", content: "hi" }], reasoning_effort: "medium" },
+      {
+        provider: { id: "ke", presetId: "ke", baseUrl: "https://openapi-ait.ke.com/v1" },
+        model: { id: `ke/${upstream}`, providerId: "ke", upstreamModel: upstream }
+      }
+    );
+    assert.deepEqual(out.thinking, { type: "adaptive" }, upstream);
+    assert.deepEqual(out.output_config, { effort: "medium" }, upstream);
+    assert.equal(out.reasoning_effort, undefined, upstream);
+  }
+  resetPatches();
+});
+
 test("KE compatibility does not affect other OpenAI-compatible providers", () => {
   resetPatches();
   registerBuiltinPatches();

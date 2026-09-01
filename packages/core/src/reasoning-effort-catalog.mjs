@@ -73,6 +73,17 @@ const GROUP = {
       effortValueMode: "on_off"
     }
   },
+  thinkingWithEffort: {
+    // GLM 系上游：强制思考，reasoning_effort 只认 low/high/max；
+    // medium/xhigh 原样透传会被上游判成“关闭思考”，直接 400(code 1210)。
+    supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+    wire: {
+      effortParam: "reasoning_effort",
+      thinkingParam: "none",
+      effortValueMode: "deepseek"
+    }
+  },
   minimax: {
     supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
     defaultEffort: "medium",
@@ -113,7 +124,19 @@ const GROUP = {
   }
 };
 
-/** presetId → group key；未列出的走 apiFormat 回退 */
+/** provider 未命中 PRESET_GROUP（聚合/代理型 provider）时，按模型名回退到组 */
+const MODEL_FAMILY_GROUP = [
+  [/glm|zhipu|z-ai/, "thinkingWithEffort"]
+];
+
+function familyGroupKey(model) {
+  const text = [model?.upstreamModel, model?.id, ...(model?.aliases || [])]
+    .filter(Boolean).join(" ").toLowerCase();
+  for (const [re, key] of MODEL_FAMILY_GROUP) if (re.test(text)) return key;
+  return "";
+}
+
+/** presetId → group key；未列出的先按模型族回退，再走 apiFormat 回退 */
 const PRESET_GROUP = {
   "codex-oauth": "passthroughResponses",
   openai: "passthroughResponses",
@@ -278,18 +301,29 @@ export function resolveReasoningCapability(ctx = {}) {
   const groupKey = PRESET_GROUP[presetId]
     || (presetId.startsWith("antigravity") ? "adapter" : "")
     || "";
-  if (groupKey && GROUP[groupKey]) return cloneCapability(GROUP[groupKey]);
+  const presetGroup = groupKey ? GROUP[groupKey] : null;
+  // 聚合/代理型 provider 被归成“原样透传”，这类 provider 的 wire 形态其实由模型族决定：
+  // 只有落到了透传，才让模型族覆盖，避免改动已知按 provider 精调过的组。
+  const passthroughLike = !presetGroup
+    || presetGroup.wire?.effortValueMode === "passthrough_chat"
+    || presetGroup.wire?.effortValueMode === "passthrough";
+  if (passthroughLike) {
+    const familyKey = familyGroupKey(model);
+    if (familyKey && GROUP[familyKey]) return cloneCapability(GROUP[familyKey]);
+  }
+  if (presetGroup) return cloneCapability(presetGroup);
   return fallbackByApiFormat(provider.apiFormat);
 }
 
-function mapDeepseekWire(effort) {
+function mapDeepseekWire(effort, wireConfig = {}) {
   const token = normalizeEffortToken(effort);
+  const withThinking = String(wireConfig.thinkingParam || "thinking").trim() !== "none";
   if (!token || token === "none") {
     return {
       enabled: false,
       wireParam: "reasoning_effort",
       wireValue: null,
-      thinking: { type: "disabled" }
+      thinking: withThinking ? { type: "disabled" } : null
     };
   }
   let wireValue = "high";
@@ -300,7 +334,7 @@ function mapDeepseekWire(effort) {
     enabled: true,
     wireParam: "reasoning_effort",
     wireValue,
-    thinking: { type: "enabled" }
+    thinking: withThinking ? { type: "enabled" } : null
   };
 }
 
@@ -310,7 +344,7 @@ export function mapEffortForWire(effort, wireConfig = {}) {
   const effortParam = String(wireConfig.effortParam || "reasoning_effort").trim();
   const thinkingParam = String(wireConfig.thinkingParam || "none").trim();
 
-  if (mode === "deepseek") return mapDeepseekWire(token);
+  if (mode === "deepseek") return mapDeepseekWire(token, wireConfig);
 
   if (mode === "unsupported" || mode === "adapter") {
     return {

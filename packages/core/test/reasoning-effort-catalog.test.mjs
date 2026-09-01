@@ -78,3 +78,30 @@ test("every provider preset resolves a reasoning capability", () => {
     assert.ok(cap.wire?.effortValueMode || cap.unsupported, `preset ${preset.id} needs mode or unsupported`);
   }
 });
+
+test("GLM family falls back to thinkingWithEffort when the preset has no group", () => {
+  const ctx = {
+    provider: { id: "ke", presetId: "ke", apiFormat: "openai_chat", baseUrl: "https://openapi-ait.ke.com/v1" },
+    model: { id: "ke/GLM-5.3-Flash", providerId: "ke", upstreamModel: "GLM-5.3-Flash" }
+  };
+  const cap = resolveReasoningCapability(ctx);
+  assert.equal(cap.wire.effortValueMode, "deepseek");
+  assert.equal(cap.wire.thinkingParam, "none");
+  assert.ok(!cap.supportedEfforts.includes("none"), "强制思考模型不能暴露 none");
+
+  for (const [requested, expected] of [["medium", "high"], ["xhigh", "high"], ["low", "low"], ["max", "max"]]) {
+    const { body, trace } = applyReasoningEffortCatalog(
+      { model: "ke/GLM-5.3-Flash", input: "hi", reasoning: { effort: requested } }, ctx);
+    assert.equal(body.reasoning_effort, expected, requested);
+    assert.equal(body.thinking, undefined, `${requested} 不能产出 thinking 开关`);
+    assert.equal(trace.clamped, expected !== requested, requested);
+  }
+});
+
+test("non-GLM chat providers keep passthrough behaviour", () => {
+  const cap = resolveReasoningCapability({
+    provider: { id: "ke", presetId: "ke", apiFormat: "openai_chat" },
+    model: { id: "ke/qwen3.8-flash", providerId: "ke", upstreamModel: "qwen3.8-flash" }
+  });
+  assert.equal(cap.wire.effortValueMode, "passthrough_chat");
+});
