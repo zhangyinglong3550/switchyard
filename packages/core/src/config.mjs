@@ -121,14 +121,9 @@ function isRetiredCursorSubscriptionProvider(provider) {
 }
 
 function isRetiredAntigravityCli2ApiProvider(provider) {
-  if (String(provider?.presetId || "") === "antigravity-cli2api") return true;
-  try {
-    const url = new URL(String(provider?.baseUrl || ""));
-    const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
-    return loopback && url.port === "8317";
-  } catch {
-    return false;
-  }
+  // Only retire the removed built-in preset. A custom provider may legitimately
+  // point at a local CLIProxyAPI instance on port 8317.
+  return String(provider?.presetId || "") === "antigravity-cli2api";
 }
 
 function isRetiredProvider(provider) {

@@ -115,8 +115,8 @@ test("mergeWithDefaults drops retired Antigravity CLIProxyAPI providers and thei
       { id: "ok/gpt", providerId: "ok", upstreamModel: "gpt" }
     ]
   });
-  assert.deepEqual(cfg.providers.map((provider) => provider.id), ["antigravity-pool", "ok"]);
-  assert.deepEqual(cfg.models.map((model) => model.id), ["antigravity-pool/gemini-3.7-flash", "antigravity-pool/gemini-3.6-flash", "ok/gpt"]);
+  assert.deepEqual(cfg.providers.map((provider) => provider.id), ["cliproxy", "antigravity-pool", "ok"]);
+  assert.deepEqual(cfg.models.map((model) => model.id), ["cliproxy/claude-sonnet-4-6", "antigravity-pool/gemini-3.7-flash", "antigravity-pool/gemini-3.6-flash", "ok/gpt"]);
 });
 
 test("validateConfig rejects duplicate provider id", () => {
