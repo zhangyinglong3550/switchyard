@@ -169,28 +169,29 @@ testPatch("deepseek-reasoning · strips reasoning_content from non-stream respon
   assert.equal(out.choices[0].message._switchyardAnthropicThinking[0].thinking, "I'm thinking...");
 });
 
-testPatch("deepseek-reasoning · strips reasoning_content from stream delta", () => {
+testPatch("deepseek-reasoning · leaves stream deltas untouched", () => {
   registerPatch(deepseekReasoningPatch.id, deepseekReasoningPatch);
   const ctx = { provider: { id: "deepseek" }, model: { id: "deepseek/v4" } };
 
+  // 流式方向不再改写：reasoning_content 是 chat 客户端的标准思考字段，
+  // 正文与思考本来就分处两个字段，动它只会让二者混淆或让思考消失。
   const streamLine = 'data: {"choices":[{"index":0,"delta":{"content":"Hi","reasoning_content":"..."}}]}';
   const out = applyStreamLine(streamLine, ctx);
-  const parsed = JSON.parse(out.replace("data: ", ""));
-  assert.equal(parsed.choices[0].delta.content, "Hi");
-  assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
+  assert.equal(out, streamLine);
 });
 
-testPatch("deepseek-reasoning · fallback reasoning_content to content when no text", () => {
+testPatch("deepseek-reasoning · keeps reasoning-only stream delta on reasoning_content", () => {
   registerPatch(deepseekReasoningPatch.id, deepseekReasoningPatch);
   const ctx = { provider: { id: "deepseek" }, model: { id: "deepseek/v4" } };
-  // 只有 reasoning_content、没有 content 的 delta 不应被剥成空而被下游吞掉，
-  // 应回填成 content，保证像 Grok Build 这样的纯 chat 客户端能收到正文。
+  // 思考阶段的 delta 天然只有 reasoning_content、没有 content。它必须原样透传：
+  // 回填成 content 会把整段思考混进正文（ZCode 等 chat 客户端就是这么显示错乱的），
+  // 直接剥掉又会让思考彻底消失。
   const streamLine = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"thinking text here"}}]}';
   const out = applyStreamLine(streamLine, ctx);
   assert.notEqual(out, null, "reasoning-only delta must not be swallowed to a blank stream");
   const parsed = JSON.parse(out.replace("data: ", ""));
-  assert.equal(parsed.choices[0].delta.content, "thinking text here");
-  assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
+  assert.equal(parsed.choices[0].delta.reasoning_content, "thinking text here");
+  assert.equal(parsed.choices[0].delta.content, undefined);
 });
 
 testPatch("deepseek-reasoning · does NOT affect non-DeepSeek providers", () => {
@@ -218,17 +219,30 @@ testPatch("chat-reasoning · maps MiniMax reasoning_details into internal thinki
   assert.equal(out.choices[0].message._switchyardAnthropicThinking[0].thinking, "Need to inspect code.");
 });
 
-testPatch("chat-reasoning · fallback reasoning-only stream delta to content (Grok Build)", () => {
+testPatch("chat-reasoning · keeps reasoning-only stream delta on reasoning_content", () => {
   registerPatch(chatReasoningPatch.id, chatReasoningPatch);
   const ctx = { provider: { id: "ke" }, model: { id: "ke/deepseek-v4-flash" } };
-  // KE 中继的 deepseek 流式把正文放在 reasoning_content 里、无 content 字段，
-  // 剥离后 delta 为空会被吞成空流。应回填为 content，避免 Grok Build 无限重试。
+  // 思考阶段的 delta 天然只有 reasoning_content。剥离它会让思考消失，
+  // 回填成 content 会让思考混进正文——两者都是错的，必须原样透传。
   const streamLine = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"思考正文"}}]}';
   const out = applyStreamLine(streamLine, ctx);
   assert.notEqual(out, null, "must not swallow reasoning-only delta into a blank stream");
   const parsed = JSON.parse(out.replace("data: ", ""));
-  assert.equal(parsed.choices[0].delta.content, "思考正文");
-  assert.equal(parsed.choices[0].delta.reasoning_content, undefined);
+  assert.equal(parsed.choices[0].delta.reasoning_content, "思考正文");
+  assert.equal(parsed.choices[0].delta.content, undefined);
+});
+
+testPatch("chat-reasoning · keeps reasoning_content when delta also carries role", () => {
+  registerPatch(chatReasoningPatch.id, chatReasoningPatch);
+  const ctx = { provider: { id: "ke" }, model: { id: "ke/GLM-5.3" } };
+  // KE 的 GLM 每个思考 delta 都带 role。旧实现剥离 reasoning_content 后
+  // 剩下 {role} 不算空对象，于是思考被静默丢弃（ZCode 里表现为思考完全消失）。
+  const streamLine = 'data:{"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The user"}}]}';
+  const out = applyStreamLine(streamLine, ctx);
+  assert.notEqual(out, null);
+  const parsed = JSON.parse(out.replace("data: ", ""));
+  assert.equal(parsed.choices[0].delta.reasoning_content, "The user");
+  assert.equal(parsed.choices[0].delta.role, "assistant");
 });
 
 testPatch("reasoning-options · maps Codex reasoning to DashScope enable_thinking", () => {

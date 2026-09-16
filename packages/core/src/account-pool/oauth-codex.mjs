@@ -159,9 +159,20 @@ export async function refreshCodexViaSessionToken(sessionToken, {
     } catch {
       throw new Error("codex session refresh: invalid JSON");
     }
-    const accessToken = String(payload?.accessToken || payload?.access_token || "").trim();
+    // 不同 ChatGPT/CPA 版本会把 token 放在顶层、tokens 或 data 下；
+    // 统一兼容这些形状，避免把“session 有效”误判成“未授权”。
+    const tokenSources = [
+      payload,
+      payload?.tokens,
+      payload?.data,
+      payload?.session,
+      payload?.user
+    ].filter((item) => item && typeof item === "object");
+    const accessToken = String(tokenSources
+      .map((item) => item.accessToken || item.access_token || item.token)
+      .find(Boolean) || "").trim();
     if (!accessToken) {
-      throw new Error("codex session refresh: missing accessToken（session 可能已失效）");
+      throw new Error("codex session refresh: missing accessToken（该 session 接口未返回 Codex access token）");
     }
     const expiresRaw = payload?.expires || payload?.expiresAt || payload?.expired;
     let expiresAt = "";
@@ -176,16 +187,23 @@ export async function refreshCodexViaSessionToken(sessionToken, {
     if (!expiresAt) expiresAt = new Date(Date.now() + 3600_000).toISOString();
 
     const user = payload?.user || {};
-    const account = payload?.account || {};
+    const account = payload?.account || payload?.chatgpt_account || {};
     return {
       accessToken,
-      refreshToken: String(payload?.refreshToken || payload?.refresh_token || "").trim(),
+      refreshToken: String(tokenSources
+        .map((item) => item.refreshToken || item.refresh_token)
+        .find(Boolean) || "").trim(),
       sessionToken: st,
-      idToken: String(payload?.idToken || payload?.id_token || "").trim(),
+      idToken: String(tokenSources
+        .map((item) => item.idToken || item.id_token)
+        .find(Boolean) || "").trim(),
       tokenType: "Bearer",
       expiresAt,
       accountId: String(
         account?.id ||
+        account?.accountId ||
+        account?.account_id ||
+        payload?.chatgpt_account_id ||
         payload?.account_id ||
         extractCodexAccountId("", accessToken) ||
         ""

@@ -28,6 +28,7 @@ import {
   isWebSsoJwt
 } from "../src/account-pool/index.mjs";
 import { providerReady, providerAuthHeaders, isCodexOAuthProvider } from "../src/upstream/clients.mjs";
+import { refreshCodexViaSessionToken } from "../src/account-pool/oauth-codex.mjs";
 import { dispatchChat } from "../src/upstream/dispatch.mjs";
 
 function tmpHome() {
@@ -550,11 +551,16 @@ test("picker · bind antigravity and codex pool kinds", () => {
     id: "c1",
     email: "c@x.com",
     accessToken: "codex-live",
+    refreshToken: "codex-refresh",
+    sessionToken: "codex-session",
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     accountId: "acct-9"
   });
   assert.equal(codexBound.authMode, "codex_oauth");
   assert.equal(isCodexOAuthProvider(codexBound), true);
   assert.equal(codexBound._codexAccessToken, "codex-live");
+  assert.equal(codexBound._codexRefreshToken, "codex-refresh");
+  assert.equal(codexBound._codexSessionToken, "codex-session");
   assert.equal(providerAuthHeaders(codexBound, "bearer").Authorization, "Bearer codex-live");
   assert.equal(providerAuthHeaders(codexBound, "bearer")["chatgpt-account-id"], "acct-9");
 });
@@ -728,6 +734,29 @@ test("accountFrom* helpers parse token fields", () => {
   assert.equal(c.accountId, "aid");
 });
 
+test("codex session refresh · accepts nested CPA session payload", async () => {
+  const payload = Buffer.from(JSON.stringify({ sub: "u" })).toString("base64url");
+  const accessToken = `header.${payload}.signature`;
+  let seen;
+  const result = await refreshCodexViaSessionToken("session-secret", {
+    sessionUrl: "https://chatgpt.test/api/auth/session",
+    fetchImpl: async (url, init) => {
+      seen = { url, init };
+      return new Response(JSON.stringify({
+        tokens: { access_token: accessToken, id_token: "id-token", refresh_token: "refresh-token" },
+        account: { account_id: "acct-session" },
+        user: { email: "session@example.com" },
+        expires: "2099-01-01T00:00:00.000Z"
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+  });
+  assert.equal(result.accessToken, accessToken);
+  assert.equal(result.refreshToken, "refresh-token");
+  assert.equal(result.accountId, "acct-session");
+  assert.equal(result.email, "session@example.com");
+  assert.equal(seen.init.headers.Cookie, "__Secure-next-auth.session-token=session-secret");
+});
+
 test("parseCodexImportPayload · json array and refresh lines", async () => {
   const { parseCodexImportPayload, importCodexAccountsFromText } = await import("../src/account-pool/import-multi.mjs");
   const arr = parseCodexImportPayload(JSON.stringify([
@@ -747,9 +776,33 @@ test("parseCodexImportPayload · json array and refresh lines", async () => {
   assert.equal(arr.accounts[0].email, "a@x.com");
   assert.equal(arr.accounts[1].refreshToken, "refresh-bbbb-bbbb-bbbb-bbbb");
 
+  const nestedCpa = parseCodexImportPayload(JSON.stringify({
+    accounts: [{
+      email: "nested@example.com",
+      chatgpt_account_id: "acct-nested",
+      credentials: {
+        access_token: "nested-access",
+        id_token: "nested-id",
+        session_token: "nested-session"
+      },
+      type: "oauth"
+    }]
+  }));
+  assert.equal(nestedCpa.ok, true);
+  assert.equal(nestedCpa.accounts[0].email, "nested@example.com");
+  assert.equal(nestedCpa.accounts[0].accessToken, "nested-access");
+  assert.equal(nestedCpa.accounts[0].accountId, "acct-nested");
+  assert.equal(nestedCpa.accounts[0].sessionToken, "nested-session");
+
   const lines = parseCodexImportPayload("c@x.com----refresh-cccc-cccc-cccc-cccc\nrefresh-dddd-dddd-dddd-dddddddd");
   assert.equal(lines.ok, true);
   assert.ok(lines.accounts.length >= 2);
+
+  const cpa = parseCodexImportPayload("user@example.com----password----9e5f94bc-e8a4-4e73-b8be-63364c29d753----M.C524_session_token");
+  assert.equal(cpa.ok, true);
+  assert.equal(cpa.accounts[0].accountId, "9e5f94bc-e8a4-4e73-b8be-63364c29d753");
+  assert.equal(cpa.accounts[0].sessionToken, "M.C524_session_token");
+  assert.equal(cpa.accounts[0].refreshToken, "");
 
   const home = tmpHome();
   try {

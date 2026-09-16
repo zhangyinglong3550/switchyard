@@ -24,12 +24,13 @@ export const deepseekReasoningPatch = {
   changes: [
     "把非流式 Chat 响应 choices[].message.reasoning_content 转为内部 thinking",
     "从非流式 Chat 响应 choices[].message 移除原始 reasoning_content",
-    "从流式 Chat SSE choices[].delta 移除 reasoning_content"
+    "流式 Chat SSE 的 delta 原样透传（reasoning_content 是 chat 客户端的标准思考字段）"
   ],
   risk: "客户端不再看到 DeepSeek 私有字段名，但 Codex/Claude Code 会收到标准 reasoning/thinking。",
   tests: [
     "deepseek-reasoning · strips reasoning_content from non-stream response",
-    "deepseek-reasoning · strips reasoning_content from stream delta"
+    "deepseek-reasoning · leaves stream deltas untouched",
+    "deepseek-reasoning · keeps reasoning-only stream delta on reasoning_content"
   ],
   match(ctx) { return targeted(ctx); },
   inbound(payload) {
@@ -43,39 +44,10 @@ export const deepseekReasoningPatch = {
       return c;
     });
     return { ...payload, choices };
-  },
-  streamLine(line) {
-    if (typeof line !== "string" || !line.startsWith("data:")) return line;
-    let payload = line.slice(5);
-    if (payload.startsWith(" ")) payload = payload.slice(1);
-    const data = payload;
-    if (!data || data === "[DONE]") return line;
-    try {
-      const parsed = JSON.parse(data);
-      const choices = parsed.choices;
-      if (!Array.isArray(choices)) return line;
-      let changed = false;
-      for (const c of choices) {
-        const d = c?.delta;
-        if (!d || d.reasoning_content === undefined) continue;
-        const text = typeof d.reasoning_content === "string" ? d.reasoning_content : "";
-        const content = d.content;
-        if ((content === null || content === undefined || content === "") && text) {
-          // 该 delta 只承载思考文本（例如 KE 中继的 deepseek 把正文也放在
-          // reasoning_content）。若直接剥掉会得到空 delta，被 chat-reasoning
-          // 吞成空流，导致严格 chat 客户端（Grok Build）收到 200 却无任何内容而无限重试。
-          // 回填成 content，保证客户端至少能收到正文。
-          c.delta = { content: text };
-        } else {
-          const { reasoning_content, ...rest } = d;
-          c.delta = rest;
-        }
-        changed = true;
-      }
-      if (changed) return "data: " + JSON.stringify(parsed);
-      return line;
-    } catch {
-      return line;
-    }
   }
+  // 流式方向不注册 patch：思考阶段的 delta 天然只有 reasoning_content、没有 content，
+  // 原样透传即可。回填成 content 会让整段思考混进正文（ZCode 等 chat 客户端的思考就是
+  // 这么变成正文的），剥离 reasoning_content 又会让思考彻底消失（KE GLM 的 delta 带
+  // role，剥完剩下 {role} 非空，连「吞掉空 delta」的兜底都触发不了，思考凭空不见）。
+  // reasoning_content 本就是 chat 客户端的标准思考字段——网关自身合成 SSE 也用它。
 };

@@ -35,6 +35,7 @@ import {
   isAccountPoolProvider,
   markAccountFailure,
   markAccountSuccess,
+  ensureFreshAccount,
   pickAndRefreshAccount
 } from "../account-pool/index.mjs";
 import { withDispatchRetry } from "./retry-policy.mjs";
@@ -91,12 +92,31 @@ async function runWithAccountPool(provider, opts, runner) {
       lastError = picked.error || "account pool unavailable";
       break;
     }
-    const account = picked.account;
+    let account = picked.account;
     excludeIds.push(account.id);
     const bound = bindProviderToAccount(provider, account);
     try {
-      const result = await runner(bound, account);
+      let result = await runner(bound, account);
       if (result?.kind === "error" && shouldFailoverStatus(result.status)) {
+        // Access token 可能在 JWT exp 之前被服务端撤销。和 Cockpit 一样，
+        // 401 时先强制续期同一账号一次；只有续期失败才切换账号。
+        if (result.status === 401 && (account.refreshToken || account.sessionToken)) {
+          const renewed = await ensureFreshAccount(account, {
+            provider,
+            proxyUrl: provider.proxyUrl,
+            fetchImpl: opts?.fetchImpl,
+            force: true
+          });
+          if (renewed.ok) {
+            const retried = await runner(bindProviderToAccount(provider, renewed.account), renewed.account);
+            if (!(retried?.kind === "error" && shouldFailoverStatus(retried.status))) {
+              markAccountSuccess(provider, renewed.account, { upstreamModel: opts?.upstreamModel || "" });
+              return withAccountMeta(retried, renewed.account);
+            }
+            result = retried;
+            if (retried?.kind === "error") account = renewed.account;
+          }
+        }
         markAccountFailure(provider, account, {
           status: result.status,
           error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`,
@@ -104,10 +124,28 @@ async function runWithAccountPool(provider, opts, runner) {
         });
         lastResult = withAccountMeta(result, account);
         clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
-        // 401：同号已在 pick 时 refresh；仍失败则换号
         continue;
       }
       if (result?.kind === "stream" && result.upstream && !result.upstream.ok && shouldFailoverStatus(result.upstream.status)) {
+        // Codex Responses 强制使用 SSE；401 会走 stream 分支，必须和普通 JSON
+        // 响应一样先续期同一账号，否则会在 refresh 前直接换号并最终报未授权。
+        if (result.upstream.status === 401 && (account.refreshToken || account.sessionToken)) {
+          const renewed = await ensureFreshAccount(account, {
+            provider,
+            proxyUrl: provider.proxyUrl,
+            fetchImpl: opts?.fetchImpl,
+            force: true
+          });
+          if (renewed.ok) {
+            const retried = await runner(bindProviderToAccount(provider, renewed.account), renewed.account);
+            if (!(retried?.kind === "stream" && retried.upstream && !retried.upstream.ok && shouldFailoverStatus(retried.upstream.status))) {
+              markAccountSuccess(provider, renewed.account, { upstreamModel: opts?.upstreamModel || "" });
+              return withAccountMeta(retried, renewed.account);
+            }
+            result = retried;
+            if (retried?.kind === "stream" && retried.upstream && !retried.upstream.ok) account = renewed.account;
+          }
+        }
         markAccountFailure(provider, account, {
           status: result.upstream.status,
           error: `stream status ${result.upstream.status}`,

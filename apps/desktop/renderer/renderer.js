@@ -3139,7 +3139,9 @@ document.getElementById("btn-pool-import-text")?.addEventListener("click", async
     await refreshProviderPoolList();
     const conv = result.converted ? `，SSO转换 ${result.converted}` : "";
     const fail = result.convertErrors?.length ? `，转换失败 ${result.convertErrors.length}` : "";
-    toast(`导入完成：新增 ${result.added}，跳过 ${result.skipped}${conv}${fail}`);
+    const summary = result.credentialSummary;
+    const status = summary ? `，当前池 ${summary.total} 个（Access ${summary.accessToken}、Refresh ${summary.refreshToken}、Session ${summary.sessionToken}）` : "";
+    toast(`导入完成：新增 ${result.added}，跳过 ${result.skipped}${conv}${fail}${status}`);
   } catch (err) {
     toast(err?.message || String(err));
   }
@@ -3158,7 +3160,9 @@ document.getElementById("btn-pool-import-cpa")?.addEventListener("click", async 
       : poolKind === "antigravity_oauth"
       ? "Antigravity"
       : "CLIProxyAPI";
-    toast(`从 ${label} 导入：新增 ${result.added}，跳过 ${result.skipped}，扫描 ${result.scanned || 0}`);
+    const summary = result.credentialSummary;
+    const status = summary ? `，当前池 ${summary.total} 个（Access ${summary.accessToken}、Refresh ${summary.refreshToken}、Session ${summary.sessionToken}）` : "";
+    toast(`从 ${label} 导入：新增 ${result.added}，跳过 ${result.skipped}，扫描 ${result.scanned || 0}${status}`);
   } catch (err) {
     toast(err?.message || String(err));
   }

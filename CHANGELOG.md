@@ -14,6 +14,17 @@
 
 - 新增 `server records Codex chat-stream terminal state instead of a blank 200 row`（截断流记为 `incomplete`、正常流记为 `completed`）；`adapters` 两条既有测试补上 `terminalSeen`/`errorCode` 断言。`node --test packages/core/test/*.test.mjs apps/desktop/src/mobile-control/*.test.mjs` 722/722 通过。
 
+### Fixed（思考内容与正文混淆）
+
+- **流式思考不再被改写进正文**：`chat-reasoning` / `deepseek-reasoning` 两个补丁此前在「delta 只带 `reasoning_content`、没有 `content`」时把思考文本回填成 `content`，导致思考阶段的每个分片都变成正文——ZCode 等 chat 客户端里表现为整段思考混进回答，且逐片 `trim()` 还吃掉了词间空格。该分支当初是为 KE 中继的 deepseek「正文也放在 reasoning_content」写的兜底，但实测上游从不把 `content` 与 `reasoning_content` 放进同一个 delta（workbuddy 33:0、KE GLM 208:0），前提不成立。现在流式方向原样透传 `reasoning_content`（它本就是 chat 客户端的标准思考字段，网关自身合成 SSE 也用它）。
+- **思考不再凭空消失**：`chat-reasoning` 的旧逻辑以「剥离后 delta 是否为空对象」决定回填还是丢弃，而 KE 的 GLM、Kimi 等上游每个思考 delta 都带 `role`，剥完剩下 `{role}` 非空，于是既没回填也没吞掉，思考被静默丢弃（实测 KE GLM-5.3 的 208 条思考全部消失）。现在只清理 `reasoning` / `reasoning_details` 别名，保留 `reasoning_content`；上游只给别名时提升为标准字段。
+- **新增 `think-tag-split` 补丁**：MiniMax-M2.7 / M3 等上游不返回 `reasoning_content`，而是把思考用 `<think>...</think>` 包进 `content`。Responses 协议路径本有 `ThinkTagStreamSplitter` 处理，但 chat 直通（`pipeStream`）没有，客户端拿到的正文里混着思考标签。新补丁在 chat 直通路径上按跨 delta 状态机拆分标签（`<think>` 与 `</think>` 常相隔数十个分片），并把标签被切开的情况按缓冲重组；仅在首段紧贴 `<think>` 时触发，正文中途出现标签一律透传。实测 MiniMax-M2.7 的 950 字符思考与 728 字符正文逐字符守恒。
+- 影响面：`chat-reasoning` 覆盖的 DeepSeek / Kimi / GLM / Qwen / MiniMax / Doubao 等模型此前全部受影响（12/12 组合异常）；GPT、Gemini、ERNIE 系不命中这些补丁，行为不变。
+
+### Tests
+
+- 新增 `think-tag-split.test.mjs`（10 条：标签拆分、跨分片重组、非首段标签不误拆、请求间状态隔离）。`v0.4-compat-patches` 中固化旧行为的 3 条断言改为正确行为。全量 736/736 通过。
+
 ## 2.3.8 — 2026-09-01
 
 ### Fix

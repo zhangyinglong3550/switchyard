@@ -325,12 +325,30 @@ export function parseCodexImportPayload(raw) {
       const parts = trimmed.split(sep).map((s) => s.trim()).filter(Boolean);
       if (parts.length >= 2) {
         const email = parts[0].includes("@") ? parts[0] : "";
-        const rt = parts.find((p) => p.length > 20 && !p.includes("@")) || parts[parts.length - 1];
+        const uuid = parts.find((p) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p));
+        // CPA 常见四段格式：email----password----account_id----session_token。
+        // account_id 不是 refresh_token；误把 UUID 当 RT 会导致后续一直 401。
+        if (parts.length >= 4 && uuid) {
+          const sessionToken = parts[parts.length - 1];
+          if (sessionToken && sessionToken !== uuid) {
+            accounts.push(normalizeAccount({
+              email,
+              name: email || "codex",
+              accountId: uuid,
+              sessionToken,
+              source: "paste-cpa-session",
+              enabled: true
+            }));
+            continue;
+          }
+        }
+        const rt = parts.find((p) => p.length > 20 && !p.includes("@") && p !== uuid) || parts[parts.length - 1];
         if (rt && rt.length >= 20) {
           accounts.push(normalizeAccount({
             email,
             name: email || "codex",
             refreshToken: rt,
+            accountId: uuid || "",
             source: "paste-email-rt",
             enabled: true
           }));
@@ -373,7 +391,34 @@ function collectCodexFromValue(value, out, source) {
   if (typeof value !== "object") return;
 
   if (Array.isArray(value.accounts)) {
-    for (const item of value.accounts) collectCodexFromValue(item, out, source);
+    for (const item of value.accounts) {
+      // CPA wraps the actual Codex credential in `credentials`, while the
+      // account metadata (email/account id/plan) stays on the outer object.
+      if (item?.credentials && typeof item.credentials === "object") {
+        collectCodexFromValue({
+          ...item.credentials,
+          email: item.credentials.email || item.email || "",
+          account_id: item.credentials.account_id || item.credentials.accountId || item.chatgpt_account_id || item.account_id || "",
+          chatgpt_account_id: item.credentials.chatgpt_account_id || item.chatgpt_account_id || item.account_id || "",
+          plan_type: item.credentials.plan_type || item.plan_type || item.chatgpt_plan_type || "",
+          type: "codex"
+        }, out, source);
+      } else {
+        collectCodexFromValue(item, out, source);
+      }
+    }
+    return;
+  }
+
+  if (value.credentials && typeof value.credentials === "object") {
+    collectCodexFromValue({
+      ...value.credentials,
+      email: value.credentials.email || value.email || "",
+      account_id: value.credentials.account_id || value.credentials.accountId || value.chatgpt_account_id || value.account_id || "",
+      chatgpt_account_id: value.credentials.chatgpt_account_id || value.chatgpt_account_id || value.account_id || "",
+      plan_type: value.credentials.plan_type || value.plan_type || value.chatgpt_plan_type || "",
+      type: "codex"
+    }, out, source);
     return;
   }
 
@@ -397,12 +442,20 @@ function collectCodexFromValue(value, out, source) {
     return;
   }
 
-  if (value.credentials && typeof value.credentials === "object") {
-    collectCodexFromValue(value.credentials, out, source);
-  }
 }
 
 /** 粘贴文本导入 Codex 多账号（不依赖 ~/.cli-proxy-api / 文件路径） */
+function summarizeCodexCredentials(accounts = []) {
+  return {
+    total: accounts.length,
+    accessToken: accounts.filter((account) => account.hasAccessToken).length,
+    refreshToken: accounts.filter((account) => account.hasRefreshToken).length,
+    sessionToken: accounts.filter((account) => account.hasSessionToken).length,
+    autoRefreshCapable: accounts.filter((account) => account.canAutoRefresh).length,
+    requestReady: accounts.filter((account) => account.hasAccessToken || account.hasRefreshToken || account.hasSessionToken || account.hasAgentIdentity).length
+  };
+}
+
 export function importCodexAccountsFromText(providerId, raw, {
   skipDuplicates = true,
   home
@@ -428,7 +481,14 @@ export function importCodexAccountsFromText(providerId, raw, {
     skipDuplicates,
     home
   });
-  return { ...result, scanned: ready.length, sourceFormat: parsed.sourceFormat };
+  return {
+    ...result,
+    providerId,
+    poolKind: "codex_oauth",
+    scanned: ready.length,
+    sourceFormat: parsed.sourceFormat,
+    credentialSummary: summarizeCodexCredentials(result.pool?.accounts || [])
+  };
 }
 
 export function importAntigravityFromCpaDirs(providerId, {
@@ -531,7 +591,14 @@ export function importCodexFromPaths(providerId, {
     skipDuplicates,
     home
   });
-  return { ...result, scanned: accounts.length, errors };
+  return {
+    ...result,
+    providerId,
+    poolKind: "codex_oauth",
+    scanned: accounts.length,
+    errors,
+    credentialSummary: summarizeCodexCredentials(result.pool?.accounts || [])
+  };
 }
 
 /**

@@ -115,6 +115,7 @@ import { opencodeToolHistoryPatch } from "./patches/opencode-tool-history.mjs";
 import { opencodeGlmNoToolsPatch } from "./patches/opencode-glm-no-tools.mjs";
 import { officialGPTFallbackPatch } from "./patches/official-gpt-fallback.mjs";
 import { chatReasoningPatch } from "./patches/chat-reasoning.mjs";
+import { thinkTagSplitPatch } from "./patches/think-tag-split.mjs";
 import { reasoningOptionsPatch } from "./patches/reasoning-options.mjs";
 import { kePatch } from "./patches/ke.mjs";
 import { toolNameNormalizePatch } from "./patches/tool-name-normalize.mjs";
@@ -139,6 +140,7 @@ export const BUILTIN_PATCHES = [
   opencodeGlmNoToolsPatch,
   officialGPTFallbackPatch,
   chatReasoningPatch,
+  thinkTagSplitPatch,
   reasoningOptionsPatch,
   kePatch,
   reasoningStatePatch,

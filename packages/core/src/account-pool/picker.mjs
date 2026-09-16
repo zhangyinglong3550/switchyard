@@ -371,8 +371,15 @@ export function bindProviderToAccount(provider, account) {
       _accountId: account.id,
       _accountEmail: account.email || "",
       _codexAccessToken: account.accessToken,
+      // 绑定后的临时 provider 也必须携带续期材料；否则 401 后即使
+      // ensureFreshAccount 成功，重试仍会丢掉 refresh/session token。
+      _codexRefreshToken: account.refreshToken || "",
+      _codexSessionToken: account.sessionToken || "",
       _codexAccountId: account.accountId || "",
-      _codexIdToken: account.idToken || ""
+      _codexIdToken: account.idToken || "",
+      _codexExpiresAt: account.expiresAt || "",
+      _codexPlanType: account.planType || "",
+      _codexUserAgent: provider.codexUserAgent || "codex-tui/0.153.4"
     };
   }
 

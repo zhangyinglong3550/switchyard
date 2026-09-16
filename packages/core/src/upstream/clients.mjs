@@ -158,7 +158,8 @@ export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null
     const expiresAt = String(provider._codexExpiresAt || "").trim();
     const accessUsable = isAccessTokenUsable(accessToken, { expiresAt });
     const refreshToken = String(provider._codexRefreshToken || "").trim();
-    const valid = accessUsable || Boolean(refreshToken);
+    const sessionToken = String(provider._codexSessionToken || "").trim();
+    const valid = accessUsable || Boolean(refreshToken) || Boolean(sessionToken);
     return {
       ok: valid,
       reason: valid ? "" : "memory-token-unusable",
@@ -170,9 +171,10 @@ export function readCodexOAuthAuth({ authFile = codexAuthPath(), provider = null
       email: provider._codexEmail || "",
       expiresAt: resolveAccessExpiresAt({ accessToken, expiresAt }),
       accessUsable,
-      canRefresh: Boolean(refreshToken),
+      canRefresh: Boolean(refreshToken || sessionToken),
       hasAccessToken: Boolean(accessToken),
-      hasRefreshToken: Boolean(refreshToken)
+      hasRefreshToken: Boolean(refreshToken),
+      hasSessionToken: Boolean(sessionToken)
     };
   }
 
@@ -218,12 +220,22 @@ export function codexOAuthHeaders(provider) {
   // 发请求需要可用的 access；仅有 refresh 时先不带头（dispatch 侧应 ensure）
   if (!auth.accessToken) return {};
   if (!auth.accessUsable && !auth.ok) return {};
+  const poolHeaders = provider?._accountPool === true;
   return {
     Authorization: `Bearer ${auth.accessToken}`,
     "OpenAI-Beta": "responses=experimental",
-    originator: "codex_cli_rs",
-    "User-Agent": "codex_cli_rs/0.0.0",
-    ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {})
+    // CPA/CLIProxyAPI 的 Codex executor 使用 codex-tui 身份头；本机
+    // ~/.codex/auth.json 继续保持原有 codex_cli_rs 兼容行为。
+    originator: poolHeaders ? "codex-tui" : "codex_cli_rs",
+    // Codex backend 会按客户端身份校验订阅 access token；仅带 Bearer
+    // 在部分账号上会返回 401。跟随官方/CPA 的可观察请求头，不发送账号敏感信息。
+    "User-Agent": poolHeaders
+      ? String(provider?._codexUserAgent || "codex-tui/0.153.4")
+      : "codex_cli_rs/0.0.0",
+    ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {}),
+    ...(poolHeaders && provider?._codexPlanType
+      ? { "X-Codex-Plan-Type": String(provider._codexPlanType) }
+      : {})
   };
 }
 

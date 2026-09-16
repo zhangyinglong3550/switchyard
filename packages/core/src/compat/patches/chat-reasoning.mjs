@@ -41,6 +41,20 @@ function normalizeChoices(payload) {
   return changed ? { ...payload, choices } : payload;
 }
 
+function normalizeStreamDelta(delta) {
+  if (!delta || typeof delta !== "object") return null;
+  const standard = typeof delta.reasoning_content === "string" ? delta.reasoning_content : "";
+  const aliasText = extractReasoningFieldText(delta);
+  if (!standard && !aliasText) return null;
+  // 只删别名（reasoning / reasoning_details 是供应商私有写法，部分客户端会误判），
+  // 保留 reasoning_content —— 它是 chat 客户端的标准思考字段，网关自身合成 SSE 也用它。
+  const { reasoning, reasoning_details, ...rest } = delta;
+  // 上游只给别名、没给标准字段时提升为标准字段，保证思考在客户端可见；
+  // 绝不回填进 content（思考会混进正文），也绝不丢弃（思考会凭空消失）。
+  if (!rest.reasoning_content && aliasText) rest.reasoning_content = aliasText;
+  return rest;
+}
+
 function stripReasoningFromStreamLine(line) {
   if (typeof line !== "string" || !line.startsWith("data:")) return line;
   let payload = line.slice(5);
@@ -54,35 +68,16 @@ function stripReasoningFromStreamLine(line) {
     let changed = false;
     for (const choice of choices) {
       if (!choice?.delta || typeof choice.delta !== "object") continue;
-      const reasoning = extractReasoningFieldText(choice.delta);
-      if (!reasoning) continue;
-      const stripped = stripRawReasoningFields(choice.delta);
-      // 剥离 reasoning 后 delta 变成空对象时，若本没有正文，则把思考文本回填成
-      // content：避免被下面吞成空 SSE 流，导致严格 chat 客户端（Grok Build）
-      // 收到 200 却无任何内容而无限重试。
-      const emptyAfter = typeof stripped === "object" && Object.keys(stripped || {}).length === 0;
-      const hasContent = typeof stripped?.content === "string" && stripped.content.trim() !== "";
-      if (emptyAfter && !hasContent) {
-        choice.delta = { content: reasoning };
-      } else {
-        choice.delta = stripped;
-      }
+      const next = normalizeStreamDelta(choice.delta);
+      if (!next) continue;
+      choice.delta = next;
       changed = true;
     }
     if (!changed) return line;
-    // 严格 chat 客户端（如 Grok Build）无法解析空 delta chunk，
-    // 删除 reasoning 字段后 delta 为空时直接吞掉这一行，避免触发 serde missing field 错误。
-    const allEmpty = choices.every((choice) => {
-      const delta = choice?.delta;
-      if (!delta || typeof delta !== "object") return true;
-      return Object.keys(delta).length === 0;
-    });
-    if (allEmpty && choices.every((choice) => choice?.finish_reason == null)) return null;
     return "data: " + JSON.stringify(parsed);
   } catch {
     return line;
   }
-  return line;
 }
 
 export const chatReasoningPatch = {
@@ -93,12 +88,14 @@ export const chatReasoningPatch = {
   changes: [
     "非流式响应：提取 reasoning_content、reasoning、reasoning_details",
     "把提取结果转成 Codex Responses reasoning 或 Claude thinking 可显示的内部块",
-    "对直通 Chat SSE 删除供应商私有 reasoning 字段，避免客户端协议误判"
+    "对直通 Chat SSE 删除供应商私有 reasoning 字段（思考文本原样透传，不回填进 content，也不丢弃）"
   ],
   risk: "如果某个聚合商把 reasoning 字段用于非思考语义，可能被当作思考展示；可在模型上关闭该规则。",
   tests: [
     "chat-reasoning · maps MiniMax reasoning_details into Codex reasoning output",
-    "chat-reasoning · maps Kimi reasoning_content into Anthropic thinking"
+    "chat-reasoning · maps Kimi reasoning_content into Anthropic thinking",
+    "chat-reasoning · keeps reasoning-only stream delta on reasoning_content",
+    "chat-reasoning · keeps reasoning_content when delta also carries role"
   ],
   match(ctx) { return targeted(ctx); },
   inbound(payload) {

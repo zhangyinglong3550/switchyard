@@ -1858,14 +1858,14 @@ ipcMain.handle("import:sub2api:data-apply", async (_e, payload = {}) => {
   }
 });
 function resolvePoolKind(payload = {}, providerId = "") {
-  const explicit = String(payload.poolKind || "").trim();
-  if (explicit) return explicit;
+  // 配置中的 provider 是唯一事实来源。前端 hidden poolKind 可能来自上一次
+  // 编辑状态；优先信它会把账号写进另一个池，随后请求自然变成“未授权”。
   try {
     const cfg = readConfig();
     const provider = (cfg.providers || []).find((p) => p.id === providerId);
     if (provider) return poolKindOf(provider);
   } catch {}
-  return "xai_oauth";
+  return String(payload.poolKind || "").trim() || "xai_oauth";
 }
 
 ipcMain.handle("account-pool:list", (_e, payload = {}) => {

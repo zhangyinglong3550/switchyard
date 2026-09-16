@@ -143,7 +143,7 @@ export function parseCodexAuthJson(raw, { authFile = "", source = "codex-auth-js
     ""
   ).trim();
   const accessUsable = isAccessTokenUsable(accessToken, { expiresAt });
-  const canRefresh = Boolean(refreshToken);
+  const canRefresh = Boolean(refreshToken || sessionToken);
   const valid = accessUsable || canRefresh;
 
   return {
@@ -180,7 +180,8 @@ export function readCodexLocalAuth({
     const expiresAt = String(provider._codexExpiresAt || "").trim();
     const accessUsable = isAccessTokenUsable(accessToken, { expiresAt });
     const refreshToken = String(provider._codexRefreshToken || "").trim();
-    const valid = accessUsable || Boolean(refreshToken);
+    const sessionToken = String(provider._codexSessionToken || "").trim();
+    const valid = accessUsable || Boolean(refreshToken || sessionToken);
     return {
       ok: valid,
       reason: valid ? "" : "memory-token-unusable",
@@ -189,16 +190,16 @@ export function readCodexLocalAuth({
       accessToken,
       refreshToken,
       idToken: String(provider._codexIdToken || "").trim(),
-      sessionToken: "",
+      sessionToken: String(provider._codexSessionToken || "").trim(),
       accountId: String(provider._codexAccountId || provider.codexAccountId || provider.accountId || "").trim(),
       email: String(provider._codexEmail || "").trim(),
       expiresAt,
       lastRefresh: "",
       accessUsable,
-      canRefresh: Boolean(refreshToken),
+      canRefresh: Boolean(refreshToken || sessionToken),
       hasAccessToken: Boolean(accessToken),
       hasRefreshToken: Boolean(refreshToken),
-      hasSessionToken: false
+      hasSessionToken: Boolean(sessionToken)
     };
   }
 
