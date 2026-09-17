@@ -295,6 +295,35 @@ test("workbuddy 流帧清洗 · 只保留本帧有值的键，避免客户端按
   assert.equal(normalizeWorkBuddyStreamLine("data: [DONE]"), "data: [DONE]");
 });
 
+test("workbuddy 出站形态 · 官方桌面端 UA 与归属头（缺则可能被上游 403）", () => {
+  const globalHeaders = workBuddyHeaders({ realm: "global", uid: "u1", accessToken: "at", surface: "desktop" });
+  assert.equal(globalHeaders["User-Agent"], "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1");
+  assert.equal(globalHeaders["X-IDE-Name"], "WorkBuddy");
+  assert.equal(globalHeaders["X-IDE-Version"], "5.5.4");
+  assert.equal(globalHeaders["X-Agent-Purpose"], "conversation");
+  assert.equal(globalHeaders["X-Product"], "WorkBuddy");
+
+  const cnHeaders = workBuddyHeaders({ realm: "cn", surface: "desktop" });
+  assert.equal(cnHeaders["User-Agent"], "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1");
+  assert.equal(cnHeaders["X-Domain"], "www.codebuddy.cn");
+
+  // 登录（plugin）流程保持 CLI 形态 UA，不注入归属头。
+  const pluginHeaders = workBuddyHeaders({ realm: "global" });
+  assert.equal(pluginHeaders["User-Agent"], "CLI/2.63.2 CodeBuddy/2.63.2");
+  assert.equal(pluginHeaders["X-IDE-Name"], undefined);
+
+  // chat 出站（clients 层）同样带官方形态。
+  const provider = { id: "workbuddy", authMode: "account_pool", poolKind: "workbuddy_oauth", apiFormat: "openai_chat" };
+  const bound = bindProviderToAccount(provider, {
+    id: "wb-1", realm: "global", domain: "www.workbuddy.ai",
+    accessToken: "at", refreshToken: "rt", accountId: "uid-1"
+  });
+  const headers = providerAuthHeaders(bound, "bearer");
+  assert.equal(headers["User-Agent"], "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1");
+  assert.equal(headers["X-IDE-Type"], "WorkBuddy");
+  assert.equal(headers["X-Domain"], "www.workbuddy.ai");
+});
+
 test("workbuddy preset/config · 默认指向真实海外域与 Chat 协议", () => {
   const preset = getProviderPreset("workbuddy-account-pool");
   assert.equal(preset.poolKind, "workbuddy_oauth");
@@ -312,9 +341,32 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
   assert.equal(prepared.messages[1].role, "user");
   // 官方 CLI 流式必发 include_usage，上游据此在末帧返回 usage。
   assert.deepEqual(prepared.stream_options, { include_usage: true });
-  // DeepSeek 系必须注入思维链开关 + 默认档位，否则上游不返回思考（实测思考帧为 0）。
+  // DeepSeek 系注入思维链开关；但**历史无思考痕迹时不能带 reasoning_effort**——
+  // 上游一旦真开思维链就要求每轮回传真实思考，ZCode 这类客户端不回传会被 11155 拒绝。
   assert.deepEqual(prepared.thinking, { type: "enabled" });
-  assert.equal(prepared.reasoning_effort, "high");
+  assert.equal(prepared.reasoning_effort, undefined);
+
+  // 显式 strict（网关判定历史可回传思考/首轮）→ 带默认档，进入严格思维链模式。
+  const strict = prepareWorkBuddyChatBody({
+    model: "deepseek-v4.1-flash",
+    messages: [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1", reasoning_content: "上一轮真实思考" },
+      { role: "user", content: "u2" }
+    ]
+  }, { thinkingMode: "strict" });
+  assert.equal(strict.reasoning_effort, "high");
+
+  // 显式 off（历史 assistant 配不到思考）→ 不开严格模式，避免上游 11155。
+  const off = prepareWorkBuddyChatBody({
+    model: "deepseek-v4.1-flash",
+    messages: [
+      { role: "system", content: "s" },
+      { role: "assistant", content: "a1" }
+    ]
+  }, { thinkingMode: "off" });
+  assert.equal(off.reasoning_effort, undefined);
+  assert.equal(off.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
 
   const alreadySystem = prepareWorkBuddyChatBody({ messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] });
   assert.equal(alreadySystem.messages.length, 2);
@@ -342,7 +394,7 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
   const roleFixed = prepareWorkBuddyChatBody({ model: "gpt-5.6-terra", messages: [{ role: "developer", content: "d" }] });
   assert.equal(roleFixed.messages[0].role, "system");
 
-  // 多轮：任一 assistant 带 reasoning 痕迹 → 所有 assistant 补 reasoning_content（可为空串）。
+  // 多轮：严格思维链模式下**所有** assistant 都必须带 reasoning_content（上游 11155 硬要求）。
   const backfilled = prepareWorkBuddyChatBody({
     model: "deepseek-v4.1-flash",
     messages: [
@@ -355,6 +407,24 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
   const assistants = backfilled.messages.filter((m) => m.role === "assistant");
   assert.equal(assistants[0].reasoning_content, "想过");
   assert.equal(assistants[1].reasoning_content, "");
+  // 普通多轮（无思考痕迹）走非严格模式：不加 effort，也不强行补 reasoning_content。
+  const plainMultiTurn = prepareWorkBuddyChatBody({
+    model: "deepseek-v4.1-flash",
+    messages: [
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "u2" }
+    ]
+  });
+  assert.equal(plainMultiTurn.reasoning_effort, undefined);
+  assert.equal(plainMultiTurn.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
+  // 显式关闭思考时不应强行加字段。
+  const thinkingOff = prepareWorkBuddyChatBody({
+    model: "deepseek-v4.1-flash",
+    thinking: { type: "disabled" },
+    messages: [{ role: "assistant", content: "a1" }]
+  });
+  assert.equal(thinkingOff.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
 
   const sse = [
     'data: {"id":"chatcmpl-1","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"池化"},"finish_reason":""}]}',

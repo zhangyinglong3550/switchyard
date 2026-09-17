@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.3.11 — 2026-09-17
+
+### Fixed
+
+- **ZCode 通过网关报 `auth_failed 403 / Forbidden`**：客户端 `User-Agent` 被当作出站身份头透传，与网关写的官方 UA 合并成 `官方UA, 客户端UA` 的畸形值，上游按「非官方客户端」拒绝。现在透传头丢弃 `user-agent`，并在写请求头前做一次大小写不敏感去重（防止任意头名大小写变体被 undici 合并成畸形值）。
+- **多轮请求报 `11155 reasoning_content_missing`**：上游规则是——只要带 `reasoning_effort`（真开思维链），**每轮 assistant 都必须回传上一轮真实思考**；ZCode 这类客户端不回传。现在改为**按需开启严格思维链**，不再无脑注入 effort。
+- **出站形态对齐官方桌面端**：UA 改为 `WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1`（cn 为 `WorkBuddy/... WorkBuddy/...`），并补 `X-Agent-Purpose` / `X-IDE-Name` / `X-IDE-Type` / `X-IDE-Version` / `X-Product` 归属头组；刷新与积分查询同步改用同一形态（登录授权流程仍用插件 CLI 形态）。
+
+### Added
+
+- **网关侧思考回传（`reasoning-cache.mjs`）**：客户端不回传思考时，网关把每轮思考按会话缓存（内存、TTL 30 分钟、最多 200 会话 × 20 轮），下一轮按 assistant 文本指纹回填给上游，从而在 ZCode 这类客户端上也能持续开启思维链；匹配不上自动回落到「不思考」稳模式，不会因缓存缺失导致请求失败。
+  - 严格思维链判定：历史无 assistant（首轮）→ 开；历史 assistant 都能配上思考（客户端回传或缓存回填）→ 开；否则关。
+  - 实测：首轮 399 字思考，第二轮 1706 字思考，均 200。
+
+### Tests
+
+- 新增 `packages/core/test/reasoning-cache.test.mjs`（4 条：会话键解析、按文本回填与不匹配不填、TTL 与容量上限、指纹稳定性）；workbuddy 池测试补 strict/off 模式断言。全量 754/754 通过。
+
 ## 2.3.10 — 2026-09-17
 
 ### Added

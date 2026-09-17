@@ -3178,7 +3178,15 @@ const POOL_KEEPALIVE_SKEW_MS = 60 * 60 * 1000;
 let poolKeepaliveTimer = null;
 
 async function runPoolKeepalive(reason = "timer") {
-  const providers = (readConfig()?.providers || []).filter((p) => p.poolKind === "workbuddy_oauth");
+  // readConfig 可能撞上配置文件的原子写入窗口（读到截断文件会抛错）：
+  // 这里必须整体兜底，否则同步异常会把主进程打崩（UI 成僵尸、网关随之消失）。
+  let providers = [];
+  try {
+    providers = (readConfig()?.providers || []).filter((p) => p.poolKind === "workbuddy_oauth");
+  } catch (err) {
+    appendLog({ level: "warn", msg: "pool keepalive: read config failed", reason, error: err?.message || String(err) });
+    return;
+  }
   for (const provider of providers) {
     try {
       const result = await refreshExpiringAccounts(provider, { skewMs: POOL_KEEPALIVE_SKEW_MS });

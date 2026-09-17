@@ -6,7 +6,13 @@ import { ProxyAgent } from "undici";
 
 export const WORKBUDDY_BASE_URL = "https://www.workbuddy.ai";
 export const WORKBUDDY_GLOBAL_DOMAIN = "www.workbuddy.ai";
+// 插件授权流程（登录 state/token/account）使用的 CLI 形态 UA。
 export const WORKBUDDY_CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2";
+// 官方桌面端形态（chat / refresh / 资源查询出站必须对齐，否则可能被上游判为非官方客户端 → 403）：
+//   UA = `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`
+//   平台段品牌按 realm 切换：global = `WorkBuddy AI`，cn = `WorkBuddy`
+export const WORKBUDDY_CLIENT_VERSION = "5.5.4";
+export const WORKBUDDY_CLI_VERSION = "2.137.1";
 export const WORKBUDDY_STATE_PATH = "/v2/plugin/auth/state?platform=CLI";
 export const WORKBUDDY_TOKEN_PATH = "/v2/plugin/auth/token";
 export const WORKBUDDY_ACCOUNT_PATH = "/v2/plugin/login/account";
@@ -62,11 +68,33 @@ function joinUrl(baseUrl, suffix) {
   return `${String(baseUrl || WORKBUDDY_BASE_URL).replace(/\/+$/, "")}${suffix}`;
 }
 
-/** WorkBuddy 出站请求头：按 realm 设置 Origin/Referer/X-Domain（国内为 codebuddy.cn 域）。 */
-export function workBuddyHeaders({ accessToken = "", uid = "", realm = "global", domain = "", extra = {} } = {}) {
+/** 官方桌面端 UA：platform 段按 realm 切品牌（global=WorkBuddy AI，cn=WorkBuddy）。 */
+export function workBuddyUserAgent(realm = "global") {
+  const platform = workBuddyRealmOf(realm) === "cn" ? "WorkBuddy" : "WorkBuddy AI";
+  return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION} ${platform}/${WORKBUDDY_CLIENT_VERSION} CLI/${WORKBUDDY_CLI_VERSION}`;
+}
+
+/** 官方客户端的用量归属头组（缺这组头上游会把流量判为非官方客户端）。 */
+export function workBuddyAttributionHeaders() {
+  return {
+    "X-Agent-Purpose": "conversation",
+    "X-IDE-Name": "WorkBuddy",
+    "X-IDE-Type": "WorkBuddy",
+    "X-IDE-Version": WORKBUDDY_CLIENT_VERSION,
+    "X-Product": "WorkBuddy"
+  };
+}
+
+/**
+ * WorkBuddy 出站请求头。
+ * @param {"plugin"|"desktop"} surface plugin = 插件授权流程（登录用 CLI 形态 UA）；
+ *        desktop = chat/refresh/资源查询（官方桌面端 UA + 归属头组）。
+ */
+export function workBuddyHeaders({ accessToken = "", uid = "", realm = "global", domain = "", surface = "plugin", extra = {} } = {}) {
   const realmCfg = workBuddyRealmConfig(realm);
   const host = realmCfg.origin;
   const effectiveDomain = String(domain || realmCfg.domain).trim() || realmCfg.domain;
+  const desktop = surface === "desktop";
   return {
     "Content-Type": "application/json",
     Accept: "application/json, text/plain, */*",
@@ -74,7 +102,8 @@ export function workBuddyHeaders({ accessToken = "", uid = "", realm = "global",
     "X-Requested-With": "XMLHttpRequest",
     Origin: host,
     Referer: `${host}/`,
-    "User-Agent": WORKBUDDY_CLIENT_UA,
+    "User-Agent": desktop ? workBuddyUserAgent(realm) : WORKBUDDY_CLIENT_UA,
+    ...(desktop ? workBuddyAttributionHeaders() : {}),
     "X-CodeBuddy-Request": "1",
     "X-No-Enterprise-Id": "1",
     "X-Domain": effectiveDomain,
@@ -207,6 +236,7 @@ export async function refreshWorkBuddyTokens(refreshToken, {
         uid,
         realm: realmKey,
         domain,
+        surface: "desktop",
         extra: { "X-Refresh-Token": rt, "X-Auth-Refresh-Source": "plugin" }
       }),
       body: "{}"
@@ -289,17 +319,17 @@ export async function fetchWorkBuddyUserResource({
     PackageEndTimeRangeBegin: formatPackageEndTime(now),
     PackageEndTimeRangeEnd: formatPackageEndTime(new Date(now.getTime() + 365 * 101 * 24 * 3600 * 1000))
   });
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "Accept-Language": realmCfg.acceptLanguage,
-    "User-Agent": WORKBUDDY_CLIENT_UA,
-    "X-CodeBuddy-Request": "1",
-    ...(uid ? { "X-User-Id": String(uid).trim() } : {}),
-    ...(enterpriseId ? { "X-Enterprise-Id": String(enterpriseId).trim(), "X-Tenant-Id": String(enterpriseId).trim() } : {}),
-    "X-Domain": String(domain || realmCfg.domain).trim() || realmCfg.domain
-  };
+  const headers = workBuddyHeaders({
+    accessToken: token,
+    uid,
+    realm: realmKey,
+    domain,
+    surface: "desktop",
+    extra: {
+      Accept: "application/json",
+      ...(enterpriseId ? { "X-Enterprise-Id": String(enterpriseId).trim(), "X-Tenant-Id": String(enterpriseId).trim() } : {})
+    }
+  });
   const paths = WORKBUDDY_RESOURCE_PATHS[realmKey] || WORKBUDDY_RESOURCE_PATHS.global;
   let lastError = null;
   for (const path of paths) {

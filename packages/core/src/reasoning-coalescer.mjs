@@ -42,7 +42,7 @@ function reasoningOnly(event) {
  * @param {number} [options.flushMs]  最长暂存时间（毫秒），超时下发
  * @param {(line: string) => void} options.write 输出一行 SSE 的回调
  */
-export function createReasoningCoalescer({ maxChars = DEFAULT_MAX_CHARS, flushMs = DEFAULT_FLUSH_MS, write } = {}) {
+export function createReasoningCoalescer({ maxChars = DEFAULT_MAX_CHARS, flushMs = DEFAULT_FLUSH_MS, write, onDelta } = {}) {
   let buffer = "";
   let template = null; // 保留上游事件壳（id/model/created/usage 等），只替换思考文本
   let timer = null;
@@ -90,6 +90,13 @@ export function createReasoningCoalescer({ maxChars = DEFAULT_MAX_CHARS, flushMs
     /** 送入一行 SSE；思考分片会被暂存，其余行立即下发（下发顺序保持不变）。 */
     push(line) {
       const event = parseEvent(line);
+      if (event && typeof onDelta === "function") {
+        const delta = event.choices?.[0]?.delta || {};
+        onDelta({
+          reasoning: typeof delta.reasoning_content === "string" ? delta.reasoning_content : "",
+          content: typeof delta.content === "string" ? delta.content : ""
+        });
+      }
       if (!event || !reasoningOnly(event)) {
         flush();
         write(line);

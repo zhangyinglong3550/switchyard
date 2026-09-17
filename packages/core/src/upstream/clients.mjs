@@ -16,7 +16,9 @@ import {
   isInvalidAgentIdentityTaskResponse,
   updateAccountRuntime,
   WORKBUDDY_GLOBAL_DOMAIN,
-  WORKBUDDY_CHAT_PATHS
+  WORKBUDDY_CHAT_PATHS,
+  workBuddyUserAgent,
+  workBuddyAttributionHeaders
 } from "../account-pool/index.mjs";
 import {
   ANTHROPIC_API_VERSION,
@@ -281,6 +283,10 @@ export function workbuddyOAuthHeaders(provider) {
   return {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(uid ? { "X-User-Id": uid } : {}),
+    // 官方桌面端形态：UA 平台段按 realm（global=WorkBuddy AI / cn=WorkBuddy）+ 用量归属头组；
+    // 缺这组头时上游可能把流量判为非官方客户端并返回 403。
+    "User-Agent": workBuddyUserAgent(realm),
+    ...workBuddyAttributionHeaders(),
     // 个人账号形态：声明无企业 + 显式域；国内为 codebuddy.cn 域（与 workbuddy2api 出站头一致）。
     "X-No-Enterprise-Id": "1",
     "X-Domain": domain,
@@ -324,6 +330,9 @@ export function extractForwardableClientHeaders(incoming = {}) {
     "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
     // 请求体/协商类头必须由 Switchyard 自己写，避免覆盖上游 Content-Type 导致 xAI 等返回 415
     "content-type", "content-encoding", "accept", "accept-encoding", "accept-language",
+    // user-agent 与鉴权头同类：客户端 UA 会污染上游判定（WorkBuddy 实测会把官方客户端 UA
+    // 变成 "官方UA, 客户端UA" 的畸形值 → 上游按非官方客户端拒绝，返回 11155 / 403）。
+    "user-agent",
     "authorization", "x-api-key", "x-goog-api-key",
     "cookie", "set-cookie",
     "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto", "x-forwarded-for", "forwarded",
@@ -401,6 +410,20 @@ function resolveSensitiveSessionKey(opts = {}, body = {}) {
   ).trim().slice(0, 200);
 }
 
+// HTTP 头名大小写不敏感：同一头出现多种大小写时 undici 会合并成 "a, b" 的畸形值，
+// 上游按畸形 UA/协商头判定客户端不合法。这里保留首次出现的键，丢弃大小写变体。
+function dedupeHeadersCaseInsensitive(headers) {
+  const out = {};
+  const seen = new Set();
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lower = String(key || "").trim().toLowerCase();
+    if (!lower || seen.has(lower)) continue;
+    seen.add(lower);
+    out[key] = value;
+  }
+  return out;
+}
+
 async function postJson(url, body, headers, {
   signal,
   fetchImpl,
@@ -447,12 +470,12 @@ async function postJson(url, body, headers, {
     }
   }
   const doFetch = fetchImpl || globalThis.fetch;
-  const requestHeaders = {
+  const requestHeaders = dedupeHeadersCaseInsensitive({
     "Content-Type": "application/json",
     Accept: acceptSse ? "text/event-stream" : "application/json",
     "Accept-Encoding": "identity",
     ...headers
-  };
+  });
   if (noKeepAlive) requestHeaders.Connection = "close";
   const init = {
     method: "POST",

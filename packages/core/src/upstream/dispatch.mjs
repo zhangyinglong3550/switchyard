@@ -16,6 +16,7 @@
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, isWorkBuddyOAuthProvider, readJsonResponse } from "./clients.mjs";
 import { prepareWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
+import { reasoningCache, resolveReasoningCacheKey } from "../reasoning-cache.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
@@ -204,6 +205,17 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
   ).then((result) => attachOutboundBodyRef(result, opts));
 }
 
+/** 把一轮 assistant 的思考写进会话缓存（供下一轮回填，维持严格思维链）。 */
+function rememberWorkBuddyReasoning(cacheKey, payload) {
+  const key = String(cacheKey || "").trim();
+  if (!key || !payload) return;
+  const message = payload?.choices?.[0]?.message;
+  if (!message) return;
+  const thought = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
+  if (!thought.trim()) return;
+  reasoningCache.remember(key, message.content, thought);
+}
+
 async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, account = null) {
   const ctxModel = { ...(opts.model || {}), id: chatBody._modelId || opts.model?.id || upstreamModel, providerId: opts.model?.providerId || provider.id };
   const ctx = { provider, model: ctxModel, clientId: opts.clientId };
@@ -255,7 +267,28 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
     upstreamBody = { ...upstreamBody, messages: sanitizeUpstreamMessages(upstreamBody.messages) };
     // WorkBuddy 上游只接受流式请求，且要求首条消息为 system 提示。
     const workbuddy = isWorkBuddyOAuthProvider(provider);
-    if (workbuddy) upstreamBody = prepareWorkBuddyChatBody(upstreamBody);
+    if (workbuddy) {
+      // 严格思维链判定（DeepSeek 系）：
+      //   - 历史里没有 assistant（首轮）→ 可以直接开思维链（上游无回传要求）；
+      //   - 历史 assistant 都能配上思考（客户端自带，或网关缓存回填）→ 开；
+      //   - 有 assistant 但配不到思考 → 走「不思考」模式，避免上游 11155。
+      const cacheKey = resolveReasoningCacheKey(upstreamBody, { clientId: opts?.clientId, sessionKey: opts?.sessionKey });
+      if (cacheKey) {
+        const filled = reasoningCache.apply(upstreamBody, cacheKey);
+        if (filled) ctx._reasoningFilled = filled;
+        ctx.reasoningCacheKey = cacheKey;
+      }
+      const modelName = String(upstreamBody.model || upstreamModel || "").toLowerCase();
+      let thinkingMode;
+      if (modelName.startsWith("deepseek")) {
+        const assistants = (upstreamBody.messages || []).filter((m) => m && m.role === "assistant");
+        const allHaveThinking = assistants.every((m) =>
+          (typeof m.reasoning_content === "string" && m.reasoning_content.trim())
+          || (typeof m.reasoning === "string" && m.reasoning.trim()));
+        thinkingMode = assistants.length === 0 || allHaveThinking ? "strict" : "off";
+      }
+      upstreamBody = prepareWorkBuddyChatBody(upstreamBody, { thinkingMode });
+    }
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
     // 非流式客户端 + 只吐 SSE 的上游：在本地聚合为 Chat JSON（workbuddy2api 同策略）。
     if (workbuddy && !stream) {
@@ -264,6 +297,7 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       }
       const text = await upstream.text();
       const payload = aggregateChatSseToChatResponse(text, upstreamModel);
+      rememberWorkBuddyReasoning(ctx.reasoningCacheKey, payload);
       return withAccountMeta({ kind: "json", status: upstream.status || 200, payload: applyInbound(payload, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
     }
     if (stream) {
