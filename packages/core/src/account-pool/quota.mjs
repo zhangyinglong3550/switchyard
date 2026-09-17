@@ -10,6 +10,7 @@ import {
   isAccessExpired
 } from "./store.mjs";
 import { ensureFreshAccount, poolKindOf } from "./picker.mjs";
+import { fetchWorkBuddyUserResource } from "./oauth-workbuddy.mjs";
 
 const PROXY_AGENTS = new Map();
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -242,6 +243,57 @@ export async function fetchXaiAccountQuota(account, {
   }
 }
 
+export async function fetchWorkBuddyAccountQuota(account, {
+  proxyUrl = "",
+  fetchImpl
+} = {}) {
+  if (!account?.accessToken) {
+    return {
+      ok: false,
+      error: "no-token",
+      summary: "无凭证",
+      fetchedAt: new Date().toISOString()
+    };
+  }
+  try {
+    const resource = await fetchWorkBuddyUserResource({
+      accessToken: account.accessToken,
+      uid: account.accountId || "",
+      realm: account.realm || "global",
+      domain: account.domain || "",
+      enterpriseId: account.enterpriseId || "",
+      proxyUrl,
+      fetchImpl
+    });
+    const remain = Number(resource.remain || 0);
+    const size = Number(resource.size || 0);
+    const packs = Number(resource.packs || 0);
+    const percent = size > 0 ? Math.max(0, Math.min(100, Math.round((remain / size) * 100))) : null;
+    const realmLabel = resource.realm === "cn" ? "codebuddy.cn" : "workbuddy.ai";
+    return {
+      ok: true,
+      source: "workbuddy-resource",
+      planType: realmLabel,
+      allowed: true,
+      limitReached: remain <= 0 && size > 0,
+      primaryRemainingPercent: percent,
+      secondaryRemainingPercent: null,
+      summary: size > 0
+        ? `积分 ${remain}/${size}（剩${percent}% · ${packs} 个套餐）`
+        : `积分 ${remain}（${packs} 个套餐）`,
+      fetchedAt: new Date().toISOString(),
+      error: ""
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      summary: "积分查询失败",
+      fetchedAt: new Date().toISOString()
+    };
+  }
+}
+
 export async function fetchAccountQuota(account, {
   poolKind = "xai_oauth",
   proxyUrl = "",
@@ -252,6 +304,9 @@ export async function fetchAccountQuota(account, {
   }
   if (poolKind === "xai_oauth") {
     return fetchXaiAccountQuota(account, { proxyUrl, fetchImpl });
+  }
+  if (poolKind === "workbuddy_oauth") {
+    return fetchWorkBuddyAccountQuota(account, { proxyUrl, fetchImpl });
   }
   return {
     ok: false,

@@ -14,7 +14,9 @@ import {
   buildAgentAssertion,
   ensureAgentIdentityTask,
   isInvalidAgentIdentityTaskResponse,
-  updateAccountRuntime
+  updateAccountRuntime,
+  WORKBUDDY_GLOBAL_DOMAIN,
+  WORKBUDDY_CHAT_PATHS
 } from "../account-pool/index.mjs";
 import {
   ANTHROPIC_API_VERSION,
@@ -105,6 +107,7 @@ function defaultAntigravityUserAgent() {
 
 export function resolveApiKey(provider) {
   if (provider?.authMode === "none") return "";
+  if (provider?.authMode === "workbuddy_oauth") return String(provider?._workbuddyAccessToken || provider?.apiKey || "").trim();
   // 账号池在 dispatch 层绑定后会变成临时 api_key；未绑定前不在这里读池
   if (isAccountPoolProvider(provider) && !provider?.apiKey) return "";
   if (provider?.authMode === "keychain" || provider?.keychainAccount) return getProviderKeychainSecret(provider);
@@ -262,7 +265,34 @@ export function anthropicOAuthHeaders(provider) {
 
 export { ensureAnthropicAccessToken, anthropicOAuthAuthPath };
 
+export function isWorkBuddyOAuthProvider(provider) {
+  return provider?.authMode === "workbuddy_oauth" ||
+    provider?.authProvider === "workbuddy_oauth" ||
+    provider?.providerType === "workbuddy_oauth" ||
+    provider?.poolKind === "workbuddy_oauth";
+}
+
+export function workbuddyOAuthHeaders(provider) {
+  const token = String(provider?._workbuddyAccessToken || "").trim();
+  const uid = String(provider?._workbuddyUid || provider?._workbuddyAccountId || "").trim();
+  const realm = String(provider?._workbuddyRealm || "global").toLowerCase() === "cn" ? "cn" : "global";
+  const domain = String(provider?._workbuddyDomain || WORKBUDDY_GLOBAL_DOMAIN).trim() || WORKBUDDY_GLOBAL_DOMAIN;
+  const origin = String(provider?._workbuddyOrigin || "").trim() || `https://${domain}`;
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(uid ? { "X-User-Id": uid } : {}),
+    // 个人账号形态：声明无企业 + 显式域；国内为 codebuddy.cn 域（与 workbuddy2api 出站头一致）。
+    "X-No-Enterprise-Id": "1",
+    "X-Domain": domain,
+    Origin: origin,
+    Referer: `${origin}/`,
+    "Accept-Language": realm === "cn" ? "zh-CN" : "en-US",
+    "X-CodeBuddy-Request": "1"
+  };
+}
+
 export function providerAuthHeaders(provider, scheme) {
+  if (isWorkBuddyOAuthProvider(provider)) return workbuddyOAuthHeaders(provider);
   // Agent Identity assertions are short-lived and therefore generated
   // asynchronously immediately before an OpenAI Responses request.
   if (isCodexAgentIdentityProvider(provider)) return {};
@@ -446,8 +476,23 @@ async function postJson(url, body, headers, {
 }
 
 export async function callOpenAIChat(provider, body, opts) {
-  const url = joinUrl(canonicalProviderBaseUrl(provider), "/chat/completions");
-  return postJson(url, body, buildOutboundAuthAndClientHeaders(provider, "bearer", opts), { ...opts, provider });
+  const base = canonicalProviderBaseUrl(provider);
+  const headers = buildOutboundAuthAndClientHeaders(provider, "bearer", opts);
+  // WorkBuddy 上游路径分叉（/console 新版 → /v2 旧版）：仅在该供应商生效，其他供应商保持单路径。
+  if (isWorkBuddyOAuthProvider(provider)) {
+    const paths = Array.isArray(provider?._workbuddyChatPaths) && provider._workbuddyChatPaths.length
+      ? provider._workbuddyChatPaths
+      : WORKBUDDY_CHAT_PATHS;
+    let response = null;
+    for (const path of paths) {
+      response = await postJson(joinUrl(base, path), body, headers, { ...opts, provider });
+      if (response.status !== 404 && response.status !== 405) return response;
+      await response.body?.cancel?.().catch?.(() => {});
+    }
+    return response;
+  }
+  const url = joinUrl(base, "/chat/completions");
+  return postJson(url, body, headers, { ...opts, provider });
 }
 
 export async function callOpenAIResponses(provider, body, opts) {

@@ -116,6 +116,29 @@ export {
 } from "./sso-convert.mjs";
 
 export {
+  refreshWorkBuddyTokens,
+  refreshWorkBuddyAccountTokens,
+  createWorkBuddyAuthState,
+  pollWorkBuddyAuthToken,
+  pollWorkBuddyLogin,
+  fetchWorkBuddyAccount,
+  getWorkBuddyAccount,
+  workBuddyHeaders,
+  workBuddyRealmConfig,
+  workBuddyRealmOf,
+  WORKBUDDY_REALMS,
+  WORKBUDDY_BASE_URL,
+  WORKBUDDY_GLOBAL_DOMAIN,
+  WORKBUDDY_CLIENT_UA,
+  WORKBUDDY_STATE_PATH,
+  WORKBUDDY_TOKEN_PATH,
+  WORKBUDDY_ACCOUNT_PATH,
+  WORKBUDDY_REFRESH_PATH,
+  WORKBUDDY_CHAT_PATHS
+} from "./oauth-workbuddy.mjs";
+
+
+export {
   isAccountPoolProvider,
   poolKindOf,
   poolStrategyOf,
@@ -133,6 +156,7 @@ export {
   resetRoundRobinCursors,
   setPoolStrategy,
   recoverExpiredAccountCooldowns,
+  refreshExpiringAccounts,
   POOL_KIND_META
 } from "./picker.mjs";
 
@@ -140,6 +164,7 @@ export {
   fetchAccountQuota,
   fetchCodexAccountQuota,
   fetchXaiAccountQuota,
+  fetchWorkBuddyAccountQuota,
   parseCodexUsagePayload,
   refreshAccountQuota,
   refreshPoolQuotas

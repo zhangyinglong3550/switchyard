@@ -1189,6 +1189,21 @@
           <button class="btn" type="button" id="btn-pool-refresh">刷新列表</button>
         </div>
         <div class="tiny muted" style="margin-top:6px;" id="provider-pool-test-result"></div>
+        <div class="callout" id="provider-workbuddy-login" style="display:none; margin-top:12px;">
+          <div class="callout-title">登录 WorkBuddy / CodeBuddy 账号</div>
+          <div class="callout-body">
+            点下面的按钮会打开官方登录页（<strong>WorkBuddy www.workbuddy.ai</strong> 或 <strong>CodeBuddy www.codebuddy.cn</strong>）；
+            在浏览器完成登录后本面板会自动轮询并把账号写入账号池。凭证只保存在本机
+            <code>~/.switchyard/pools/workbuddy_oauth/</code>，不会写入 config.json。
+            已有账号也可以用上面的「粘贴导入 / 选择 JSON 文件」导入 workbuddy2api 的 <code>auths/*.json</code>。
+          </div>
+          <div class="actions" style="justify-content:flex-start; margin-top:10px; flex-wrap:wrap; gap:8px;">
+            <button class="btn primary" type="button" id="btn-workbuddy-login-global">登录 WorkBuddy（workbuddy.ai）</button>
+            <button class="btn" type="button" id="btn-workbuddy-login-cn">登录 CodeBuddy（codebuddy.cn）</button>
+            <button class="btn" type="button" id="btn-workbuddy-login-cancel" style="display:none;">取消等待</button>
+          </div>
+          <div class="tiny muted" style="margin-top:8px;" id="provider-workbuddy-login-status">未开始登录。</div>
+        </div>
         <div class="tiny muted" style="margin-top:8px;" id="provider-pool-access-hint">
           「状态」= 健康度（健康/降级/冷却）；「额度」= 套餐剩余窗口（Codex 为 5h/周）；
           「Access」= <strong>OAuth 访问令牌</strong>过期时间，不是订阅日。鼠标悬停状态可看上次错误。

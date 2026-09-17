@@ -9,6 +9,7 @@ import { applyAntigravityLiveAccess } from "./import-multi.mjs";
 import { refreshXaiTokens, XAI_API_BASE_URL } from "./oauth-xai.mjs";
 import { refreshGoogleTokens } from "./oauth-google.mjs";
 import { refreshCodexAccountTokens, CODEX_API_BASE_URL } from "./oauth-codex.mjs";
+import { refreshWorkBuddyTokens, WORKBUDDY_BASE_URL, WORKBUDDY_GLOBAL_DOMAIN, WORKBUDDY_CHAT_PATHS, workBuddyRealmConfig, workBuddyRealmOf } from "./oauth-workbuddy.mjs";
 import { isAgentIdentityAccount } from "./agent-identity.mjs";
 
 const rrCursor = new Map();
@@ -33,6 +34,12 @@ export const POOL_KIND_META = {
     defaultBaseUrl: CODEX_API_BASE_URL,
     defaultApiFormat: "openai_responses",
     emptyHint: "账号池为空：请导入多份 Codex auth.json / refresh_token"
+  },
+  workbuddy_oauth: {
+    label: "WorkBuddy / CodeBuddy",
+    defaultBaseUrl: WORKBUDDY_BASE_URL,
+    defaultApiFormat: "openai_chat",
+    emptyHint: "账号池为空：请先登录或导入 WorkBuddy / CodeBuddy 账号凭证"
   }
 };
 
@@ -223,6 +230,15 @@ export async function ensureFreshAccount(account, {
       tokens = await refreshGoogleTokens(current.refreshToken, { proxyUrl: proxy, fetchImpl });
     } else if (kind === "codex_oauth") {
       tokens = await refreshCodexAccountTokens(current, { proxyUrl: proxy, fetchImpl });
+    } else if (kind === "workbuddy_oauth") {
+      // 刷新端点需要 X-User-Id / X-Domain：uid 取 accountId，域与 base 按账号 realm（global/cn）。
+      tokens = await refreshWorkBuddyTokens(current.refreshToken, {
+        uid: current.accountId || "",
+        realm: current.realm || "global",
+        domain: current.domain || "",
+        proxyUrl: proxy,
+        fetchImpl
+      });
     } else {
       tokens = await refreshXaiTokens(current.refreshToken, {
         tokenEndpoint: current.tokenEndpoint || undefined,
@@ -241,6 +257,7 @@ export async function ensureFreshAccount(account, {
       sub: tokens.sub || current.sub,
       accountId: tokens.accountId || current.accountId || "",
       idToken: tokens.idToken || current.idToken || "",
+      domain: tokens.domain || current.domain || "",
       health: "healthy",
       lastError: ""
     };
@@ -255,6 +272,7 @@ export async function ensureFreshAccount(account, {
         sub: next.sub,
         accountId: next.accountId,
         idToken: next.idToken,
+        domain: next.domain,
         health: "healthy",
         lastError: ""
       }, { poolKind: kind, home });
@@ -333,6 +351,48 @@ export async function pickAndRefreshAccount(provider, {
   return { ok: false, error: lastError || "账号池当前没有可用账号（可能均在冷却或 token 失效）" };
 }
 
+/**
+ * 后台续期：对「即将过期」（skewMs 内）的账号逐个续期，避免长时间不对话后 access 过期。
+ * 顺序执行 + 账号级去重（ensureFreshAccount 内部 refreshInFlight），降低上游风控概率。
+ */
+export async function refreshExpiringAccounts(provider, {
+  home,
+  fetchImpl,
+  skewMs = 60 * 60 * 1000,
+  password,
+  getAntigravityCliSecret
+} = {}) {
+  if (!isAccountPoolProvider(provider)) return { ok: false, error: "not-account-pool-provider", refreshed: 0, failed: 0, checked: 0 };
+  const poolKind = poolKindOf(provider);
+  const pool = loadPool(provider.id, { poolKind, home });
+  let checked = 0;
+  let refreshed = 0;
+  let failed = 0;
+  const errors = [];
+  for (const account of pool.accounts) {
+    if (account.enabled === false || account.health === "disabled") continue;
+    if (!account.refreshToken && !account.sessionToken) continue;
+    // 仅处理即将过期或已过期的账号；仍有效的账号不打扰上游。
+    if (!isAccessExpired(account, skewMs)) continue;
+    checked += 1;
+    const result = await ensureFreshAccount(account, {
+      provider,
+      proxyUrl: provider.proxyUrl,
+      fetchImpl,
+      home,
+      skewMs,
+      getAntigravityCliSecret
+    });
+    if (result.ok) {
+      refreshed += 1;
+    } else {
+      failed += 1;
+      errors.push({ id: account.id, error: result.error || "refresh-failed" });
+    }
+  }
+  return { ok: true, poolKind, checked, refreshed, failed, errors };
+}
+
 export function bindProviderToAccount(provider, account) {
   if (!provider || !account) return provider;
   const kind = poolKindOf(provider);
@@ -399,6 +459,34 @@ export function bindProviderToAccount(provider, account) {
       _accountEmail: account.email || "",
       _antigravityAccessToken: account.accessToken,
       _antigravityProjectId: account.projectId || provider.projectId || provider.project || ""
+    };
+  }
+
+  // WorkBuddy 账号池：base / Origin / X-Domain / chat 路径按账号 realm（global: workbuddy.ai / cn: codebuddy.cn）。
+  if (kind === "workbuddy_oauth") {
+    const realmKey = workBuddyRealmOf(account.realm);
+    const realmCfg = workBuddyRealmConfig(realmKey);
+    return {
+      ...provider,
+      authMode: "workbuddy_oauth",
+      providerType: "workbuddy_oauth",
+      apiFormat: provider.apiFormat || "openai_chat",
+      baseUrl: provider.baseUrl || realmCfg.baseUrl,
+      apiKey: undefined,
+      apiKeyEnv: undefined,
+      _accountPool: true,
+      _accountId: account.id,
+      _accountEmail: account.email || "",
+      _workbuddyAccessToken: account.accessToken,
+      _workbuddyRefreshToken: account.refreshToken || "",
+      _workbuddyUid: account.accountId || "",
+      _workbuddyAccountId: account.accountId || "",
+      _workbuddyRealm: realmKey,
+      _workbuddyDomain: account.domain || realmCfg.domain,
+      _workbuddyOrigin: realmCfg.origin,
+      _workbuddyEnterpriseId: account.enterpriseId || "",
+      _workbuddyChatPaths: realmCfg.chatPaths || WORKBUDDY_CHAT_PATHS,
+      _workbuddyExpiresAt: account.expiresAt || ""
     };
   }
 

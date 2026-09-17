@@ -11,7 +11,9 @@ import { dispatchChat, dispatchResponses } from "./upstream/dispatch.mjs";
 import { recordSensitiveAudit } from "./sensitive-audit-store.mjs";
 import { summarizeSensitiveHits } from "./sensitive-guard.mjs";
 import { describeProtocolRoute } from "./protocol-capabilities.mjs";
-import { readJsonResponse } from "./upstream/clients.mjs";
+import { readJsonResponse, isWorkBuddyOAuthProvider } from "./upstream/clients.mjs";
+import { createReasoningCoalescer } from "./reasoning-coalescer.mjs";
+import { normalizeWorkBuddyStreamLine } from "./upstream/workbuddy-adapter.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { previewText } from "./text-preview.mjs";
@@ -1134,6 +1136,8 @@ async function handleChat(config, req, res, clientId, emit, requestRecord, withD
         provider: route.provider,
         model: route.model,
         clientId,
+        coalesceReasoning: isWorkBuddyOAuthProvider(route.provider),
+        cleanWorkBuddyFrames: isWorkBuddyOAuthProvider(route.provider),
         idleTimeoutMs: streamIdleTimeoutMs(config, route),
         onStreamSummary: (summary) => {
           recordStreamDiagnostics(requestRecord, summary, { status: result.upstream?.status || 0 });
@@ -2052,13 +2056,48 @@ async function pipeStream(upstream, res, ctx) {
   const streamDiagnostics = createStreamDiagnostics("chat");
   const streamState = { sawTerminalEvent: false, sawMeaningfulEvent: false, terminalState: "", terminalReason: "" };
   const streamObserver = createSseObserver(streamDiagnostics, "chat", streamState);
+  // SSE 事件以「data: 行 + 空行」成对出现：空行只表示事件结束，不能当作合并边界（否则等于没合并）。
+  // pendingSeparator 记录「上一个已下发事件是否还缺终止空行」。
+  let pendingSeparator = false;
+  const emitFrame = (line) => {
+    res.write(line + "\n");
+    pendingSeparator = true;
+  };
+  const flushSeparator = () => {
+    if (!pendingSeparator) return;
+    res.write("\n");
+    pendingSeparator = false;
+  };
+  // WorkBuddy/CodeBuddy 上游按词切分思考：把连续思考分片合并后再下发，避免客户端显示成碎片。
+  // 正文/工具调用/结束帧不参与合并，仍然即时透传。
+  const coalescer = ctx?.coalesceReasoning
+    ? createReasoningCoalescer({
+      // 60 字成帧 + 400ms 兜底：既不把连续思考切碎，也不让长停顿卡住思考显示。
+      maxChars: 60,
+      flushMs: 400,
+      write: (line) => {
+        flushSeparator();
+        emitFrame(line);
+      }
+    })
+    : null;
   const writeLine = (line) => {
     if (line === "") {
-      res.write("\n");
+      // 正在合并思考时不下发空行：等合并帧落盘时再补，保持标准 SSE 分隔。
+      if (coalescer?.holding?.()) return;
+      flushSeparator();
       return;
     }
-    const transformed = ctx ? applyStreamLine(line, ctx) : line;
-    if (transformed != null) res.write(transformed + "\n");
+    let transformed = ctx ? applyStreamLine(line, ctx) : line;
+    if (transformed == null) return;
+    // WorkBuddy/CodeBuddy：先按「只保留本帧有值的键」重建帧，避免客户端按空键切换思考相位。
+    if (ctx?.cleanWorkBuddyFrames) transformed = normalizeWorkBuddyStreamLine(transformed);
+    if (coalescer) {
+      coalescer.push(transformed);
+      return;
+    }
+    flushSeparator();
+    emitFrame(transformed);
   };
   try {
     for await (const chunk of iterateUpstreamBody(upstream.body, {
@@ -2072,6 +2111,8 @@ async function pipeStream(upstream, res, ctx) {
     }
     const decoderTail = decoder.decode();
     consumeSseLines(lineState, decoderTail, { flush: true, onLine: writeLine });
+    coalescer?.flush();
+    flushSeparator();
     streamObserver.flush();
     if (!streamState.sawTerminalEvent) {
       const incomplete = new Error("Chat stream disconnected before completion");
@@ -2089,6 +2130,7 @@ async function pipeStream(upstream, res, ctx) {
       markStreamTerminal(streamState, "completed", "protocol_terminal");
     }
   } finally {
+    coalescer?.flush();
     if (typeof ctx?.onStreamSummary === "function") {
       try {
         ctx.onStreamSummary(publicStreamDiagnostics(streamDiagnostics, streamState));

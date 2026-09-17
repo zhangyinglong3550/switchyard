@@ -115,6 +115,41 @@ test('mobile control exposes live Tailscale Serve status and a repair action', (
   assert.match(main, /ipcMain\.handle\("mobile-control:repair-connection"/);
 });
 
+test('WorkBuddy account pool exposes native mapping and auths JSON import through shared UI/IPC', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+  assert.match(js, /workbuddy_oauth:\s*\{/);
+  assert.match(js, /导入 WorkBuddy auths JSON/);
+  assert.match(js, /showCpa: false/);
+  assert.match(html, /id="provider-account-pool-panel"/);
+  assert.match(main, /function parseWorkBuddyAuthsJson\(text\)/);
+  assert.match(main, /ipcMain\.handle\("account-pool:import-text"/);
+  assert.match(main, /ipcMain\.handle\("account-pool:import-files-dialog"/);
+  assert.match(main, /ipcMain\.handle\("account-pool:list"/);
+  assert.match(main, /ipcMain\.handle\("account-pool:patch"/);
+  assert.match(main, /ipcMain\.handle\("account-pool:delete"/);
+  assert.match(main, /ipcMain\.handle\("account-pool:set-strategy"/);
+});
+
+test('WorkBuddy pool exposes in-app OAuth login for both realms', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
+  assert.match(html, /id="provider-workbuddy-login"/);
+  assert.match(html, /id="btn-workbuddy-login-global"/);
+  assert.match(html, /登录 WorkBuddy（workbuddy.ai）/);
+  assert.match(html, /id="btn-workbuddy-login-cn"/);
+  assert.match(js, /function startWorkBuddyLogin\(realm\)/);
+  assert.match(js, /workbuddy-oauth:start/);
+  assert.match(js, /workbuddy-oauth:poll/);
+  assert.match(main, /ipcMain\.handle\("workbuddy-oauth:start"/);
+  assert.match(main, /ipcMain\.handle\("workbuddy-oauth:poll"/);
+  assert.match(main, /createWorkBuddyAuthState\(\{ realm \}\)/);
+  assert.match(main, /isWorkBuddyOAuthProvider\(probe\)/);
+});
+
+
 test('desktop keeps single-instance behavior by default while allowing isolated package verification', () => {
   const main = fs.readFileSync(new URL('../src/main.mjs', import.meta.url), 'utf8');
   assert.match(main, /SWITCHYARD_ALLOW_MULTIPLE_INSTANCES/);

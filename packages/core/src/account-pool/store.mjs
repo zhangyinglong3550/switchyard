@@ -5,7 +5,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { ensureDir, atomicWriteFileSync } from "../utils.mjs";
 
-export const POOL_KINDS = new Set(["xai_oauth", "antigravity_oauth", "codex_oauth"]);
+export const POOL_KINDS = new Set(["xai_oauth", "antigravity_oauth", "codex_oauth", "workbuddy_oauth"]);
 export const POOL_STRATEGIES = new Set([
   "weighted_round_robin",
   "least_recently_used",
@@ -68,7 +68,7 @@ export function normalizeAccount(raw = {}) {
   // 优先用 access JWT 的 exp，避免 CPA 导出把 id_token 过期写到 expired 字段导致误判
   const expiresAt =
     jwtExpIso(accessToken) ||
-    normalizeTime(raw.expiresAt || raw.expired || raw.expires_at);
+    normalizeExpiresAt(raw.expiresAt || raw.expired || raw.expires_at);
   return {
     id,
     email: String(raw.email || "").trim(),
@@ -81,6 +81,10 @@ export function normalizeAccount(raw = {}) {
     ssoToken: String(raw.ssoToken || raw.sso_token || raw.sso || "").trim(),
     idToken: String(raw.idToken || raw.id_token || "").trim(),
     accountId: String(raw.accountId || raw.account_id || raw.chatgpt_account_id || "").trim(),
+    // WorkBuddy 账号域 / 企业 / realm（global 与 cn 的 base、Origin、chat 路径不同）。
+    domain: String(raw.domain || "").trim(),
+    realm: String(raw.realm || "").trim().toLowerCase(),
+    enterpriseId: String(raw.enterpriseId || raw.enterprise_id || "").trim(),
     // Newer Codex subscription exports may authenticate with an Ed25519
     // Agent Identity instead of OAuth access / refresh tokens.
     agentIdentity: raw.agentIdentity === true || String(raw.authMode || raw.auth_mode || "").toLowerCase() === "agentidentity",
@@ -156,6 +160,16 @@ function normalizeTime(value) {
   const ms = Date.parse(text);
   if (Number.isNaN(ms)) return null;
   return new Date(ms).toISOString();
+}
+
+// WorkBuddy auths 文件的 expiresAt 是 epoch 秒/毫秒数字：数字先按量级归一，再回落字符串解析。
+function normalizeExpiresAt(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const ms = numeric > 1e12 ? numeric : numeric * 1000;
+    return new Date(ms).toISOString();
+  }
+  return normalizeTime(value);
 }
 
 export function normalizePool(raw = {}, fallback = {}) {
@@ -240,6 +254,8 @@ export function publicAccountView(account) {
     hasMachineId: Boolean(account.machineId),
     machineIdPreview: account.machineId ? account.machineId.slice(0, 8) + "..." : "",
     accountId: account.accountId || "",
+    domain: account.domain || "",
+    realm: account.realm || "",
     projectId: account.projectId || "",
     planType: account.planType || "",
     // access token 过期时间（不是订阅到期）

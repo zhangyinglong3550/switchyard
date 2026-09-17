@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.3.10 — 2026-09-17
+
+### Added
+
+- **WorkBuddy / CodeBuddy 原生账号池**：新增 `workbuddy_oauth` 池类型，把 WorkBuddy（workbuddy.ai）与 CodeBuddy（codebuddy.cn）账号作为一等账号池接入本机网关，替代「本地再跑一个 workbuddy2api 网关」的部署方式。链路变为 `客户端 → Switchyard :17888 → 上游账号域`。
+  - OAuth 登录与刷新按实测协议实现：`POST /v2/plugin/auth/state?platform=CLI` 取授权链接、`GET /v2/plugin/auth/token?state=` 轮询换 token、`GET /v2/plugin/login/account?state=` 取 uid/昵称、`POST /v2/plugin/auth/token/refresh`（`X-Refresh-Token` + `X-Auth-Refresh-Source: plugin`）续期；凭证只写 `~/.switchyard/pools/workbuddy_oauth/*.json`（0600），不进 `config.json`。
+  - 上游硬约束适配：出站强制 `stream: true`（上游拒绝非流式）、首条消息非 system 时自动补一条 system 提示、chat 走 `/console/chat/completions` 并在 404/405 时回退 `/v2/chat/completions`；非流式客户端请求由网关聚合 SSE 成 Chat JSON。出站头按官方客户端形态（`X-User-Id` / `X-Domain: www.workbuddy.ai` / `Origin` / `Referer` / `X-No-Enterprise-Id`）。
+  - 复用账号池通用能力：加权轮询、模型级冷却、401 先续期再换号、401/403/429/5xx 换号、公开列表脱敏。
+  - **双域**：WorkBuddy（`www.workbuddy.ai`，chat 先 `/console` 再回退 `/v2`）与 CodeBuddy（`copilot.tencent.com` + `codebuddy.cn` 域头，chat 走 `/v2`）按账号 `realm` 自动路由；池内可混放两种账号。
+  - **额度查询**：billing 域 `get-user-resource` 聚合积分（workbuddy.ai 首选无 `/v2` 路径、404 回退；codebuddy.cn 走 `/v2`），账号列表「额度」列显示 `积分 剩余/总量（剩X% · N 个套餐）`。
+  - **自动续期**：请求时过期即刷新、401 强制续期后重试；应用内另起后台巡检（启动后 90s 首次、此后每 6h），只续期「1 小时内即将过期」的账号，仍有效的账号不打扰上游；可用 `account-pool:refresh-expiring` 手动触发。
+  - 桌面端：新增 **WorkBuddy / CodeBuddy 账号池** 供应商预设，账号池面板支持 **面板内登录**（workbuddy.ai / codebuddy.cn 按钮，自动轮询写入池）、粘贴/选择文件/选择目录导入 `workbuddy2api` 的 `auths/*.json`（嵌套 `{account,auth}` 与扁平形都兼容），以及启用、删除、策略切换。供应商诊断对该池改用真实模型目录与 chat 路径探测，不再误报 405。
+  - 命令行等价入口：`node scripts/workbuddy-login.mjs --realm=global|cn`。
+  - **思考分片合并**（修复 ZCode 里「思考很分散」）：WorkBuddy/CodeBuddy 上游按词切分思考（实测 384 片、每片 1–5 字），网关侧把连续 `reasoning_content` 分片合并到 60 字或 150ms 再下发，正文/工具调用/结束帧仍即时透传。实测同一请求思考帧 384 → 10（每帧 52–61 字），正文帧数不变且思考不混入正文。新增 `reasoning-coalescer.mjs` 与 `packages/core/test/reasoning-coalescer.test.mjs`（5 条）。
+  - **出站改写对齐官方客户端**（修复思考不进思考区）：强制 `stream:true` 之外补 `stream_options.include_usage`、`tool_choice` 对象→string 归一（`none` 时连 tools 一起抑制）、`developer`→`system`；DeepSeek 系注入 `thinking.type=enabled` + 默认档 `reasoning_effort:high`（显式 `disabled` 尊重），历史 assistant 带 reasoning 痕迹时回填 `reasoning_content`。实测同一请求：修复前思考帧 0 / 正文 344 帧，修复后思考 384 帧且思考不再混进正文。
+
+### Tests
+
+- 新增 `packages/core/test/workbuddy-account-pool.test.mjs`（8 条：OAuth 端点与刷新头、账号池刷新与公开脱敏、chat 路径回退与账号头、双域绑定与域头、额度查询与积分聚合、后台续期只碰即将过期账号、出站改写（thinking/tool_choice/role/回填）与 SSE 聚合、预设/配置默认值）；新增 renderer 结构断言（导入 + 双域登录入口）。全量 744/744 通过，renderer 结构 12/12 通过。
+
 ## 2.3.9 — 2026-09-01
 
 ### Fixed

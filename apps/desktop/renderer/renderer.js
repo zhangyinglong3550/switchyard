@@ -227,6 +227,18 @@ const AUTH_MODE_LABEL = {
 };
 
 const POOL_KIND_UI = {
+  workbuddy_oauth: {
+    label: "WorkBuddy / CodeBuddy",
+    chip: "账号池 · WorkBuddy",
+    title: "WorkBuddy / CodeBuddy 账号池",
+    body: "支持 WorkBuddy（www.workbuddy.ai）与 CodeBuddy（www.codebuddy.cn）两种账号；可直接用下方按钮登录新账号，也可导入 workbuddy2api 的 auths JSON（数组、{auths:[…]} 或单账号对象）。凭证保存在本机 ~/.switchyard/pools/，不会写入 config.json。",
+    importPlaceholder: "粘贴 WorkBuddy auths JSON：数组、{\"auths\":[…]} 或单账号对象",
+    importBtn: "导入 WorkBuddy auths JSON",
+    showPaste: true,
+    showFilePick: true,
+    showCpa: false,
+    authNote: "已选择 WorkBuddy / CodeBuddy 账号池：可点按钮登录（workbuddy.ai / codebuddy.cn），也可导入 auths JSON。token 仅存本机 pools 目录，支持积分查询、加权轮询与失败换号。"
+  },
   xai_oauth: {
     label: "Grok / xAI",
     chip: "账号池 · Grok/xAI",
@@ -305,6 +317,9 @@ function syncProviderPoolUi() {
     importBtn.textContent = ui.importBtn;
     importBtn.style.display = ui.showCpa === false ? "none" : "";
   }
+  // WorkBuddy / CodeBuddy 登录入口：仅该池类型可见。
+  const wbLogin = document.getElementById("provider-workbuddy-login");
+  if (wbLogin) wbLogin.style.display = kind === "workbuddy_oauth" ? "" : "none";
 }
 
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -3167,6 +3182,77 @@ document.getElementById("btn-pool-import-cpa")?.addEventListener("click", async 
     toast(err?.message || String(err));
   }
 });
+// WorkBuddy / CodeBuddy 登录：start 打开官方登录页 → 轮询 poll → 成功后账号写入池。
+let workbuddyLoginTimer = null;
+let workbuddyLoginCancelled = false;
+
+function stopWorkBuddyLoginPolling() {
+  if (workbuddyLoginTimer) {
+    clearInterval(workbuddyLoginTimer);
+    workbuddyLoginTimer = null;
+  }
+  const cancelBtn = document.getElementById("btn-workbuddy-login-cancel");
+  if (cancelBtn) cancelBtn.style.display = "none";
+}
+
+async function startWorkBuddyLogin(realm) {
+  const providerId = currentProviderFormId();
+  if (!providerId) return toast("请先填写供应商标识");
+  const status = document.getElementById("provider-workbuddy-login-status");
+  stopWorkBuddyLoginPolling();
+  workbuddyLoginCancelled = false;
+  if (status) status.textContent = "正在获取授权链接…";
+  let started;
+  try {
+    started = await invoke("workbuddy-oauth:start", { providerId, realm });
+  } catch (err) {
+    if (status) status.textContent = `获取授权链接失败：${err?.message || String(err)}`;
+    return;
+  }
+  if (!started?.ok) {
+    if (status) status.textContent = started?.error || "获取授权链接失败";
+    return;
+  }
+  const realmLabel = realm === "cn" ? "codebuddy.cn" : "workbuddy.ai";
+  if (status) status.textContent = `已打开 ${realmLabel} 登录页；完成登录后会自动写入账号池…`;
+  const cancelBtn = document.getElementById("btn-workbuddy-login-cancel");
+  if (cancelBtn) cancelBtn.style.display = "";
+  const startedAt = Date.now();
+  workbuddyLoginTimer = setInterval(async () => {
+    if (workbuddyLoginCancelled) {
+      stopWorkBuddyLoginPolling();
+      return;
+    }
+    if (Date.now() - startedAt > 10 * 60 * 1000) {
+      stopWorkBuddyLoginPolling();
+      if (status) status.textContent = "登录等待超时，请重新点击登录按钮。";
+      return;
+    }
+    try {
+      const result = await invoke("workbuddy-oauth:poll", { providerId, state: started.state, realm });
+      if (result?.ok) {
+        stopWorkBuddyLoginPolling();
+        if (status) status.textContent = `登录成功：uid ${String(result.uid || "").slice(0, 8)}…（${result.nickname || "-"}）已写入账号池。`;
+        toast("WorkBuddy 账号已加入账号池");
+        await refreshProviderPoolList();
+      } else if (!result?.pending && status) {
+        status.textContent = result?.error || "轮询失败";
+      }
+    } catch (err) {
+      if (status) status.textContent = `轮询异常：${err?.message || String(err)}`;
+    }
+  }, 3000);
+}
+
+document.getElementById("btn-workbuddy-login-global")?.addEventListener("click", () => startWorkBuddyLogin("global"));
+document.getElementById("btn-workbuddy-login-cn")?.addEventListener("click", () => startWorkBuddyLogin("cn"));
+document.getElementById("btn-workbuddy-login-cancel")?.addEventListener("click", () => {
+  workbuddyLoginCancelled = true;
+  stopWorkBuddyLoginPolling();
+  const status = document.getElementById("provider-workbuddy-login-status");
+  if (status) status.textContent = "已取消等待。";
+});
+
 document.getElementById("btn-pool-import-files")?.addEventListener("click", async () => {
   const providerId = currentProviderFormId();
   if (!providerId) return toast("请先填写供应商标识");

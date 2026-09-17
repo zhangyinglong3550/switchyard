@@ -88,6 +88,30 @@ export const PROVIDER_PRESETS = [
     ]
   },
   {
+    id: "workbuddy-account-pool",
+    label: "WorkBuddy / CodeBuddy 账号池",
+    providerId: "workbuddy-pool",
+    name: "WorkBuddy / CodeBuddy",
+    apiFormat: "openai_chat",
+    baseUrl: "https://www.workbuddy.ai",
+    authModes: ["account_pool"],
+    defaultAuthMode: "account_pool",
+    poolKind: "workbuddy_oauth",
+    poolStrategy: "weighted_round_robin",
+    experimental: true,
+    riskLevel: "medium",
+    riskNote: "OAuth token 仅保存在本机账号池（~/.switchyard/pools/），不上传；请仅使用自己有权使用的 WorkBuddy 账号。",
+    note: "WorkBuddy（workbuddy.ai）与 CodeBuddy（codebuddy.cn）双域账号池：支持面板内 OAuth 登录或导入 workbuddy2api auths JSON，自动刷新、积分查询、加权轮询与失败换号。上游模型名不带 global: 前缀（前缀仅 workbuddy2api 网关使用）。",
+    models: [
+      { id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "glm-5.3", displayName: "GLM-5.3", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      { id: "kimi-k3", displayName: "Kimi K3", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } }
+    ]
+  },
+  {
     id: "openai",
     label: "OpenAI（API Key）",
     providerId: "openai",

@@ -14,7 +14,8 @@
 //   richest tool-calling surface, and both Responses and Anthropic Messages map
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
-import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, readJsonResponse } from "./clients.mjs";
+import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, isWorkBuddyOAuthProvider, readJsonResponse } from "./clients.mjs";
+import { prepareWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
@@ -252,7 +253,19 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
       applyBodyOverrides(stripInternalFieldsDeep(outbound), requestOverrides)
     );
     upstreamBody = { ...upstreamBody, messages: sanitizeUpstreamMessages(upstreamBody.messages) };
+    // WorkBuddy 上游只接受流式请求，且要求首条消息为 system 提示。
+    const workbuddy = isWorkBuddyOAuthProvider(provider);
+    if (workbuddy) upstreamBody = prepareWorkBuddyChatBody(upstreamBody);
     const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
+    // 非流式客户端 + 只吐 SSE 的上游：在本地聚合为 Chat JSON（workbuddy2api 同策略）。
+    if (workbuddy && !stream) {
+      if (!upstream.ok) {
+        return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload: await readJsonResponse(upstream), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+      }
+      const text = await upstream.text();
+      const payload = aggregateChatSseToChatResponse(text, upstreamModel);
+      return withAccountMeta({ kind: "json", status: upstream.status || 200, payload: applyInbound(payload, ctx), requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+    }
     if (stream) {
       const rectifiedStream = await retryFailedStreamWithRectifier({
         upstream,

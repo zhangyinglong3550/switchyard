@@ -114,6 +114,7 @@ import {
   isCodexOAuthProvider,
   isAnthropicOAuthProvider,
   isAccountPoolProvider,
+  isWorkBuddyOAuthProvider,
   readAnthropicOAuthAuth
 } from "../../../packages/core/src/upstream/clients.mjs";
 import { collapseFetchedAntigravityModels } from "../../../packages/core/src/antigravity-adapter.mjs";
@@ -150,6 +151,7 @@ import {
 } from "../../../packages/core/src/compat/registry.mjs";
 import {
   bindProviderToAccount,
+  createWorkBuddyAuthState,
   deleteAccounts,
   importAntigravityFromCpaDirs,
   importCodexAccountsFromText,
@@ -159,13 +161,17 @@ import {
   listPoolAccountsPublic,
   patchAccounts,
   pickAndRefreshAccount,
+  pollWorkBuddyLogin,
   poolKindOf,
   savePool,
   loadPool,
   syncAntigravityPoolToCliproxyDir,
   refreshPoolQuotas,
   refreshAccountQuota,
-  recoverExpiredAccountCooldowns
+  recoverExpiredAccountCooldowns,
+  refreshExpiringAccounts,
+  upsertAccounts,
+  workBuddyRealmConfig
 } from "../../../packages/core/src/account-pool/index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1868,6 +1874,111 @@ function resolvePoolKind(payload = {}, providerId = "") {
   return String(payload.poolKind || "").trim() || "xai_oauth";
 }
 
+// WorkBuddy auths 归一化：兼容 workbuddy2api 落盘的嵌套形
+// （{account:{uid,enterpriseId,nickname}, auth:{accessToken,refreshToken,expiresAt,domain,realm}}）
+// 与扁平形（access_token / refresh_token / uid 并列）。expiresAt 为 epoch 秒/毫秒。
+function normalizeWorkBuddyAuthRow(row) {
+  const nestedAuth = row.auth && typeof row.auth === "object" ? row.auth : {};
+  const nestedAccount = row.account && typeof row.account === "object" ? row.account : {};
+  const accessToken = String(row.accessToken || row.access_token || row.token || nestedAuth.accessToken || nestedAuth.access_token || "").trim();
+  const refreshToken = String(row.refreshToken || row.refresh_token || nestedAuth.refreshToken || nestedAuth.refresh_token || "").trim();
+  const uid = String(nestedAccount.uid || row.uid || row.userId || row.user_id || row.accountId || row.account_id || "").trim();
+  const domain = String(nestedAuth.domain || row.domain || "www.workbuddy.ai").trim() || "www.workbuddy.ai";
+  // realm 决定 base/Origin/chat 路径：显式 realm 优先，否则按 domain 推断（workbuddy.ai=global，codebuddy.cn=cn）。
+  const realmHint = String(nestedAuth.realm || row.realm || "").trim().toLowerCase();
+  const realm = realmHint === "cn" || realmHint === "global"
+    ? realmHint
+    : (domain.includes("codebuddy.cn") ? "cn" : "global");
+  return {
+    ...row,
+    accessToken,
+    refreshToken,
+    idToken: String(row.idToken || row.id_token || nestedAuth.idToken || "").trim(),
+    accountId: uid,
+    enterpriseId: String(nestedAccount.enterpriseId || nestedAccount.enterprise_id || row.enterpriseId || row.enterprise_id || "").trim(),
+    name: String(nestedAccount.nickname || row.nickname || row.name || "").trim(),
+    email: String(row.email || nestedAccount.email || "").trim(),
+    domain,
+    realm,
+    expiresAt: row.expiresAt || row.expires_at || nestedAuth.expiresAt || nestedAuth.expires_at || null,
+    source: String(row.source || "workbuddy2api").trim()
+  };
+}
+
+function parseWorkBuddyAuthsJson(text) {
+  let value;
+  try { value = JSON.parse(String(text || "")); } catch (err) {
+    throw new Error(`WorkBuddy auths JSON 格式错误：${err?.message || String(err)}`);
+  }
+  const rows = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.auths) ? value.auths
+    : Array.isArray(value?.accounts) ? value.accounts
+    : (value && typeof value === "object" ? [value] : []);
+  return rows.filter((row) => row && typeof row === "object").map(normalizeWorkBuddyAuthRow);
+}
+
+function importWorkBuddyAuths(providerId, text, { skipDuplicates = true } = {}) {
+  const accounts = parseWorkBuddyAuthsJson(text);
+  if (!accounts.length) return { ok: false, added: 0, skipped: 0, scanned: 0, error: "WorkBuddy auths JSON 未找到账号" };
+  const usable = accounts.filter((account) => account.accessToken || account.refreshToken);
+  if (!usable.length) return { ok: false, added: 0, skipped: 0, scanned: accounts.length, error: "WorkBuddy auths JSON 未找到 access_token 或 refresh_token" };
+  const result = upsertAccounts(providerId, usable, { poolKind: "workbuddy_oauth", skipDuplicates });
+  return { ...result, scanned: accounts.length };
+}
+
+// WorkBuddy / CodeBuddy 账号登录：start 取授权链接并打开浏览器，poll 由渲染层轮询到成功后写入账号池。
+// 与 workbuddy2api 一致：state 由服务端签发，一次登录一条 state；凭证只落本机 pools（0600）。
+function normalizeWorkBuddyLoginRealm(value) {
+  return String(value || "").toLowerCase() === "cn" ? "cn" : "global";
+}
+
+ipcMain.handle("workbuddy-oauth:start", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const realm = normalizeWorkBuddyLoginRealm(payload.realm);
+  const { state, authUrl } = await createWorkBuddyAuthState({ realm });
+  try { await shell.openExternal(authUrl); } catch {}
+  appendLog({ level: "info", msg: "workbuddy oauth started", providerId, realm });
+  return { ok: true, state, authUrl, realm };
+});
+
+ipcMain.handle("workbuddy-oauth:poll", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  const state = String(payload.state || "").trim();
+  if (!providerId || !state) throw new Error("providerId and state are required");
+  const realm = normalizeWorkBuddyLoginRealm(payload.realm);
+  try {
+    const account = await pollWorkBuddyLogin(state, { realm });
+    const row = {
+      accessToken: account.accessToken,
+      refreshToken: account.refreshToken,
+      expiresAt: account.expiresAt,
+      domain: account.domain,
+      realm,
+      accountId: account.uid || "",
+      enterpriseId: account.enterpriseId || "",
+      name: account.nickname || "",
+      source: "workbuddy-oauth-login"
+    };
+    const saved = upsertAccounts(providerId, [row], { poolKind: "workbuddy_oauth", skipDuplicates: false });
+    appendLog({ level: "info", msg: "workbuddy oauth login ok", providerId, realm, uid: String(account.uid || "").slice(0, 8) });
+    return { ok: true, pending: false, added: saved.added, uid: account.uid || "", nickname: account.nickname || "", realm };
+  } catch (err) {
+    // 未完成时上游返回业务错误码，渲染层按 pending 继续轮询。
+    return { ok: false, pending: true, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle("account-pool:refresh-expiring", async (_e, payload = {}) => {
+  const providerId = String(payload.providerId || "").trim();
+  if (!providerId) throw new Error("providerId is required");
+  const provider = (readConfig()?.providers || []).find((item) => item.id === providerId);
+  if (!provider) throw new Error(`provider not found: ${providerId}`);
+  const result = await refreshExpiringAccounts(provider, { skewMs: Number(payload.skewMs) > 0 ? Number(payload.skewMs) : POOL_KEEPALIVE_SKEW_MS });
+  return { ok: true, ...result };
+});
+
 ipcMain.handle("account-pool:list", (_e, payload = {}) => {
   const providerId = String(payload.providerId || "").trim();
   if (!providerId) throw new Error("providerId is required");
@@ -1882,6 +1993,12 @@ ipcMain.handle("account-pool:import-text", async (_e, payload = {}) => {
   const providerId = String(payload.providerId || "").trim();
   if (!providerId) throw new Error("providerId is required");
   const poolKind = resolvePoolKind(payload, providerId);
+
+  if (poolKind === "workbuddy_oauth") {
+    return importWorkBuddyAuths(providerId, payload.text || "", {
+      skipDuplicates: payload.skipDuplicates !== false
+    });
+  }
 
   // Codex：粘贴 JSON / RT 列表（不依赖 ~/.cli-proxy-api）
   if (poolKind === "codex_oauth") {
@@ -1976,6 +2093,26 @@ ipcMain.handle("account-pool:import-files-dialog", async (_e, payload = {}) => {
   if (result.canceled || !result.filePaths?.length) {
     return { ok: false, cancelled: true, added: 0, skipped: 0, scanned: 0 };
   }
+  if (poolKind === "workbuddy_oauth") {
+    let added = 0;
+    let skipped = 0;
+    let scanned = 0;
+    const errors = [];
+    for (const file of result.filePaths) {
+      try {
+        const one = importWorkBuddyAuths(providerId, fs.readFileSync(file, "utf8"), {
+          skipDuplicates: payload.skipDuplicates !== false
+        });
+        scanned += one.scanned || 0;
+        added += one.added || 0;
+        skipped += one.skipped || 0;
+        if (!one.ok) errors.push({ file, error: one.error });
+      } catch (err) {
+        errors.push({ file, error: err?.message || String(err) });
+      }
+    }
+    return { ok: added > 0 || skipped > 0, added, skipped, scanned, selectedFiles: result.filePaths.length, errors, error: added || skipped ? undefined : (errors[0]?.error || "未导入任何 WorkBuddy 账号") };
+  }
   if (poolKind === "codex_oauth") {
     return {
       ...importCodexFromPaths(providerId, {
@@ -2040,6 +2177,27 @@ ipcMain.handle("account-pool:import-dir-dialog", async (_e, payload = {}) => {
     return { ok: false, cancelled: true, added: 0, skipped: 0, scanned: 0 };
   }
   const dir = result.filePaths[0];
+  if (poolKind === "workbuddy_oauth") {
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+      .map((entry) => path.join(dir, entry.name));
+    let added = 0;
+    let skipped = 0;
+    let scanned = 0;
+    const errors = [];
+    for (const file of files) {
+      try {
+        const one = importWorkBuddyAuths(providerId, fs.readFileSync(file, "utf8"), { skipDuplicates: payload.skipDuplicates !== false });
+        scanned += one.scanned || 0;
+        added += one.added || 0;
+        skipped += one.skipped || 0;
+        if (!one.ok) errors.push({ file, error: one.error });
+      } catch (err) {
+        errors.push({ file, error: err?.message || String(err) });
+      }
+    }
+    return { ok: added > 0 || skipped > 0, added, skipped, scanned, selectedDir: dir, selectedFiles: files.length, errors, error: added || skipped ? undefined : (errors[0]?.error || "未导入任何 WorkBuddy 账号") };
+  }
   if (poolKind === "codex_oauth") {
     return {
       ...importCodexFromPaths(providerId, {
@@ -2945,6 +3103,7 @@ app.whenReady().then(async () => {
     syncCodexArtifacts("app-start");
     startCodexArtifactMonitor();
     getProviderHealthMonitor().start({ immediate: true });
+    startPoolKeepaliveMonitor();
     startUpdateChecker();
   } catch (err) {
     appendLog({ level: "error", msg: "gateway autostart failed", error: err?.message || String(err) });
@@ -3011,6 +3170,34 @@ function buildProviderHeaders(provider) {
   return providerAuthHeaders(provider, provider.apiFormat === "anthropic_messages" ? "anthropic" : "bearer");
 }
 
+// 账号池后台续期：长时间不对话时 access token 会过期，这里定时把「即将过期」的账号续上，
+// 避免下一次请求白等一次刷新或撞上上游 401。WorkBuddy/CodeBuddy 池默认 6 小时巡一次。
+const POOL_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const POOL_KEEPALIVE_FIRST_DELAY_MS = 90 * 1000;
+const POOL_KEEPALIVE_SKEW_MS = 60 * 60 * 1000;
+let poolKeepaliveTimer = null;
+
+async function runPoolKeepalive(reason = "timer") {
+  const providers = (readConfig()?.providers || []).filter((p) => p.poolKind === "workbuddy_oauth");
+  for (const provider of providers) {
+    try {
+      const result = await refreshExpiringAccounts(provider, { skewMs: POOL_KEEPALIVE_SKEW_MS });
+      if (result.checked) {
+        appendLog({ level: "info", msg: "pool keepalive", providerId: provider.id, reason, checked: result.checked, refreshed: result.refreshed, failed: result.failed });
+      }
+    } catch (err) {
+      appendLog({ level: "warn", msg: "pool keepalive failed", providerId: provider.id, reason, error: err?.message || String(err) });
+    }
+  }
+}
+
+function startPoolKeepaliveMonitor() {
+  if (poolKeepaliveTimer) return;
+  setTimeout(() => { runPoolKeepalive("startup").catch(() => {}); }, POOL_KEEPALIVE_FIRST_DELAY_MS).unref?.();
+  poolKeepaliveTimer = setInterval(() => { runPoolKeepalive("timer").catch(() => {}); }, POOL_KEEPALIVE_INTERVAL_MS);
+  poolKeepaliveTimer.unref?.();
+}
+
 function getProviderHealthMonitor() {
   if (!providerHealthMonitor) {
     providerHealthMonitor = createProviderHealthMonitor({
@@ -3043,6 +3230,49 @@ async function testProviderConnectivity(provider) {
   const probe = resolved.provider;
   const baseUrl = String(probe.baseUrl || "").replace(/\/+$/, "");
   if (!baseUrl) return { ok: false, error: "缺少 Base URL" };
+  // WorkBuddy / CodeBuddy 账号池：先探模型目录，再按 realm 的 chat 路径做最小流式探测
+  // （上游只接受 stream:true，且默认 /chat/completions 路径不存在，会误报 405）。
+  if (isWorkBuddyOAuthProvider(probe)) {
+    const realmCfg = workBuddyRealmConfig(probe._workbuddyRealm);
+    const headers = buildProviderHeaders(probe);
+    const withEmail = resolved.accountEmail ? { accountEmail: resolved.accountEmail } : {};
+    const modelsUrl = `${baseUrl}${realmCfg.modelsPath}`;
+    let last = null;
+    try {
+      const { resp, text } = await fetchTextOnce(modelsUrl, { method: "GET", headers }, probe);
+      if (resp.ok) {
+        return { ok: true, status: resp.status, url: modelsUrl, bodyPreview: `已连接${realmCfg.label}模型目录（${realmCfg.modelsPath}）。`, ...withEmail };
+      }
+      last = { ok: false, status: resp.status, url: modelsUrl, bodyPreview: text.slice(0, 400), ...withEmail };
+    } catch (err) {
+      last = { ok: false, url: modelsUrl, error: errorSummary(err), ...withEmail };
+    }
+    const providerModels = readConfig().models.filter((m) => m.providerId === probe.id && m.enabled !== false);
+    const probeModel = String(providerModels[0]?.upstreamModel || providerModels[0]?.id || "deepseek-v4.1-flash");
+    for (const chatPath of realmCfg.chatPaths) {
+      const chatUrl = `${baseUrl}${chatPath}`;
+      try {
+        const { resp, text } = await fetchTextOnce(chatUrl, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json", Accept: "text/event-stream" },
+          body: JSON.stringify({
+            model: probeModel,
+            messages: [{ role: "system", content: "You are a helpful assistant." }, { role: "user", content: "hi" }],
+            max_tokens: 1,
+            stream: true
+          })
+        }, probe);
+        const hit = { ok: resp.ok, status: resp.status, url: chatUrl, ...withEmail };
+        if (resp.ok) {
+          return { ...hit, bodyPreview: `推理端点可达（${chatPath} · 模型 ${probeModel}）。` };
+        }
+        last = { ...hit, bodyPreview: text.slice(0, 400) };
+      } catch (err) {
+        last = { ok: false, url: chatUrl, error: errorSummary(err), ...withEmail };
+      }
+    }
+    return last || { ok: false, error: "WorkBuddy 探测失败" };
+  }
   if (isCodexOAuthProvider(probe)) {
     const auth = readCodexOAuthAuth({ provider: probe });
     if (!auth.ok) return { ok: false, error: `未找到可用 Codex OAuth：${auth.reason}` };
