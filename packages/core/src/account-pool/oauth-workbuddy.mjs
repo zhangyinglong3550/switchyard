@@ -17,8 +17,16 @@ export const WORKBUDDY_STATE_PATH = "/v2/plugin/auth/state?platform=CLI";
 export const WORKBUDDY_TOKEN_PATH = "/v2/plugin/auth/token";
 export const WORKBUDDY_ACCOUNT_PATH = "/v2/plugin/login/account";
 export const WORKBUDDY_REFRESH_PATH = "/v2/plugin/auth/token/refresh";
-// 上游新旧路径分叉：global 先 /console，404/405 时回退 /v2；cn 只有 /v2。
-export const WORKBUDDY_CHAT_PATHS = ["/console/chat/completions", "/v2/chat/completions"];
+// 上游路径分叉（global）：/console 与 /v2 两个端点共存，但**内容扫描策略不同**——
+// 2026-09-18 实测：同一条未硬化请求（含裸 `curl https://…` / `html.unescape(` /
+// `<script>alert(1)` / `%3Cscript` / `&lt;script`），/console 一律 403（WAF 拦截页），
+// /v2 一律 200。即 /console 挂了内容 WAF，/v2 没有。
+//
+// 因此 global 改为 **/v2 优先**：正常请求不再撞内容扫描，也无需出站改写内容
+// （见 workbuddy-adapter 的 wafHardening，现降级为按需开关）。/v2 若被上游下线
+// （404/405），callOpenAIChat 会自动回退 /console，此时才需要开启 wafHardening。
+// cn 只有 /v2，本就无此问题。
+export const WORKBUDDY_CHAT_PATHS = ["/v2/chat/completions", "/console/chat/completions"];
 
 /** 双域配置：base / Origin / X-Domain / chat 路径 / 模型目录路径。 */
 export const WORKBUDDY_REALMS = {
@@ -27,7 +35,7 @@ export const WORKBUDDY_REALMS = {
     baseUrl: "https://www.workbuddy.ai",
     origin: "https://www.workbuddy.ai",
     domain: "www.workbuddy.ai",
-    chatPaths: ["/console/chat/completions", "/v2/chat/completions"],
+    chatPaths: ["/v2/chat/completions", "/console/chat/completions"],
     modelsPath: "/v2/enterprises/personal/models",
     acceptLanguage: "en-US"
   },
@@ -74,21 +82,10 @@ export function workBuddyUserAgent(realm = "global") {
   return `WorkBuddy/${WORKBUDDY_CLIENT_VERSION} ${platform}/${WORKBUDDY_CLIENT_VERSION} CLI/${WORKBUDDY_CLI_VERSION}`;
 }
 
-/** 官方客户端的用量归属头组（缺这组头上游会把流量判为非官方客户端）。 */
-export function workBuddyAttributionHeaders() {
-  return {
-    "X-Agent-Purpose": "conversation",
-    "X-IDE-Name": "WorkBuddy",
-    "X-IDE-Type": "WorkBuddy",
-    "X-IDE-Version": WORKBUDDY_CLIENT_VERSION,
-    "X-Product": "WorkBuddy"
-  };
-}
-
 /**
  * WorkBuddy 出站请求头。
  * @param {"plugin"|"desktop"} surface plugin = 插件授权流程（登录用 CLI 形态 UA）；
- *        desktop = chat/refresh/资源查询（官方桌面端 UA + 归属头组）。
+ *        desktop = chat/refresh/资源查询（官方桌面端 UA）。
  */
 export function workBuddyHeaders({ accessToken = "", uid = "", realm = "global", domain = "", surface = "plugin", extra = {} } = {}) {
   const realmCfg = workBuddyRealmConfig(realm);
@@ -103,7 +100,6 @@ export function workBuddyHeaders({ accessToken = "", uid = "", realm = "global",
     Origin: host,
     Referer: `${host}/`,
     "User-Agent": desktop ? workBuddyUserAgent(realm) : WORKBUDDY_CLIENT_UA,
-    ...(desktop ? workBuddyAttributionHeaders() : {}),
     "X-CodeBuddy-Request": "1",
     "X-No-Enterprise-Id": "1",
     "X-Domain": effectiveDomain,

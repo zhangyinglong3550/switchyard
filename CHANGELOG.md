@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.3.12 — 2026-09-18
+
+### Fixed
+
+- **WorkBuddy 403 的根因既不是身份也不是内容，而是端点**。`global` 域的两个 chat 端点内容扫描策略不同：
+  - 用同一条真实失败会话（`curl https://www.workbuddy.ai` → 403）的完整出站 body，**只换 path**：`/console/chat/completions` → **403**（2.8 KB WAF 拦截页），`/v2/chat/completions` → **200**（145 KB 完整响应）。
+  - `/v2` 完全不扫描内容：裸 `curl https://…`、`html.unescape(`、`<script>alert(1)`、`%3Cscript`、`&lt;script` 全部 200。
+  - 这解释了「官方客户端 / 同类开源项目能过、本项目中转不能过」：`BulidH/workbuddy2api` 的 CN realm 走 `/v2`，而本项目池里是 global 账号、路径表以 `/console` 优先，于是每次请求都撞内容扫描。
+  - 修复：global 路径表改为 **`/v2` 优先**，`/console` 仅作 `/v2` 下线（404/405）时的回退；`cn` 本就只有 `/v2`，不受影响。
+- **WorkBuddy 账号池可靠性**：只将 JSON 2xx / `stream.ok` 记为成功，402/404（包括 401 续期后的失败）不记成功、不额外换号；最终 404 响应体保持可读，普通 403/429 错误重建保留响应头。
+- **WorkBuddy WAF 403 防御性错误处理**：仅对 HTTP 403 且 HTML 标题明确为 `WAF Block Page`（忽略大小写及空白差异）的响应返回脱敏的 `upstream_policy_blocked` / `upstream_policy_error`，保留 403 并说明上游安全策略拦截不足以证明凭证过期；不因此重试、换号或更新账号健康状态。普通 401/403/429 与正常流式/非流式响应保持原有行为；此改动不解除上游拦截，也不改变客户端自身的 `auth_failed` 分类。
+- **移除凭空构造的归属头组（`X-Agent-Purpose` / `X-IDE-*` / `X-Product`）**：对照官方客户端 `app.asar` 的 `buildHeaders(session)` 实测——官方 chat 出站只有 `Accept` / `Authorization` / `Content-Type` / `X-User-Id`（企业账号另加 `X-Enterprise-Id` / `X-Tenant-Id`，有域时加 `X-Domain`）；`X-Agent-Purpose` 在官方全量二进制中出现 **0 次**，`X-IDE-*` / `X-Product` 仅用于 `/v2/activity/workbuddy/banner` 等非 chat 接口。凭空发送这组头等于自报非官方客户端，与同类开源实现（workbuddy2api `CommonHeaders` 同样不发）也不一致，现全部移除（即撤销 2.3.11 引入的该头组）。
+- **撤回 `X-Device-Token` 出站注入**：该头在官方客户端中仅挂载于 `/v2/billing/meter/checkin-activity-status` 与 `/v2/billing/meter/daily-checkin` 两个计费接口，chat 链路不使用；官方桌面端的 `fetchDeviceToken()` 在本机实测持续返回 `TuringShield standardService is unavailable`，即官方在无此头的情况下同样正常对话。账号池字段 `deviceToken`、环境变量 `SWITCHYARD_WORKBUDDY_DEVICE_TOKEN_FILE` 与文件兜底读取一并移除。
+
+### Added
+
+- **WorkBuddy 账号池并发保护**：供应商字段 `maxInFlight` 为每账号进程内在途请求上限，默认 **3**，接受正整数，缺省或无效值回落到 3，其他池不受此配置影响。刷新前同步占位（仅聊天调度传 `reserveLease: true`；纯选号/探测默认不占租约），流式请求到 EOF / cancel / error / abort 才释放；刷新完成后复核最新资格（停用/冷却即释放并顺延下一可用账号）；全忙返回 503 capacity，不发上游请求。取消不处罚账号、不增加尝试。
+- **WorkBuddy 会话亲和**：仅采用 `opts.sessionKey` 或请求体显式 `session_id` / `sessionId` / `metadata.session_id`，按客户端和模型隔离，成功后绑定；TTL 一小时、缓存最多 2000 条。不会从首条用户文本或内容哈希推断会话；停用、冷却及容量约束优先。
+- **WorkBuddy 限流冷却**：429 尊重 `Retry-After` 秒数或 HTTP 日期；明确代码 6004 只冷却当前模型，并支持重置消息中明确标注 `UTC+8` 的 `YYYY-MM-DD HH:mm:ss`。有效未来期限不截短；无效/过去提示使用既有保守回退。并发结果使用最新持久状态，不缩短已有冷却；所有模型候选均冷却时不回退绕过限制。不增加重试、改变出站身份或请求内容。
+- **出站内容硬化 `hardenWorkBuddyChatBody`（默认关闭）**：`/console` 端点确有内容扫描，命中危险特征即 403。规则与实现：
+  - 扫描面覆盖 `content`（含数组形态 `text` 分片）、`reasoning_content`、`reasoning`、`tool_calls.arguments`；`prepareWorkBuddyChatBody` 会派生与 `reasoning_content` 并存的 `reasoning` 字段，两者都必须处理，否则裸特征会从后者漏到上游。
+  - 实测命中集（每条独立探针，均为「函数名 + 左括号」形态）：`alert( msgbox( eval( confirm( unescape( decodeURIComponent( decodeURI( fromCharCode( document.write( system( subprocess.run( compile(`；放行 `prompt( escape( encodeURIComponent( encodeURI( atob( btoa( Function( setTimeout( setInterval( exec( popen( subprocess( __import__( document.cookie innerHTML`。危险标签只有 `<script` / `<base`，事件绑定为主流 `onXxx=`。
+  - shell 动词按 `curl|wget|fetch` 统一处理，且仅在同串出现 URL / IPv4 / 域名特征时才动手；`curl 怎么用` 这类纯讨论不动。
+  - 中和一律用可见相似字符，只破坏特征赖以成立的标点：`<script` → `‹script`、`onXxx=` → `onXxx＝`、`alert(` → `alert（`、`%3c` → `%３c`、`&lt;` → `&ｌt;`；shell 动词用空串拼接（`curl` → `c''url`，任何 shell 都会展开回原动词，同时保持可执行）。零宽字符实测会被上游归一化掉，不可靠，故不使用。
+  - `hardenText` 带 `WAF_PREFILTER` 快路径：只匹配候选词干、不带括号要求（`decodeURI` 覆盖 `decodeURIComponent`），未命中直接返回原值以保持引用相等；只求「不漏」，精确改写留给慢路径。
+  - **默认不启用**：global 已改走不扫描内容的 `/v2`，正常路径无需改写会话文本。实测改写（`html.unescape(` → `html.unescape（`）反而会让模型在思考链里报告「full-width parenthesis 语法错误」。现仅在显式设 `provider.wafHardening = true`（即回退 `/console` 的兜底场景）时启用。
+
+### Notes
+
+- 排障过程证伪了「身份 / 指纹 / 请求头」方向：把真实失败会话的完整出站 body 直打上游、只切换头组做了五组 A/B（现状头、参考项目完整身份头组、仅归属头、原始未硬化 body × 两组头）——**五组全部 403**，头组不是变量。
+- 也推翻了「组合规则」的早期判断：`[system, assistant(tool_calls)]` 两条消息即 403，清空 `tool_calls` 立刻 200，说明 `tool_calls[].function.arguments` 单独存在就触发，不需要「外部大段内容 + 思考链动词」同时出现。
+- 参考项目 `BulidH/workbuddy2api` 的 `internal/upstream/sanitize.go` 处理的是 **Claude Code / Codex CLI 模板句指纹**（`You are Claude Code`、`x-anthropic-billing-header`、`Main branch (`、裸数字 `11128`），与本文的危险函数族不是同一类规则。它「能请求」是因为 CN realm 走 `/v2`，而非解决了内容扫描问题。
+- 硬化代码保留但默认不执行：`/v2` 若被上游下线、回退到 `/console` 时，可打开 `wafHardening` 兜底。
+
+### Tests
+
+- `packages/core/test/workbuddy-account-pool.test.mjs`：路径回退断言改为 v2 → console，global 绑定断言改为 `/v2` 优先；WAF403 用例（流式/非流式 × 2 种标题形态）断言诊断信息（典型诱因、`fetch/curl + 域名`、SSRF 启发式误报、新建会话、Request UUID）以及无 `retriedAttempts`、单次调用即返回（`calls===1` / `bodyReads===1`）、池文件字节不变；硬化用例覆盖危险函数族、改写后放行、「同名非调用形态放行」（`subprocess` / `subprocess(x)` / `a.compile` / `the system design`）、`fetch` + URL 与无 URL 放行、`reasoning` / `reasoning_content` 并存同改；出站形态用例断言归属头组与 `X-Device-Token` 均不注入。全量 832 用例通过。
+
 ## 2.3.11 — 2026-09-17
 
 ### Fixed

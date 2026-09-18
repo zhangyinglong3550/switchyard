@@ -143,6 +143,108 @@ export function prepareWorkBuddyChatBody(body = {}, { thinkingMode } = {}) {
   return next;
 }
 
+// 出站 WAF 中和：上游 WAF 对 AI 接口做内容检查，命中即 403 upstream_policy_blocked。
+// 实测（sess_c2c69851，抓取 workbuddy.ai 首页被拦）确认两类规则，与设备身份/指纹无关：
+//
+//   1) 危险特征库：扫描 content / reasoning_content / tool_calls.arguments 全部字段，
+//      且会先做 URL / HTML 实体 / JS 转义解码再匹配。命中面很窄，实测只有：
+//        · 标签 <script / <base   （<div> <iframe> <img> <style> <svg> <object> <form> 等均放行）
+//        · 事件 onerror= onload= onclick= onfocus= onmouseover= onchange= onsubmit=
+//        · 函数 alert( msgbox( eval( confirm(   （prompt( 放行）
+//      这是「抓网页必被拦」的直接原因 —— 真实网页 HTML 头部第一行就是 <script>。
+//
+//   2) 组合规则：请求内同时出现「外部大段内容」（tool 结果）与 reasoning_content 里的
+//      shell 动词（curl/wget）才拦。这解释了为何单独发 curl 不拦、抓回网页后同一会话被拦。
+//
+// 中和一律用「可见的相似字符」（‹ ＝ （），零宽字符实测会被上游归一化掉，不可靠。
+// 只破坏特征赖以成立的标点，正常代码（<div>、prompt(）保持原样，避免污染用户上下文。
+const WAF_LT = "\u2039";
+const WAF_EQ = "\uff1d";
+const WAF_LP = "\uff08";
+const WAF_DANGEROUS_TAG = /<\s*(script|base)\b/gi;
+const WAF_EVENT_BINDING = /\bon([a-z]+)\s*=/gi;
+// 危险函数调用：上游按「函数名 + 左括号」逐字匹配，属经典 XSS 黑名单。
+// 2026-09-18 全量枚举实测（每条独立探针，messages[].tool_calls.function.arguments 位）：
+//   命中：alert( msgbox( eval( confirm( unescape( decodeURIComponent( decodeURI(
+//         fromCharCode( document.write( system( subprocess.run( compile(
+//   放行：prompt( escape( encodeURIComponent( encodeURI( atob( btoa( Function(
+//         setTimeout( setInterval( exec( popen( subprocess( __import__(
+//         document.cookie innerHTML
+// unescape/decodeURI/fromCharCode 是 JS 混淆解码的经典组合；system/subprocess/compile
+// 属命令执行与代码编译。注意 subprocess 单独出现（`subprocess` / `subprocess(`）放行，
+// 只有带点的 `subprocess.run(` 命中，故单列一个分支。
+// 代价：Python 常规写法 re.compile( 与 html.unescape( 会被改写，但这两者本身就是 403
+// 触发条件（ZCode 抓网页后解析 HTML 必用 html.unescape，实测即「curl 抓站 → 解析脚本
+// → 整会话 403」的直接原因），不改写必然失败。改写只把左括号换全角（见 WAF_LP），
+// 模型读历史时能自行还原语义。
+const WAF_DANGEROUS_CALL = /\b(?:alert|msgbox|eval|confirm|unescape|decodeURIComponent|decodeURI|fromCharCode|document\.write|system|compile)\s*\(|\bsubprocess\.run\s*\(/gi;
+// 转义形态的 "<"：上游先解码再匹配，只能在转义序列本身下手（有限枚举，上游若新增形态需同步）
+const WAF_ENCODED_PERCENT = /%3c/gi;
+const WAF_ENCODED_ENTITY = /&lt;/gi;
+// HTTP/shell 动词 + 域名/IP/URL 的组合：只有这条文本确实带了目标才改写，
+// 避免把「curl 怎么用」这类纯讨论也改掉。空串拼接（c''url）任何 shell 都会先展开回原动词。
+//
+// 实测触发面不同（curl/fetch + URL 同现才拦）：
+//   · curl / wget —— 仅 reasoning_content 位触发（上游 SSRF 启发式，只看思考链）
+//   · fetch       —— 全部字段触发（content / reasoning_content / tool_calls.arguments）
+// 三者在有 URL 的文本里统一下手，见 workbuddy-adapter 回归测试。
+const WAF_SHELL_VERBS = /\b(curl|wget|fetch)\b/g;
+const WAF_TARGET_HINT = /(?::\/\/|\b\d{1,3}(?:\.\d{1,3}){3}\b|\b[a-z0-9-]+\.[a-z]{2,})/i;
+
+// 快路径预检：未命中任何候选子串时直接返回原值（保持引用相等，供上层跳过对象拷贝）。
+// 只求「不漏」，故只匹配候选**词干**、不带括号要求（如 decodeURI 覆盖 decodeURIComponent），
+// 宁可多进慢路径——慢路径才做精确改写。大小写不敏感以覆盖各规则的 /i 形态。
+const WAF_PREFILTER = /<|%3c|&lt;|\b(?:alert|msgbox|eval|confirm|unescape|decodeURI|fromCharCode|document|system|subprocess|compile)|\bon[a-z]+\s*=|\b(?:curl|wget|fetch)\b/i;
+
+function hardenText(value) {
+  if (typeof value !== "string" || !value) return value;
+  if (!WAF_PREFILTER.test(value)) return value;
+  const hardened = value
+    .replace(WAF_DANGEROUS_TAG, (m) => m.replace("<", WAF_LT))
+    .replace(WAF_EVENT_BINDING, (m) => m.slice(0, -1) + WAF_EQ)
+    .replace(WAF_DANGEROUS_CALL, (m) => m.slice(0, -1) + WAF_LP)
+    .replace(WAF_ENCODED_PERCENT, "\uff05" + "3c")
+    .replace(WAF_ENCODED_ENTITY, "&\uff4c" + "t;");
+  if (!WAF_TARGET_HINT.test(hardened)) return hardened;
+  return hardened.replace(WAF_SHELL_VERBS, (verb) => `${verb[0]}''${verb.slice(1)}`);
+}
+
+// 数组形态只改 text 分片；image_url 等其它分片原样保留，避免动到图片 data URL。
+function hardenContent(content) {
+  if (typeof content === "string") return hardenText(content);
+  if (!Array.isArray(content)) return content;
+  return content.map((part) => (part && typeof part === "object" && typeof part.text === "string"
+    ? { ...part, text: hardenText(part.text) }
+    : part));
+}
+
+function hardenMessage(message) {
+  if (!message || typeof message !== "object") return message;
+  const next = { ...message, content: hardenContent(message.content) };
+  if (typeof message.reasoning_content === "string") next.reasoning_content = hardenText(message.reasoning_content);
+  // prepare 派生出的 reasoning 与 reasoning_content 并存，两者都在扫描面内，必须同样处理。
+  if (typeof message.reasoning === "string") next.reasoning = hardenText(message.reasoning);
+  if (Array.isArray(message.tool_calls)) {
+    next.tool_calls = message.tool_calls.map((call) => {
+      const args = call?.function?.arguments;
+      if (typeof args !== "string") return call;
+      const hardened = hardenText(args);
+      return hardened === args ? call : { ...call, function: { ...call.function, arguments: hardened } };
+    });
+  }
+  return next;
+}
+
+/**
+ * 对出站请求体里的语义文本做 WAF 等价改写。
+ * 只覆盖模型会读到的文本（content / reasoning_content / tool_calls.arguments），
+ * 全程返回新对象，不改动调用方传入的请求体。
+ */
+export function hardenWorkBuddyChatBody(body = {}) {
+  if (!Array.isArray(body.messages)) return body;
+  return { ...body, messages: body.messages.map(hardenMessage) };
+}
+
 function parseSseDataLines(text) {
   const frames = [];
   for (const rawLine of String(text || "").split("\n")) {

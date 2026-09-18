@@ -15,10 +15,10 @@
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, isWorkBuddyOAuthProvider, readJsonResponse } from "./clients.mjs";
-import { prepareWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
+import { prepareWorkBuddyChatBody, hardenWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
 import { reasoningCache, resolveReasoningCacheKey } from "../reasoning-cache.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
-import { contentToText } from "../utils.mjs";
+import { contentToText, safeJsonParse } from "../utils.mjs";
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../anthropic-adapter-out.mjs";
 import {
   antigravityPayloadToChatResponse,
@@ -33,14 +33,16 @@ import { rectifyUpstreamRequest } from "../compat/runtime-rectifier.mjs";
 import { transformOpenCodeTextToolCalls } from "../opencode-text-tool-calls.mjs";
 import {
   bindProviderToAccount,
+  bindAccountAffinity,
   clearAccountAffinity,
+  currentEligibleAccount,
   isAccountPoolProvider,
   markAccountFailure,
   markAccountSuccess,
   ensureFreshAccount,
   pickAndRefreshAccount
 } from "../account-pool/index.mjs";
-import { withDispatchRetry } from "./retry-policy.mjs";
+import { retryAfterMs, withDispatchRetry } from "./retry-policy.mjs";
 
 const ACCOUNT_POOL_FAILOVER_STATUSES = new Set([401, 403, 429, 500, 502, 503, 504]);
 const ACCOUNT_POOL_MAX_ATTEMPTS = 3;
@@ -76,111 +78,150 @@ function shouldFailoverStatus(status) {
   return ACCOUNT_POOL_FAILOVER_STATUSES.has(Number(status) || 0);
 }
 
-async function runWithAccountPool(provider, opts, runner) {
-  if (!isAccountPoolProvider(provider)) {
-    return runner(provider, null);
+function isWorkBuddyPolicyBlock(provider, result) {
+  return isWorkBuddyOAuthProvider(provider) && result?.kind === "error" && result.status === 403
+    && result.payload?.error?.code === "upstream_policy_blocked";
+}
+
+// 只有真正的成功（2xx JSON / ok 流）才能记为账号健康。非换号失败（402/404 等）
+// 也不得记成功：换号循环会直接返回错误，任何到达这里的错误结果都代表上游拒绝。
+function isHealthyResult(provider, result) {
+  if (isWorkBuddyPolicyBlock(provider, result)) return false;
+  if (result?.kind === "stream") return Boolean(result.upstream?.ok);
+  return result?.kind === "json" && result.status >= 200 && result.status < 300;
+}
+
+// 只读取显式会话标识，不以文本或内容哈希推断会话。
+function workbuddySessionKey(body, opts, model) {
+  const id = opts?.sessionKey || body?.session_id || body?.sessionId || body?.metadata?.session_id;
+  return typeof id === "string" && id.trim() ? JSON.stringify([opts?.clientId || "", model, id.trim()]) : "";
+}
+
+function workbuddyCooldown(result) {
+  if (result.status !== 429) return {};
+  const payload = result.payload;
+  const modelOnly = Number(payload?.error?.code ?? payload?.code) === 6004;
+  const message = String(payload?.error?.message || payload?.message || payload?.msg || "");
+  const now = Date.now();
+  const milliseconds = retryAfterMs(result.headers, { now, maxMs: Number.MAX_SAFE_INTEGER });
+  let cooldownDeadline = milliseconds > 0 ? now + milliseconds : 0;
+  // 6004 已知协议墙钟为 UTC+8；只匹配明确时区或“将在 … 重置”，不猜测通用时间戳。
+  const match = modelOnly && (
+    /(?:reset|重置|恢复)[^\d]*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*UTC\+8/i.exec(message)
+    || /将在\s*(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\s*重置/.exec(message)
+  );
+  if (match) {
+    const at = Date.parse(`${match[1]}T${match[2]}+08:00`);
+    // 往返校验拒绝日期解析器自动归一化的无效日期。
+    if (Number.isFinite(at) && at > now && new Date(at + 8 * 3600000).toISOString().slice(0, 19) === `${match[1]}T${match[2]}`) {
+      cooldownDeadline = Math.max(cooldownDeadline, at);
+    }
   }
+  return { modelOnly, ...(cooldownDeadline > 0 ? { cooldownDeadline } : {}) };
+}
+
+// 按需拉取一个块，不预读、不聚合；租约覆盖整个响应体生命周期。
+function leasedResponse(upstream, release, signal) {
+  if (!upstream.body) { release(); return upstream; }
+  const reader = upstream.body.getReader();
+  let ended = false;
+  let controller;
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    signal?.removeEventListener("abort", abort);
+    release();
+  };
+  const abort = () => {
+    if (ended) return;
+    const error = new DOMException("aborted", "AbortError");
+    finish(); controller.error(error); void reader.cancel(error).catch(() => {});
+  };
+  const body = new ReadableStream({
+    start(c) { controller = c; signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort(); },
+    async pull(c) {
+      try {
+        const { value, done } = await reader.read();
+        if (ended) return;
+        if (done) { finish(); c.close(); } else c.enqueue(value);
+      } catch (err) { if (!ended) { finish(); c.error(err); } }
+    },
+    async cancel(reason) { finish(); await reader.cancel(reason); }
+  }, { highWaterMark: 0 });
+  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers });
+}
+
+async function runWithAccountPool(provider, opts, runner) {
+  if (!isAccountPoolProvider(provider)) return runner(provider, null);
+  const workbuddy = isWorkBuddyOAuthProvider(provider);
   const excludeIds = [];
   let lastResult = null;
   let lastError = null;
   for (let attempt = 0; attempt < ACCOUNT_POOL_MAX_ATTEMPTS; attempt += 1) {
+    opts?.signal?.throwIfAborted();
     const picked = await pickAndRefreshAccount(provider, {
-      excludeIds,
-      fetchImpl: opts?.fetchImpl,
-      sessionKey: opts?.accountSessionKey,
-      upstreamModel: opts?.upstreamModel || ""
+      excludeIds, fetchImpl: opts?.fetchImpl, signal: opts?.signal, reserveLease: true,
+      sessionKey: opts?.accountSessionKey, upstreamModel: opts?.upstreamModel || ""
     });
-    if (!picked.ok) {
-      lastError = picked.error || "account pool unavailable";
-      break;
-    }
+    if (!picked.ok) { lastError = picked.error || "account pool unavailable"; break; }
     let account = picked.account;
+    let streaming = false;
     excludeIds.push(account.id);
-    const bound = bindProviderToAccount(provider, account);
     try {
-      let result = await runner(bound, account);
-      if (result?.kind === "error" && shouldFailoverStatus(result.status)) {
-        // Access token 可能在 JWT exp 之前被服务端撤销。和 Cockpit 一样，
-        // 401 时先强制续期同一账号一次；只有续期失败才切换账号。
-        if (result.status === 401 && (account.refreshToken || account.sessionToken)) {
-          const renewed = await ensureFreshAccount(account, {
-            provider,
-            proxyUrl: provider.proxyUrl,
-            fetchImpl: opts?.fetchImpl,
-            force: true
-          });
-          if (renewed.ok) {
-            const retried = await runner(bindProviderToAccount(provider, renewed.account), renewed.account);
-            if (!(retried?.kind === "error" && shouldFailoverStatus(retried.status))) {
-              markAccountSuccess(provider, renewed.account, { upstreamModel: opts?.upstreamModel || "" });
-              return withAccountMeta(retried, renewed.account);
-            }
-            result = retried;
-            if (retried?.kind === "error") account = renewed.account;
-          }
-        }
-        markAccountFailure(provider, account, {
-          status: result.status,
-          error: result.payload?.error?.message || result.payload?.error || `status ${result.status}`,
-          upstreamModel: opts?.upstreamModel || ""
+      let result = await runner(bindProviderToAccount(provider, account), account);
+      opts?.signal?.throwIfAborted();
+      if (isWorkBuddyPolicyBlock(provider, result)) return withAccountMeta(result, account);
+      let status = result?.status || result?.upstream?.status;
+      if (!isHealthyResult(provider, result) && status === 401 && (account.refreshToken || account.sessionToken)) {
+        const renewed = await ensureFreshAccount(account, {
+          provider, proxyUrl: provider.proxyUrl, fetchImpl: opts?.fetchImpl, signal: opts?.signal, force: true
         });
-        lastResult = withAccountMeta(result, account);
-        clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
-        continue;
-      }
-      if (result?.kind === "stream" && result.upstream && !result.upstream.ok && shouldFailoverStatus(result.upstream.status)) {
-        // Codex Responses 强制使用 SSE；401 会走 stream 分支，必须和普通 JSON
-        // 响应一样先续期同一账号，否则会在 refresh 前直接换号并最终报未授权。
-        if (result.upstream.status === 401 && (account.refreshToken || account.sessionToken)) {
-          const renewed = await ensureFreshAccount(account, {
-            provider,
-            proxyUrl: provider.proxyUrl,
-            fetchImpl: opts?.fetchImpl,
-            force: true
-          });
-          if (renewed.ok) {
-            const retried = await runner(bindProviderToAccount(provider, renewed.account), renewed.account);
-            if (!(retried?.kind === "stream" && retried.upstream && !retried.upstream.ok && shouldFailoverStatus(retried.upstream.status))) {
-              markAccountSuccess(provider, renewed.account, { upstreamModel: opts?.upstreamModel || "" });
-              return withAccountMeta(retried, renewed.account);
-            }
-            result = retried;
-            if (retried?.kind === "stream" && retried.upstream && !retried.upstream.ok) account = renewed.account;
+        opts?.signal?.throwIfAborted();
+        if (renewed.ok) {
+          await result.upstream?.body?.cancel?.();
+          account = workbuddy
+            ? currentEligibleAccount(provider, renewed.account.id, { upstreamModel: opts?.upstreamModel || "" })
+            : renewed.account;
+          if (!account) {
+            clearAccountAffinity(provider, opts?.accountSessionKey, renewed.account.id);
+            // finally 释放原租约，下一轮只选择最新可用账号，不向冷却或停用账号重发。
+            continue;
           }
+          result = await runner(bindProviderToAccount(provider, account), account);
+          opts?.signal?.throwIfAborted();
+          if (isWorkBuddyPolicyBlock(provider, result)) return withAccountMeta(result, account);
+          status = result?.status || result?.upstream?.status;
         }
-        markAccountFailure(provider, account, {
-          status: result.upstream.status,
-          error: `stream status ${result.upstream.status}`,
-          upstreamModel: opts?.upstreamModel || ""
-        });
-        lastResult = withAccountMeta({
-          kind: "error",
-          status: result.upstream.status,
-          payload: await readJsonResponse(result.upstream).catch(() => ({ error: `status ${result.upstream.status}` }))
-        }, account);
-        clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
-        continue;
       }
-      markAccountSuccess(provider, account, { upstreamModel: opts?.upstreamModel || "" });
-      return withAccountMeta(result, account);
-    } catch (err) {
-      const message = err?.message || String(err);
-      markAccountFailure(provider, account, { status: 0, error: message, upstreamModel: opts?.upstreamModel || "" });
+      if (isHealthyResult(provider, result)) {
+        markAccountSuccess(provider, account, { upstreamModel: opts?.upstreamModel || "" });
+        if (workbuddy) bindAccountAffinity(provider, opts?.accountSessionKey, account.id);
+        if (picked.release && result.kind === "stream") {
+          result = { ...result, upstream: leasedResponse(result.upstream, picked.release, opts?.signal) };
+          streaming = true;
+        }
+        return withAccountMeta(result, account);
+      }
+      if (!shouldFailoverStatus(status)) return withAccountMeta(result, account);
+      if (result.kind === "stream") result = {
+        kind: "error", status, headers: result.upstream.headers,
+        payload: await readJsonResponse(result.upstream).catch(() => ({ error: `status ${status}` }))
+      };
+      markAccountFailure(provider, account, {
+        status, error: result.payload?.error?.message || result.payload?.error || `status ${status}`,
+        upstreamModel: opts?.upstreamModel || "", ...(workbuddy ? workbuddyCooldown(result) : {})
+      });
+      lastResult = withAccountMeta(result, account);
       clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
-      lastError = message;
-      lastResult = withAccountMeta({
-        kind: "error",
-        status: 502,
-        payload: { error: message }
-      }, account);
-    }
+    } catch (err) {
+      if (opts?.signal?.aborted || err?.name === "AbortError") throw new DOMException("aborted", "AbortError");
+      lastError = err?.message || String(err);
+      markAccountFailure(provider, account, { status: 0, error: lastError, upstreamModel: opts?.upstreamModel || "" });
+      clearAccountAffinity(provider, opts?.accountSessionKey, account.id);
+      lastResult = withAccountMeta({ kind: "error", status: 502, payload: { error: lastError } }, account);
+    } finally { if (!streaming) picked.release?.(); }
   }
-  if (lastResult) return lastResult;
-  return {
-    kind: "error",
-    status: 503,
-    payload: { error: lastError || "account pool exhausted" }
-  };
+  return lastResult || { kind: "error", status: 503, payload: { error: lastError || "account pool exhausted" } };
 }
 
 export async function dispatchChat(provider, upstreamModel, chatBody, opts = {}) {
@@ -196,7 +237,7 @@ export async function dispatchChat(provider, upstreamModel, chatBody, opts = {})
     : opts;
   const accountSessionKey = provider?.poolKind === "antigravity_oauth"
     ? antigravitySessionKey(chatBody, opts)
-    : "";
+    : isWorkBuddyOAuthProvider(provider) ? workbuddySessionKey(chatBody, opts, upstreamModel) : "";
   const poolOpts = { ...opts, ...(accountSessionKey ? { accountSessionKey } : {}), upstreamModel };
   return withDispatchRetry(provider, opts.model, retryOpts, () =>
     runWithAccountPool(provider, poolOpts, (activeProvider, account) =>
@@ -288,8 +329,41 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
         thinkingMode = assistants.length === 0 || allHaveThinking ? "strict" : "off";
       }
       upstreamBody = prepareWorkBuddyChatBody(upstreamBody, { thinkingMode });
+      // 出站内容中和：/console 端点对危险特征（`<script` / `onXxx=` / `alert(` / `curl+URL` 等）
+      // 做内容扫描，命中即 403；/v2 端点实测不做任何内容扫描（见 oauth-workbuddy 的路径说明）。
+      //
+      // 因此默认**不硬化**：global 走 /v2，改写历史纯属副作用——实测模型会读到被改写的
+      // `html.unescape（t)` 并在思考链里指出「这是全角括号语法错误」，反而干扰作答。
+      // 仅在显式设 provider.wafHardening = true 时启用（/v2 下线回退 /console 时的兜底）。
+      if (provider.wafHardening === true) {
+        upstreamBody = hardenWorkBuddyChatBody(upstreamBody);
+      }
     }
-    const upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
+    let upstream = await callOpenAIChat(provider, upstreamBody, upstreamOptsWithOverrides);
+    if (workbuddy && upstream.status === 403) {
+      // 先识别明确的 HTML WAF 标题，避免把策略拦截记成账号故障或触发纠错重试。
+      const text = await upstream.text();
+      if (/^\s*</.test(text) && /<title\s*>\s*WAF\s+Block\s+Page\s*<\/title\s*>/i.test(text)) {
+        return withAccountMeta({
+          kind: "error",
+          status: 403,
+          payload: { error: {
+            code: "upstream_policy_blocked",
+            type: "upstream_policy_error",
+            message: "WorkBuddy 上游安全策略拦截了请求（WAF）。典型诱因：会话历史中包含「fetch/curl + 域名」类思考文本或工具输出（上游 SSRF 启发式误报）。该响应不足以证明凭证已过期；建议该会话改用其他供应商或新建会话，并向站点方提交 WAF 误报（拦截页含 Request UUID）。",
+            retryable: false,
+            upstreamStatus: 403
+          } },
+          requestOverrides: requestOverrideSummary(requestOverrides)
+        }, account);
+      }
+      const payload = safeJsonParse(text, { error: text });
+      if (!stream) {
+        return withAccountMeta({ kind: "error", status: upstream.status, headers: upstream.headers, payload, requestOverrides: requestOverrideSummary(requestOverrides) }, account);
+      }
+      // 原响应体只读一次；普通 403 重建可读响应，继续沿用流式纠错与换号逻辑。
+      upstream = jsonResponseFromPayload(payload, upstream.status, upstream.headers);
+    }
     // 非流式客户端 + 只吐 SSE 的上游：在本地聚合为 Chat JSON（workbuddy2api 同策略）。
     if (workbuddy && !stream) {
       if (!upstream.ok) {
@@ -754,7 +828,7 @@ async function retryFailedStreamWithRectifier({ upstream, body, apiFormat, ctx, 
     errorClass = rectified.errorClass || errorClass;
     if (!rectified.applied) {
       return {
-        upstream: jsonResponseFromPayload(payload, activeUpstream.status),
+        upstream: jsonResponseFromPayload(payload, activeUpstream.status, activeUpstream.headers),
         rectifiers,
         errorClass
       };
@@ -784,10 +858,14 @@ async function retryFailedStreamWithRectifier({ upstream, body, apiFormat, ctx, 
   };
 }
 
-function jsonResponseFromPayload(payload, status) {
+function jsonResponseFromPayload(payload, status, originalHeaders) {
+  const headers = new Headers(originalHeaders);
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
   return new Response(JSON.stringify(payload ?? { error: `status ${status || 0}` }), {
     status: Number(status) || 502,
-    headers: { "Content-Type": "application/json; charset=utf-8" }
+    headers
   });
 }
 

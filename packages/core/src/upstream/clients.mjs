@@ -17,8 +17,7 @@ import {
   updateAccountRuntime,
   WORKBUDDY_GLOBAL_DOMAIN,
   WORKBUDDY_CHAT_PATHS,
-  workBuddyUserAgent,
-  workBuddyAttributionHeaders
+  workBuddyUserAgent
 } from "../account-pool/index.mjs";
 import {
   ANTHROPIC_API_VERSION,
@@ -283,10 +282,11 @@ export function workbuddyOAuthHeaders(provider) {
   return {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(uid ? { "X-User-Id": uid } : {}),
-    // 官方桌面端形态：UA 平台段按 realm（global=WorkBuddy AI / cn=WorkBuddy）+ 用量归属头组；
-    // 缺这组头时上游可能把流量判为非官方客户端并返回 403。
+    // 官方桌面端形态：UA 平台段按 realm（global=WorkBuddy AI / cn=WorkBuddy）。
+    // 不注入 X-IDE-* / X-Agent-Purpose / X-Product 归属头组——官方 App 的 chat 链路
+    // 只用 buildHeaders(session) 的基础头（Accept/Authorization/Content-Type/X-User-Id），
+    // 那几个头仅出现在 /v2/activity/workbuddy/banner 等非 chat 接口，凭空发送反而暴露非官方身份。
     "User-Agent": workBuddyUserAgent(realm),
-    ...workBuddyAttributionHeaders(),
     // 个人账号形态：声明无企业 + 显式域；国内为 codebuddy.cn 域（与 workbuddy2api 出站头一致）。
     "X-No-Enterprise-Id": "1",
     "X-Domain": domain,
@@ -509,7 +509,7 @@ export async function callOpenAIChat(provider, body, opts) {
     let response = null;
     for (const path of paths) {
       response = await postJson(joinUrl(base, path), body, headers, { ...opts, provider });
-      if (response.status !== 404 && response.status !== 405) return response;
+      if ((response.status !== 404 && response.status !== 405) || path === paths.at(-1)) return response;
       await response.body?.cancel?.().catch?.(() => {});
     }
     return response;

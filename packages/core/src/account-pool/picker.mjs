@@ -1,6 +1,7 @@
 // 账号池选号、健康更新、绑定 provider 凭证。
 import {
   isAccessExpired,
+  poolFilePath,
   loadPool,
   savePool,
   updateAccountRuntime
@@ -14,6 +15,8 @@ import { isAgentIdentityAccount } from "./agent-identity.mjs";
 
 const rrCursor = new Map();
 const sessionAffinity = new Map();
+const workbuddyLeases = new Map();
+const MAX_AFFINITIES = 2000;
 const AFFINITY_TTL_MS = 60 * 60 * 1000;
 
 export const POOL_KIND_META = {
@@ -59,10 +62,12 @@ export function poolStrategyOf(provider, pool) {
   return String(provider?.poolStrategy || pool?.strategy || "weighted_round_robin").trim() || "weighted_round_robin";
 }
 
+function kindPrefix(kind) { return `${kind || "xai_oauth"}::`; }
+
 function affinityKey(provider, sessionKey) {
   const providerId = String(provider?.id || "").trim();
   const key = String(sessionKey || "").trim();
-  return providerId && key ? `${providerId}::${key}` : "";
+  return providerId && key ? `${kindPrefix(poolKindOf(provider))}${providerId}::${key}` : "";
 }
 
 function clearExpiredAffinity() {
@@ -78,9 +83,17 @@ export function accountAffinityId(provider, sessionKey) {
 }
 
 export function bindAccountAffinity(provider, sessionKey, accountId) {
+  const kind = poolKindOf(provider);
   const key = affinityKey(provider, sessionKey);
   const id = String(accountId || "").trim();
   if (!key || !id) return;
+  clearExpiredAffinity();
+  sessionAffinity.delete(key);
+  // 只限制 WorkBuddy 的缓存，不淘汰 Antigravity 的会话。
+  if (kind === "workbuddy_oauth") {
+    const keys = [...sessionAffinity.keys()].filter((candidate) => candidate.startsWith(kindPrefix(kind)));
+    while (keys.length >= MAX_AFFINITIES) sessionAffinity.delete(keys.shift());
+  }
   sessionAffinity.set(key, { accountId: id, expiresAt: Date.now() + AFFINITY_TTL_MS });
 }
 
@@ -128,7 +141,7 @@ export function pickAccount(pool, {
   const candidates = listEligibleAccounts(pool, { excludeIds, now });
   if (!candidates.length) return null;
   const modelReady = candidates.filter((account) => modelHealthRank(account, upstreamModel, now) < 3);
-  const modelCandidates = modelReady.length ? modelReady : candidates;
+  const modelCandidates = pool?.poolKind === "workbuddy_oauth" ? modelReady : (modelReady.length ? modelReady : candidates);
 
   // Prefer accounts that are globally and model-specifically healthy.
   const healthy = modelCandidates.filter((account) => account.health === "healthy" && !account.consecutiveFailures && modelHealthRank(account, upstreamModel, now) === 0);
@@ -171,6 +184,7 @@ export async function ensureFreshAccount(account, {
   proxyUrl = "",
   fetchImpl,
   force = false,
+  signal,
   skewMs = 60_000,
   home,
   getAntigravityCliSecret
@@ -246,6 +260,8 @@ export async function ensureFreshAccount(account, {
         fetchImpl
       });
     }
+    signal?.throwIfAborted();
+    if (kind === "workbuddy_oauth" && provider?.id) current = loadPool(provider.id, { poolKind: kind, home }).accounts.find((a) => a.id === account.id) || current;
     const next = {
       ...current,
       accessToken: tokens.accessToken,
@@ -258,8 +274,8 @@ export async function ensureFreshAccount(account, {
       accountId: tokens.accountId || current.accountId || "",
       idToken: tokens.idToken || current.idToken || "",
       domain: tokens.domain || current.domain || "",
-      health: "healthy",
-      lastError: ""
+      health: kind === "workbuddy_oauth" ? current.health : "healthy",
+      lastError: kind === "workbuddy_oauth" ? current.lastError : ""
     };
     if (provider?.id) {
       updateAccountRuntime(provider.id, account.id, {
@@ -273,12 +289,13 @@ export async function ensureFreshAccount(account, {
         accountId: next.accountId,
         idToken: next.idToken,
         domain: next.domain,
-        health: "healthy",
-        lastError: ""
+        health: next.health,
+        lastError: next.lastError
       }, { poolKind: kind, home });
     }
     return { ok: true, account: next, refreshed: true };
   } catch (err) {
+    if (signal?.aborted || err?.name === "AbortError") throw new DOMException("aborted", "AbortError");
     const message = err?.message || String(err);
     if (provider?.id) {
       updateAccountRuntime(provider.id, account.id, {
@@ -291,55 +308,102 @@ export async function ensureFreshAccount(account, {
   }
 }
 
+// 已持有租约的请求续期后复核最新状态，不重复占位或将自己的租约计为满载。
+export function currentEligibleAccount(provider, accountId, { home, upstreamModel = "" } = {}) {
+  const poolKind = poolKindOf(provider);
+  const pool = loadPool(provider.id, { poolKind, home });
+  const now = Date.now();
+  return listEligibleAccounts(pool, { now }).find((account) => account.id === accountId
+    && (poolKind !== "workbuddy_oauth" || modelHealthRank(account, upstreamModel, now) < 3)) || null;
+}
+
 export async function pickAndRefreshAccount(provider, {
   excludeIds = [],
   home,
   fetchImpl,
   maxRefreshAttempts = 5,
+  reserveLease = false,
   sessionKey = "",
+  signal,
   upstreamModel = ""
 } = {}) {
   if (!isAccountPoolProvider(provider)) {
     return { ok: false, error: "not-account-pool-provider" };
   }
   const poolKind = poolKindOf(provider);
-  const pool = loadPool(provider.id, { poolKind, home });
+  let pool = loadPool(provider.id, { poolKind, home });
   const strategy = poolStrategyOf(provider, pool);
   const tried = new Set((excludeIds || []).map(String));
   let lastError = "no eligible accounts";
 
   for (let i = 0; i < maxRefreshAttempts; i += 1) {
-    const affinityId = poolKind === "antigravity_oauth" ? accountAffinityId(provider, sessionKey) : "";
+    signal?.throwIfAborted();
+    const workbuddy = poolKind === "workbuddy_oauth";
+    if (workbuddy) pool = loadPool(provider.id, { poolKind, home });
+    const leasing = workbuddy && reserveLease;
+    const limit = Number.isInteger(provider.maxInFlight) && provider.maxInFlight > 0 ? provider.maxInFlight : 3;
+    const leaseKey = (id) => JSON.stringify([poolFilePath(provider.id, poolKind, home), id]);
+    const fullIds = workbuddy ? pool.accounts.filter((a) => (workbuddyLeases.get(leaseKey(a.id)) || 0) >= limit).map((a) => a.id) : [];
+    const excluded = [...tried, ...fullIds];
+    const affinityId = (workbuddy || poolKind === "antigravity_oauth") ? accountAffinityId(provider, sessionKey) : "";
     let account = affinityId && !tried.has(affinityId)
-      ? listEligibleAccounts(pool, { excludeIds: [...tried] }).find((item) => item.id === affinityId)
+      ? listEligibleAccounts(pool, { excludeIds: excluded }).find((item) => item.id === affinityId && (!workbuddy || modelHealthRank(item, upstreamModel, Date.now()) < 3))
       : null;
     if (!account) {
       if (affinityId) clearAccountAffinity(provider, sessionKey, affinityId);
       account = pickAccount(pool, {
         strategy,
-        excludeIds: [...tried],
+        excludeIds: excluded,
         providerId: provider.id,
         upstreamModel
       });
     }
-    if (!account) break;
+    if (!account) { if (fullIds.length) lastError = "account pool capacity exhausted"; break; }
     tried.add(account.id);
-    const fresh = await ensureFreshAccount(account, {
+    // 同步占位必须发生在首次 await 之前；释放可重复调用。
+    const key = leaseKey(account.id);
+    let released = false;
+    const release = () => {
+      if (released || !leasing) return;
+      released = true;
+      signal?.removeEventListener("abort", release);
+      const count = (workbuddyLeases.get(key) || 1) - 1;
+      if (count > 0) workbuddyLeases.set(key, count); else workbuddyLeases.delete(key);
+    };
+    if (leasing) workbuddyLeases.set(key, (workbuddyLeases.get(key) || 0) + 1);
+    if (leasing) signal?.addEventListener("abort", release, { once: true });
+    let fresh;
+    try { fresh = await ensureFreshAccount(account, {
       provider,
       proxyUrl: provider.proxyUrl,
       fetchImpl,
+      signal,
       home
     });
+    signal?.throwIfAborted();
+    } catch (err) { release(); throw err; }
+    if (fresh.ok && workbuddy) {
+      const eligible = currentEligibleAccount(provider, account.id, { home, upstreamModel });
+      if (!eligible) {
+        release();
+        clearAccountAffinity(provider, sessionKey, account.id);
+        lastError = "account became unavailable during refresh";
+        continue;
+      }
+      fresh.account = eligible;
+    }
     if (fresh.ok) {
       if (poolKind === "antigravity_oauth") bindAccountAffinity(provider, sessionKey, fresh.account.id);
       return {
         ok: true,
         account: fresh.account,
+        release: leasing ? release : undefined,
         refreshed: fresh.refreshed,
         strategy,
         poolKind
       };
     }
+    release();
     lastError = fresh.error || lastError;
   }
 
@@ -505,10 +569,12 @@ export function bindProviderToAccount(provider, account) {
 
 export function markAccountSuccess(provider, account, { home, upstreamModel = "" } = {}) {
   if (!provider?.id || !account?.id) return;
+  const workbuddy = poolKindOf(provider) === "workbuddy_oauth";
+  if (workbuddy) account = loadPool(provider.id, { poolKind: "workbuddy_oauth", home }).accounts.find((a) => a.id === account.id) || account;
   const now = new Date().toISOString();
   const model = String(upstreamModel || "").trim();
   const modelHealth = { ...(account.modelHealth || {}) };
-  if (model) {
+  if (model && !(workbuddy && Date.parse(modelHealth[model]?.cooldownUntil) > Date.now())) {
     modelHealth[model] = {
       health: "healthy",
       consecutiveFailures: 0,
@@ -525,7 +591,11 @@ export function markAccountSuccess(provider, account, { home, upstreamModel = ""
     lastUsedAt: now,
     lastSuccessAt: now,
     cooldownUntil: null,
-    modelHealth
+    modelHealth,
+    ...(workbuddy && (account.health === "disabled" || Date.parse(account.cooldownUntil) > Date.now()) ? {
+      health: account.health, cooldownUntil: account.cooldownUntil,
+      consecutiveFailures: account.consecutiveFailures, lastError: account.lastError
+    } : {})
   }, { poolKind: poolKindOf(provider), home });
 }
 
@@ -540,10 +610,14 @@ export function markAccountFailure(provider, account, {
   error = "",
   home,
   retryAfterSec,
+  cooldownDeadline,
+  modelOnly = false,
   upstreamModel = ""
 } = {}) {
   if (!provider?.id || !account?.id) return;
-  const accountScoped = isAccountScopedFailure(status);
+  const workbuddy = poolKindOf(provider) === "workbuddy_oauth";
+  if (workbuddy) account = loadPool(provider.id, { poolKind: "workbuddy_oauth", home }).accounts.find((a) => a.id === account.id) || account;
+  const accountScoped = isAccountScopedFailure(status) && !(workbuddy && modelOnly);
   const failures = (account.consecutiveFailures || 0) + 1;
   let health = "degraded";
   let cooldownUntil = null;
@@ -552,7 +626,12 @@ export function markAccountFailure(provider, account, {
     const seconds = Number.isFinite(Number(retryAfterSec))
       ? Math.max(30, Number(retryAfterSec))
       : Math.min(900, 30 * (accountScoped ? failures : 1));
-    cooldownUntil = new Date(Date.now() + seconds * 1000).toISOString();
+    const nowMs = Date.now();
+    // 跨函数传递绝对期限，不能把已解析的等待时长再加到另一个当前时间上。
+    const deadline = workbuddy && Number.isFinite(cooldownDeadline) && cooldownDeadline > nowMs
+      ? Math.max(nowMs + 30000, cooldownDeadline)
+      : nowMs + seconds * 1000;
+    cooldownUntil = new Date(deadline).toISOString();
   }
   const now = new Date().toISOString();
   const message = String(error || `status ${status}`).slice(0, 500);
@@ -560,6 +639,8 @@ export function markAccountFailure(provider, account, {
   const modelHealth = { ...(account.modelHealth || {}) };
   if (model) {
     const current = modelHealth[model] || {};
+    if (workbuddy && Date.parse(current.cooldownUntil) > Date.parse(cooldownUntil || now)) { cooldownUntil = current.cooldownUntil; health = "cooldown"; }
+    // 已广播的账号冷却不被其他模型的错误或刷新去活；保持原期限，只累计失败次数。
     modelHealth[model] = {
       health,
       consecutiveFailures: (current.consecutiveFailures || 0) + 1,
@@ -573,10 +654,13 @@ export function markAccountFailure(provider, account, {
     modelHealth
   };
   if (accountScoped) {
+    if (workbuddy && account.health === "cooldown" && Date.parse(account.cooldownUntil) > Date.parse(cooldownUntil || now)) { health = "cooldown"; cooldownUntil = account.cooldownUntil; }
+  }
+  if (accountScoped) {
     runtimePatch.health = health;
     runtimePatch.consecutiveFailures = failures;
     runtimePatch.lastError = message;
-    runtimePatch.cooldownUntil = cooldownUntil;
+    runtimePatch.cooldownUntil = workbuddy && Date.parse(account.cooldownUntil) > Date.parse(cooldownUntil || now) ? account.cooldownUntil : cooldownUntil;
   }
   updateAccountRuntime(provider.id, account.id, runtimePatch, { poolKind: poolKindOf(provider), home });
 }
