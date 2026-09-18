@@ -21,16 +21,42 @@ test('renderer provider/model copy controls stay outside table cell protocol mar
   assert.match(text, /function duplicateModelRow\(modelId\) \{/);
 });
 
-test('clients tab lists OpenCode, Grok, and DeepSeek Harness with stable card order', () => {
+test('clients tab derives card order from the client list single source of truth', () => {
   const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
   assert.match(html, /一键写入 \/ 恢复 Codex、Claude Code、Hermes、OpenCode、Grok Build、DeepSeek Harness 配置/);
-  assert.match(js, /const CLIENT_CARD_ORDER = \["codex", "claude-code", "hermes", "opencode", "grok", "deepseek-harness", "generic-openai"\]/);
+  // 卡片顺序必须由 client-visibility-utils.mjs 的清单派生，renderer 不再手抄第二份 id 数组
+  assert.match(js, /const CLIENT_CARD_ORDER = CLIENT_SCOPE_OPTIONS\.map\(\(\[id\]\) => id\);/);
   assert.match(js, /function orderedClientEntries\(/);
   assert.match(js, /const clients = orderedClientEntries\(config\.clients \|\| \{\}\)/);
+  // 一键写入类客户端的卡片资料（文件 / 入口 / 说明）保持手写，这里防止被误删
   assert.match(js, /opencode: \{ label: "OpenCode"/);
   assert.match(js, /grok: \{ label: "Grok Build"/);
   assert.match(js, /"deepseek-harness": \{ label: "DeepSeek Harness"/);
+});
+
+test('agent / client filter selects stay empty in markup and are filled from the client list', () => {
+  const html = fs.readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  // 这些 select 的选项只能在运行时按真源渲染；markup 里留空，否则加客户端就会漏掉某个页面
+  const runtimeFilled = [
+    'sensitive-guard-bypass-client',
+    'test-agent',
+    'usage-agent-filter',
+    'session-agent-filter',
+    'trace-agent-filter',
+    'skill-agent-filter',
+    'core-agent-filter'
+  ];
+  for (const id of runtimeFilled) {
+    assert.match(html, new RegExp(`<select[^>]*id="${id}"[^>]*><\\/select>`), `#${id} 应留空由脚本填充`);
+  }
+  assert.doesNotMatch(html, /<option value="generic-openai">/);
+  assert.match(js, /function renderClientFilterOptions\(agentRoster = \[\]\) \{/);
+  assert.match(js, /fillSelectOptions\("sensitive-guard-bypass-client", CLIENT_SCOPE_OPTIONS/);
+  assert.match(js, /\["usage-agent-filter", \{ options: CLIENT_FILTER_OPTIONS/);
+  assert.match(js, /for \(const \[id, opts\] of LOCAL_AGENT_FILTERS\) fillSelectOptions\(id, agentOptions, opts\);/);
+  assert.match(js, /invoke\("agent:definitions"\)/);
 });
 
 test('retry sections expose empty-stream retry (streamCompat) fields on both forms', () => {

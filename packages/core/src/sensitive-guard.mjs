@@ -18,6 +18,7 @@ export const SENSITIVE_GUARD_CLIENTS = [
   "opencode",
   "grok",
   "deepseek-harness",
+  "zcode",
   "generic-openai"
 ];
 

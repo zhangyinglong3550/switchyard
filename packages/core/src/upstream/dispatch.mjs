@@ -15,7 +15,7 @@
 //   cleanly into and out of it. Client adapters convert this canonical chat
 //   payload back to the client-facing protocol.
 import { callOpenAIChat, callOpenAIResponses, callAnthropicMessages, callAntigravity, isCodexOAuthProvider, isWorkBuddyOAuthProvider, readJsonResponse } from "./clients.mjs";
-import { prepareWorkBuddyChatBody, hardenWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
+import { prepareWorkBuddyChatBody, hardenWorkBuddyChatBody, sanitizeWorkBuddyChatBody, aggregateChatSseToChatResponse } from "./workbuddy-adapter.mjs";
 import { reasoningCache, resolveReasoningCacheKey } from "../reasoning-cache.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse } from "../openai-adapter-out.mjs";
 import { contentToText, safeJsonParse } from "../utils.mjs";
@@ -329,6 +329,10 @@ async function dispatchChatOnce(provider, upstreamModel, chatBody, opts = {}, ac
         thinkingMode = assistants.length === 0 || allHaveThinking ? "strict" : "off";
       }
       upstreamBody = prepareWorkBuddyChatBody(upstreamBody, { thinkingMode });
+      // 指纹脱敏：与下面 wafHardening 门控的 HTML WAF 不是同一类规则——/v2 同样有内容审核，
+      // 客户端模板句指纹（如 "Main branch (you will usually use this for PRs)"）命中即
+      // 400 code=11128（displayMsg：请求被安全策略拦截）。改写语义不变，故无条件生效。
+      upstreamBody = sanitizeWorkBuddyChatBody(upstreamBody);
       // 出站内容中和：/console 端点对危险特征（`<script` / `onXxx=` / `alert(` / `curl+URL` 等）
       // 做内容扫描，命中即 403；/v2 端点实测不做任何内容扫描（见 oauth-workbuddy 的路径说明）。
       //

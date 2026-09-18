@@ -82,6 +82,15 @@ export function agentDefinitions() {
       sessionRoots: [],
       skillRoots: ["~/.dsh/skills"],
       coreFiles: ["settings.yaml"]
+    },
+    {
+      id: "zcode",
+      label: "ZCode",
+      root: "~/.zcode",
+      // 会话不在文件里，走 ~/.zcode/cli/db/db.sqlite，见 listZcodeSessions()
+      sessionRoots: [],
+      skillRoots: ["~/.zcode/skills"],
+      coreFiles: ["cli/config.json", "v2/config.json"]
     }
   ].map((agent) => ({
     ...agent,
@@ -97,6 +106,15 @@ export function agentDefinitions() {
     ]);
   }
   return agents;
+}
+
+/**
+ * 本机 Agent 目录清单（会话 / Skills / 核心文件页面的筛选项来源）。
+ * 与网关客户端清单（client-visibility-utils.mjs 的 CLIENT_SCOPE_OPTIONS）是两个维度：
+ * 这里只列「本机真的有目录」的 Agent，generic-openai 之类没有本地目录故不出现。
+ */
+export function listAgentDefinitions() {
+  return agentDefinitions().map(({ id, label }) => ({ id, label }));
 }
 
 /** OpenCode 本机数据根（会话 / 消息 JSON），可随 SWITCHYARD_AGENT_HOME 重定向 */
@@ -196,6 +214,17 @@ function encodeHermesDbResource(root, sessionId) {
   })).toString("base64url");
 }
 
+function encodeZcodeSessionResource(sessionId) {
+  const root = expandHome("~/.zcode");
+  return Buffer.from(JSON.stringify({
+    agentId: "zcode",
+    root: path.resolve(root),
+    target: path.resolve(zcodeDbPath()),
+    source: "zcode-sqlite",
+    sessionId: String(sessionId || "")
+  })).toString("base64url");
+}
+
 function encodeOpenCodeSessionResource(sessionFile, sessionId) {
   const shareRoot = openCodeShareRoot();
   return Buffer.from(JSON.stringify({
@@ -255,6 +284,15 @@ export function resolveAgentResource(id, kind) {
     if (agent.id !== "hermes" || kind !== "session") throw new Error("资源类型不匹配");
     if (decoded.root !== hermesRoot || decoded.target !== path.join(hermesRoot, "state.db")) throw new Error("Hermes 会话库路径不受管理");
     assertInsideRoot(decoded.root, decoded.target);
+    return { ...decoded, agent };
+  }
+  if (decoded.source === "zcode-sqlite") {
+    const zcodeRoot = expandHome("~/.zcode");
+    if (agent.id !== "zcode" || kind !== "session") throw new Error("资源类型不匹配");
+    if (path.resolve(decoded.root) !== path.resolve(zcodeRoot) || path.resolve(decoded.target) !== path.resolve(zcodeDbPath())) {
+      throw new Error("ZCode 会话库路径不受管理");
+    }
+    if (!decoded.sessionId) throw new Error("ZCode 会话 ID 无效");
     return { ...decoded, agent };
   }
   if (decoded.source === "opencode-storage") {
@@ -341,6 +379,7 @@ export function listAgentSessions({ agentId = "", source = "", includeAllSources
     }
     if (agent.id === "hermes") rows.push(...listHermesDbSessions());
     if (agent.id === "opencode") rows.push(...listOpenCodeSessions({ source: sourceFilter, includeAllSources }));
+    if (agent.id === "zcode") rows.push(...listZcodeDbSessions());
   }
   rows.sort((a, b) => String(b.mtime).localeCompare(String(a.mtime)));
   // 应用本机自定义会话名（不改底层 id/路径）
@@ -362,6 +401,11 @@ function sqlValue(value) {
 
 function hermesStateDb() {
   return path.join(expandHome("~/.hermes"), "state.db");
+}
+
+/** ZCode 会话库（SQLite，session / message / part 三表，与 OpenCode 同源 schema） */
+function zcodeDbPath() {
+  return path.join(expandHome("~/.zcode"), "cli", "db", "db.sqlite");
 }
 
 function isoFromUnixSeconds(value) {
@@ -403,6 +447,154 @@ function listHermesDbSessions() {
   }));
 }
 
+/**
+ * ZCode 会话列表。
+ * ZCode 把会话存在 ~/.zcode/cli/db/db.sqlite（session / message / part，schema 与 OpenCode 同源），
+ * 而不是像 Codex/Claude 那样一个会话一个文件，所以单列一条 SQLite 通道。
+ * 默认隐藏 subagent_child：那是主会话派生的子任务，混在列表里会淹没真正的会话。
+ */
+function listZcodeDbSessions() {
+  const root = expandHome("~/.zcode");
+  const db = zcodeDbPath();
+  if (!safeStat(db)?.isFile()) return [];
+  let rows = [];
+  try {
+    rows = runSqliteJson(db, `
+      SELECT s.id, s.slug, s.directory, s.title, s.time_created, s.time_updated,
+             (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS message_count
+      FROM session s
+      WHERE s.time_archived IS NULL AND s.task_type <> 'subagent_child'
+      ORDER BY s.time_updated DESC
+      LIMIT 500;
+    `);
+  } catch {
+    return [];
+  }
+  return rows.map((row) => ({
+    id: encodeZcodeSessionResource(row.id),
+    agentId: "zcode",
+    agentLabel: "ZCode",
+    name: row.title || row.slug || row.id,
+    relativePath: `db.sqlite#${row.id}`,
+    path: db,
+    root,
+    source: "zcode-sqlite",
+    sessionId: row.id,
+    model: "",
+    directory: row.directory || "",
+    size: Number(row.message_count || 0),
+    messageCount: Number(row.message_count || 0),
+    mtime: isoFromMs(row.time_updated || row.time_created) || new Date(0).toISOString()
+  }));
+}
+
+// 会话详情按窗口取尾部：单个会话可达 3 万条 part / 30 MB，全量读会撑爆 sqlite3 输出。
+const ZCODE_MESSAGE_LIMIT = 400;
+const ZCODE_PART_LIMIT = 1200;
+
+function zcodeMessageRows(db, sessionId) {
+  try {
+    const rows = runSqliteJson(db, `
+      SELECT id, data FROM message
+      WHERE session_id = ${sqlValue(sessionId)}
+      ORDER BY time_created DESC, id DESC
+      LIMIT ${ZCODE_MESSAGE_LIMIT};
+    `);
+    return rows
+      .map((row) => {
+        const data = parseJsonText(row.data);
+        if (!data || typeof data !== "object") return null;
+        // OpenCode 把 id 写进了 data，ZCode 的 id 只在列上；这里补齐，好复用同一套 part 解析
+        return { id: row.id, data: { ...data, id: row.id } };
+      })
+      .filter(Boolean)
+      .reverse();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * part 是会话正文（text / reasoning / tool / step-*），单条最大 1.3 MB，
+ * 因此只挑渲染需要的字段并在 SQL 侧截断，保证返回体有界。
+ * ponytail: text 8000 / output 4000 / input 1500 字符是显示上限，超长工具输出在会话页看不全，需要全文走「调用透视」的请求体落盘。
+ */
+function zcodePartsByMessage(db, sessionId) {
+  const out = new Map();
+  let rows = [];
+  try {
+    rows = runSqliteJson(db, `
+      SELECT message_id,
+             json_extract(data,'$.type') AS type,
+             json_extract(data,'$.tool') AS tool,
+             json_extract(data,'$.state.status') AS status,
+             json_extract(data,'$.time.start') AS start_at,
+             substr(COALESCE(json_extract(data,'$.text'), ''), 1, 8000) AS text,
+             substr(COALESCE(json_extract(data,'$.state.input'), ''), 1, 1500) AS input,
+             substr(COALESCE(json_extract(data,'$.state.output'), ''), 1, 4000) AS output
+      FROM part
+      WHERE session_id = ${sqlValue(sessionId)}
+      ORDER BY time_created DESC, id DESC
+      LIMIT ${ZCODE_PART_LIMIT};
+    `);
+  } catch {
+    return out;
+  }
+  // SQL 侧按时间倒序取的尾部，这里翻回正序，保证同一 message 内 part 顺序正确
+  for (const row of rows.reverse()) {
+    const list = out.get(row.message_id) || [];
+    list.push({
+      type: row.type || "",
+      tool: row.tool || "",
+      text: row.text || "",
+      time: { start: Number(row.start_at) || 0 },
+      state: {
+        status: row.status || "",
+        input: parseJsonText(row.input || ""),
+        output: parseJsonText(row.output || "")
+      }
+    });
+    out.set(row.message_id, list);
+  }
+  return out;
+}
+
+function readZcodeDbSession(id) {
+  const resource = resolveAgentResource(id, "session");
+  const db = resource.target;
+  const sessionId = resource.sessionId;
+  let meta = { id: sessionId };
+  try {
+    const rows = runSqliteJson(db, `
+      SELECT id, slug, project_id, directory, title, time_created, time_updated
+      FROM session WHERE id = ${sqlValue(sessionId)} LIMIT 1;
+    `);
+    if (rows[0]) meta = rows[0];
+  } catch {
+    meta = { id: sessionId };
+  }
+  const messages = zcodeMessageRows(db, sessionId);
+  const partsByMessage = zcodePartsByMessage(db, sessionId);
+  const conversationMessages = parseOpenCodeConversation(messages, (messageId) => partsByMessage.get(messageId));
+  const text = JSON.stringify({ session: meta, messageCount: messages.length }, null, 2);
+  return {
+    ...resource,
+    text,
+    name: meta.title || meta.slug || sessionId,
+    title: meta.title || "",
+    directory: meta.directory || "",
+    truncated: messages.length >= ZCODE_MESSAGE_LIMIT,
+    size: text.length,
+    mtime: isoFromMs(meta.time_updated || meta.time_created) || null,
+    conversation: {
+      format: "zcode-sqlite",
+      count: conversationMessages.length,
+      truncated: conversationMessages.length > MAX_CONVERSATION_MESSAGES,
+      messages: conversationMessages.slice(-MAX_CONVERSATION_MESSAGES)
+    }
+  };
+}
+
 function isoFromMs(value) {
   const n = Number(value || 0);
   if (!Number.isFinite(n) || n <= 0) return null;
@@ -414,6 +606,14 @@ function readJsonFileMaybe(file) {
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return null;
+  }
+}
+
+function parseJsonText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
 }
 
@@ -529,13 +729,13 @@ function openCodePartText(part) {
   return "";
 }
 
-function parseOpenCodeConversation(messages) {
+function parseOpenCodeConversation(messages, partsForMessage = listOpenCodePartsForMessage) {
   const out = [];
   for (const item of messages) {
     const msg = item.data || item;
     const role = normalizeRole(msg.role);
     const timestamp = isoFromMs(msg.time?.created || msg.time?.completed);
-    const parts = listOpenCodePartsForMessage(msg.id);
+    const parts = partsForMessage(msg.id) || [];
     if (!parts.length) {
       const fallback = msg.summary?.title || msg.error?.message || "";
       if (fallback) pushMessage(out, { role, text: fallback, timestamp, kind: msg.role || "message" });
@@ -623,6 +823,7 @@ export function readAgentSession(id) {
   let row;
   if (decoded.source === "hermes-state-db") row = readHermesDbSession(id);
   else if (decoded.source === "opencode-storage") row = readOpenCodeSession(id);
+  else if (decoded.source === "zcode-sqlite") row = readZcodeDbSession(id);
   else {
     const resource = resolveAgentResource(id, "session");
     if (resource.agent.id === "grok" && path.basename(resource.target) === "summary.json") {

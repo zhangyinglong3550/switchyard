@@ -20,7 +20,7 @@ import {
   WORKBUDDY_BASE_URL
 } from "../src/account-pool/index.mjs";
 import { providerAuthHeaders, providerReady, callOpenAIChat } from "../src/upstream/clients.mjs";
-import { prepareWorkBuddyChatBody, hardenWorkBuddyChatBody, aggregateChatSseToChatResponse, normalizeWorkBuddyStreamLine } from "../src/upstream/workbuddy-adapter.mjs";
+import { prepareWorkBuddyChatBody, hardenWorkBuddyChatBody, sanitizeWorkBuddyChatBody, aggregateChatSseToChatResponse, normalizeWorkBuddyStreamLine } from "../src/upstream/workbuddy-adapter.mjs";
 import { dispatchChat } from "../src/upstream/dispatch.mjs";
 import { mergeWithDefaults } from "../src/config.mjs";
 import { getProviderPreset } from "../src/provider-presets.mjs";
@@ -772,6 +772,87 @@ test("workbuddy 出站硬化 · 破坏危险特征标点，放行面原样保留
   assert.equal(fields.messages[0].reasoning_content, "先 onload\uff1dx 再说");
   assert.equal(fields.messages[0].reasoning, "再 f''etch https://a.com");
   assert.equal(fields.messages[1].tool_calls[0].function.arguments, '{"c":"\u2039script>"}');
+});
+
+// 上游内容审核指纹：按**逐字精确匹配**拦截 CLI 模板句（非语义审核），命中即
+// 400 code=11128（displayMsg：请求被安全策略拦截）。规则表对齐参考实现
+// workbuddy2api/internal/upstream/sanitize.go。
+// 2026-09-18 实测：ZCode 的 system prompt 含 "Main branch (you will usually use this for PRs)"，
+// 真实请求体 1:1 重放（直连 /v2 与经网关两条路径）必 400；仅替换该句即 200。
+// 同一出口下 Cursor 正常，即因它的 prompt 不含该句。
+// 注意 /v2 端点此前被认为「不做内容扫描」——本类规则推翻了这个假设。
+test("workbuddy 出站脱敏 · 逐字改写模板句指纹，无关文本零改动", () => {
+  const strip = (content) =>
+    sanitizeWorkBuddyChatBody({ messages: [{ role: "user", content }] }).messages[0].content;
+
+  // 改写层：每句只换一个词，语义不变。
+  assert.equal(
+    strip("Main branch (you will usually use this for PRs): main"),
+    "Default branch (you will usually use this for PRs): main"
+  );
+  assert.equal(
+    strip("You are Claude Code, Anthropic's official CLI for Claude."),
+    "You are Claude Code, Anthropic's official CLI tool for Claude."
+  );
+  assert.equal(
+    strip("You are a coding agent running in the Codex CLI, a terminal-based coding assistant."),
+    "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
+  );
+  assert.equal(
+    strip("To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"),
+    "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"
+  );
+  // 反探测：请求体里出现裸数字 11128 即整单拦截，而它正是本类拦截自身的错误码。
+  assert.equal(strip("网关返回 11128"), "网关返回 11-128");
+  assert.equal(strip("相邻错误码 11148 / 11101 不受影响"), "相邻错误码 11148 / 11101 不受影响");
+
+  // 剥离层：header 键值段整段删除，残留裸键名做最小缩写。
+  assert.equal(strip("cfg: x-anthropic-billing-header: abc123; tail"), "cfg: tail");
+  assert.equal(strip("X-Anthropic-Billing-Header"), "x-anthropic-billing-hdr");
+  // cc_* 尾随裸键值循环清理。
+  assert.equal(strip("cc_version=1.0.3; cc_entrypoint=cli; done"), "done");
+
+  // 放行面：不含任何指纹的文本必须原样保留（含大小写相近的普通表达）。
+  for (const safe of [
+    "main branch 上的 PR 怎么合",
+    "You are a helpful assistant.",
+    "错误码 11101 / 11155",
+    "You are Claude",
+    "x-anthropic-billing"
+  ]) {
+    assert.equal(strip(safe), safe, `放行面被误改：${safe}`);
+  }
+
+  // 字段覆盖：可携带语义文本的字段都要走到；图片 data URL 不是语义文本，原样保留。
+  const body = {
+    messages: [
+      { role: "system", content: [{ type: "text", text: "Main branch (you will usually use this for PRs)" }] },
+      { role: "assistant", content: "没事", reasoning_content: "先看 11128 是什么", reasoning: "再看 Main branch (you will usually use this for PRs)" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "查一下 11128" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,11128" } }
+        ],
+        tool_calls: [{ id: "c1", function: { name: "shell", arguments: '{"c":"echo 11128"}' } }]
+      }
+    ]
+  };
+  const original = JSON.parse(JSON.stringify(body));
+  const sanitized = sanitizeWorkBuddyChatBody(body);
+
+  assert.equal(sanitized.messages[0].content[0].text, "Default branch (you will usually use this for PRs)");
+  assert.equal(sanitized.messages[1].reasoning_content, "先看 11-128 是什么");
+  assert.equal(sanitized.messages[1].reasoning, "再看 Default branch (you will usually use this for PRs)");
+  assert.equal(sanitized.messages[2].content[0].text, "查一下 11-128");
+  assert.equal(sanitized.messages[2].content[1].image_url.url, "data:image/png;base64,11128");
+  assert.equal(sanitized.messages[2].tool_calls[0].function.arguments, '{"c":"echo 11-128"}');
+
+  // 无 messages 时原样返回，不凭空加字段。
+  assert.deepEqual(sanitizeWorkBuddyChatBody({ model: "m" }), { model: "m" });
+
+  // 不可变：调用方传入的请求体不被改写。
+  assert.deepEqual(body, original);
 });
 
 test("workbuddy preset/config · 默认指向真实海外域与 Chat 协议", () => {

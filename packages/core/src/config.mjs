@@ -14,7 +14,7 @@ export const SUPPORTED_API_FORMATS = new Set([
 ]);
 export const SUPPORTED_ROUTING_MODES = new Set(["auto", "native", "gateway"]);
 
-export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "claude-app", "hermes", "opencode", "grok", "deepseek-harness", "generic-openai"]);
+export const SUPPORTED_CLIENTS = new Set(["codex", "claude-code", "claude-app", "hermes", "opencode", "grok", "deepseek-harness", "zcode", "generic-openai"]);
 
 export const DEFAULT_CONFIG = {
   host: "127.0.0.1",
@@ -33,6 +33,7 @@ export const DEFAULT_CONFIG = {
     opencode: { enabled: true, allowedModels: ["*"], defaultModel: null },
     grok: { enabled: true, allowedModels: ["*"], defaultModel: null },
     "deepseek-harness": { enabled: true, allowedModels: ["*"], defaultModel: null },
+    zcode: { enabled: true, allowedModels: ["*"], defaultModel: null },
     "generic-openai": { enabled: true, allowedModels: ["*"], defaultModel: null }
   }
 };

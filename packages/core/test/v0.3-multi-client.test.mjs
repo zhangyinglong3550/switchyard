@@ -155,3 +155,61 @@ test("v0.3 · per-client visibility filters do hide models", async (t) => {
   });
   assert.equal(bad.status, 400);
 });
+
+test("zcode · 独立客户端维度：独占路由 + 独立模型可见性", async (t) => {
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ id: "x", choices: [{ message: { role: "assistant", content: "pong" } }] }));
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  const upPort = upstream.address().port;
+
+  writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [
+      { id: "p/zcode-only", providerId: "p", upstreamModel: "m1" },
+      { id: "p/cc-only", providerId: "p", upstreamModel: "m2" }
+    ],
+    clients: {
+      zcode: { enabled: true, allowedModels: ["p/zcode-only"] },
+      "claude-code": { enabled: true, allowedModels: ["p/cc-only"] },
+      "generic-openai": { enabled: true, allowedModels: ["*"] }
+    }
+  });
+
+  const server = createServer();
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(async () => {
+    await close(server);
+    await close(upstream);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  // /zcode 前缀被识别为独立 clientId，只发布该维度允许的模型
+  const zcode = await fetchJson(`${base}/zcode/v1/models`);
+  assert.equal(zcode.status, 200);
+  assert.deepEqual(zcode.body.data.map((m) => m.id), ["p/zcode-only"]);
+
+  // 通用入口仍看到全部模型，证明可见性按客户端维度隔离
+  const generic = await fetchJson(`${base}/v1/models`);
+  assert.equal(generic.body.data.length, 2);
+
+  // /zcode/v1/chat/completions 走 OpenAI Chat 直通
+  const ok = await fetchJson(`${base}/zcode/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "p/zcode-only", messages: [{ role: "user", content: "hi" }] })
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.choices[0].message.content, "pong");
+
+  // 跨维度越权在路由期被拒
+  const denied = await fetchJson(`${base}/zcode/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "p/cc-only", messages: [{ role: "user", content: "x" }] })
+  });
+  assert.equal(denied.status, 400);
+});

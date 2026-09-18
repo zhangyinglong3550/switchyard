@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.3.14 — 2026-09-18
+
+### Fixed
+
+- **ZCode 经网关调用 WorkBuddy 模型稳定 400 `code=11128`**（`displayMsg`：请求被安全策略拦截）。根因是上游对**客户端模板句指纹**的逐字匹配审核，与 2.3.12 处理的 `/console` HTML WAF **不是同一类规则**，`/v2` 同样生效，因此此前「global 走 `/v2` 就不需要净化」的结论在本类规则上不成立。
+  - 触发串：ZCode 的 system prompt 含 Codex 系环境块 `Main branch (you will usually use this for PRs)`。同一网关出口下 Cursor 正常，正是因为它的 prompt 不含该句——**与 provider / 账号 / tools 数量无关**。
+  - 证据链：真实请求体 1:1 重放（直连 `/v2` 与经网关两条路径）均 400；对 system prompt 做前缀二分定位到该句；仅替换该句即 200。同一请求打到修复前构建 400、打到含修复的源码网关 200。
+  - 修复：新增 `sanitizeWorkBuddyChatBody`（对齐参考实现 `Sliverkiss/workbuddy2api` 的 `internal/upstream/sanitize.go`），在 `dispatch.mjs` 的 workbuddy 出站管线中**无条件**执行——与 `wafHardening` 门控的 HTML WAF 分开，因为本类规则在 `/v2` 必现，且改写语义不变。
+
+### Added
+
+- **出站指纹脱敏规则表**（`workbuddy-adapter.mjs`）。审核按**逐字精确匹配**（非语义审核），故改写策略是「每句只换一个词、语义不变」：
+  - 改写层：`Main branch (you will usually use this for PRs)` → `Default branch (…)`；`You are Claude Code, Anthropic's official CLI for Claude` → `…official CLI tool for Claude`；`You are a coding agent running in the Codex CLI, a terminal-based coding assistant.` → `…Codex CLI tool, …`；`To give feedback, users should report the issue at …` → `To provide feedback, …`；裸数字 `11128` → `11-128`（上游只要请求体里出现 `11128` 就整单拦截，而它正是本类拦截自身的错误码，故讨论该错误码的会话不改写必然失败）。
+  - 剥离层：`x-anthropic-billing-header: …;` 键值段整段删除，残留裸键名缩写成 `x-anthropic-billing-hdr`；`cc_xxx=…;` 尾随键值循环清理。
+  - 扫描面：`content`（含数组形态 `text` 分片）、`reasoning_content`、`reasoning`、`tool_calls[].function.arguments`；`tools` 定义与图片 data URL 不动。带特征预检快路径，未命中即返回原值以保持引用相等。
+
+### Changed
+
+- **面板客户端清单收敛为单一真源**，修复 2.3.13 遗留的「请求列表 / 用量 / 会话等页面没有 ZCode 选项」。此前 `client-visibility-utils.mjs` 虽是清单真源，但 `renderer.js` 另存 7 份手抄映射表（卡片顺序、脱敏标签、`agentLabel` 内联表等），`index.html` 另存 7 处手抄 `<option>` 副本，加客户端只会改到其中一份。
+  - `client-visibility-utils.mjs`：新增 `CLIENT_LABELS` / `clientDisplayLabel()` / `CLIENT_FILTER_OPTIONS`（真实客户端 + `model-test` 这类只落库、不可接入的伪 clientId）。
+  - `renderer.js`：删除重复表，改为两张派生表——`RUNTIME_CLIENT_FILTERS`（请求日志 / 用量 / 测试台 / 脱敏放行，取自客户端真源）与 `LOCAL_AGENT_FILTERS`（会话 / Skills / 核心文件 / Skill 复制安装目标，取自主进程 `agent:definitions` 的本地 Agent 目录）；客户端卡片标题与顺序同样改为派生。
+  - `index.html`：删除 7 处硬编码 `<option>`，只留空 `<select>` 由脚本填充。`plugin-agent-filter` 保留 `claude-code` 单值，因为 `agent-plugins.mjs` 明确只支持 Claude Code。
+  - 两个维度刻意不合并：「运行时入口」（含 `generic-openai`，本机无目录）与「本机 Agent 目录」（含 `zcode`，不含 `generic-openai`）。
+
+### Tests
+
+- `npm test` 纳入 `apps/desktop/renderer/*.test.mjs`（此前 `renderer-structure.test.mjs` 不在测试范围内，真源改动不会被拦截）；`client-visibility-utils.test.mjs` 新增清单唯一性、伪 clientId 不泄漏成接入目标、未知 id 回退、ZCode 作用域四组用例。全量 851 用例通过。
+- `workbuddy-account-pool.test.mjs` 新增用例覆盖五条改写、三类剥离、放行面（`main branch 上的 PR 怎么合` / `错误码 11101` / `You are Claude` 等不被误改）、字段覆盖与图片分片保留、无 `messages` 原样返回、调用方请求体不被改写。
+
+## 2.3.13 — 2026-09-18
+
+### Added
+
+- **ZCode 成为独立客户端维度**：`zcode` 现在与 Codex / Claude Code / DeepSeek Harness 同级，不再是混在通用 `/v1` 入口里、`clientId` 为空的匿名流量。
+  - 网关：新增路由前缀 `/zcode/v1`（`CLIENT_PREFIXES`），请求按 `clientId=zcode` 归集；协议沿用 OpenAI Chat 直通，无需新增适配器。
+  - 配置：`SUPPORTED_CLIENTS` 与默认 `clients.zcode`（`enabled` / `allowedModels` / `defaultModel`）就位，`config.example.json` 同步；`mergeWithDefaults` 保证旧配置无需手工改写即可获得该维度。
+  - 面板：客户端卡片（排序紧随 DeepSeek Harness）、概览页接入地址 `http://127.0.0.1:17888/zcode/v1`、会话/日志标签、模型「Agent 范围」多选、脱敏面板标签、测试控制台前缀均已登记。
+  - 范围界定：ZCode 暂无「一键写入配置」，卡片只提供启用状态与默认模型控制（Base URL 由 ZCode 侧自行填写），因此不进 `PROFILE_META`；诊断页也不列 ZCode——诊断卡片依赖可探测的本地配置文件，ZCode 未提供，避免出现空卡片。
+
+### Tests
+
+- `packages/core/test/v0.3-multi-client.test.mjs` 新增 ZCode 维度用例：`/zcode/v1/models` 只发布该维度允许的模型、通用入口仍看到全部模型（证明可见性隔离）、`/zcode/v1/chat/completions` 直通 200、跨维度越权在路由期 400。
+- `renderer-structure.test.mjs` 的客户端卡片顺序断言同步更新。全量 833 用例通过。
+
 ## 2.3.12 — 2026-09-18
 
 ### Fixed
@@ -31,7 +75,7 @@
 
 - 排障过程证伪了「身份 / 指纹 / 请求头」方向：把真实失败会话的完整出站 body 直打上游、只切换头组做了五组 A/B（现状头、参考项目完整身份头组、仅归属头、原始未硬化 body × 两组头）——**五组全部 403**，头组不是变量。
 - 也推翻了「组合规则」的早期判断：`[system, assistant(tool_calls)]` 两条消息即 403，清空 `tool_calls` 立刻 200，说明 `tool_calls[].function.arguments` 单独存在就触发，不需要「外部大段内容 + 思考链动词」同时出现。
-- 参考项目 `BulidH/workbuddy2api` 的 `internal/upstream/sanitize.go` 处理的是 **Claude Code / Codex CLI 模板句指纹**（`You are Claude Code`、`x-anthropic-billing-header`、`Main branch (`、裸数字 `11128`），与本文的危险函数族不是同一类规则。它「能请求」是因为 CN realm 走 `/v2`，而非解决了内容扫描问题。
+- 参考项目 `BulidH/workbuddy2api` 的 `internal/upstream/sanitize.go` 处理的是 **Claude Code / Codex CLI 模板句指纹**（`You are Claude Code`、`x-anthropic-billing-header`、`Main branch (`、裸数字 `11128`），与本文的危险函数族不是同一类规则。**当时判断「它只是为了绕开 `/console`」是错的**：该指纹族在 `/v2` 同样生效，本项目当时未移植，直接导致 2.3.14 的 ZCode 400 问题。
 - 硬化代码保留但默认不执行：`/v2` 若被上游下线、回退到 `/console` 时，可打开 `wafHardening` 兜底。
 
 ### Tests

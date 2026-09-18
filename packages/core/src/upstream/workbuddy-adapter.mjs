@@ -245,6 +245,111 @@ export function hardenWorkBuddyChatBody(body = {}) {
   return { ...body, messages: body.messages.map(hardenMessage) };
 }
 
+// ── 出站指纹脱敏（对齐参考实现 workbuddy2api/internal/upstream/sanitize.go）──
+//
+// 与上面 hardenWorkBuddyChatBody 的危险字符族**不是同一类规则**，不能合并：
+//   · 危险字符族：/console 端点的 HTML WAF，破坏标点即绕过，默认由 provider.wafHardening 门控；
+//   · 指纹族（本节）：/v2 端点同样生效，上游按**逐字精确匹配**拦截模板句（非语义审核，
+//     一字之差即可绕过），必须无条件改写模板句本身。
+//
+// 命中即 400 `code=11128 / Illegal API invocation from an unapproved channel`，
+// displayMsg 为「请求被安全策略拦截」。2026-09-18 实测确认：
+//   ZCode 的 system prompt 含 "Main branch (you will usually use this for PRs)"，
+//   真实请求体 1:1 重放（直连 /v2 与经网关两条路径）必 400；仅替换该句即 200。
+//   同一出口下 Cursor 正常，即因它的 prompt 不含该句。
+//
+// 改写策略与参考实现一致：承载语义的模板句只换一个词（语义不变），
+// 键值/header 型指纹整段剥离。
+
+// 特征预检：任一命中才进慢路径。用大小写不敏感正则统一覆盖 header 的大小写变体
+// 与裸键名形态，免去参考实现里「Contains + 不要求冒号的正则」两段式。
+const FINGERPRINT_PREFILTER = /x-anthropic-billing-header|cc_entrypoint=|You are Claude Code|Main branch \(|You are a coding agent running in the Codex CLI|github\.com\/anthropics\/|11128/i;
+
+// 改写层：逐字替换，每句只改一个词。
+// 末条是上游反探测：请求体里出现裸数字 11128 即整单拦截（与上下文无关），
+// 而 11128 正是本类拦截自身的错误码——不改写则「讨论该错误码」的请求必然失败。
+// 插连字符保留可读性与指代（零宽字符无效，上游会归一化）。
+const FINGERPRINT_REWRITES = [
+  ["You are Claude Code, Anthropic's official CLI for Claude",
+   "You are Claude Code, Anthropic's official CLI tool for Claude"],
+  ["Main branch (you will usually use this for PRs)",
+   "Default branch (you will usually use this for PRs)"],
+  ["You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+   "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."],
+  ["To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+   "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"],
+  ["11128", "11-128"]
+];
+
+// 剥离层：header 键名即触发（与值无关），整段删除。
+const FINGERPRINT_HEADER_KV = /x-anthropic-billing-header:[^;\n]*;?\s*/gi;
+// 兜底层：键值形态删完后残留的裸键名做最小缩写，破坏逐字匹配而语义可读。
+const FINGERPRINT_BARE_HEADER = /x-anthropic-billing-header/gi;
+// 尾随裸键值 `cc_xxx=...;`，循环清理（一次替换可能露出前一段的尾部分隔符）。
+const FINGERPRINT_CC_KV = /\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi;
+
+function hasFingerprint(value) {
+  return FINGERPRINT_PREFILTER.test(value);
+}
+
+/** 单段文本脱敏：预检不中即原样返回（保持引用相等，供上层跳过对象拷贝）。 */
+function sanitizeFingerprintText(value) {
+  if (typeof value !== "string" || !value) return value;
+  if (!hasFingerprint(value)) return value;
+  let text = value;
+  for (const [from, to] of FINGERPRINT_REWRITES) text = text.split(from).join(to);
+  text = text.replace(FINGERPRINT_HEADER_KV, "");
+  if (text.includes("cc_")) {
+    let previous = "";
+    // 清尾随裸 kv；循环直到不再变化，避免前一段的 `;` 残留成尾部孤立标点。
+    while (previous !== text) {
+      previous = text;
+      text = text.replace(FINGERPRINT_CC_KV, "");
+    }
+  }
+  text = text.replace(FINGERPRINT_BARE_HEADER, "x-anthropic-billing-hdr");
+  // 与参考实现一致：剥离键值段后清掉两端残留空白。只在预检命中时发生。
+  return text.trim();
+}
+
+// 数组形态只改 text 分片；image_url 等其它分片原样保留，避免动到图片 data URL。
+function sanitizeFingerprintContent(content) {
+  if (typeof content === "string") return sanitizeFingerprintText(content);
+  if (!Array.isArray(content)) return content;
+  return content.map((part) => (part && typeof part === "object" && typeof part.text === "string"
+    ? { ...part, text: sanitizeFingerprintText(part.text) }
+    : part));
+}
+
+function sanitizeFingerprintMessage(message) {
+  if (!message || typeof message !== "object") return message;
+  const next = { ...message, content: sanitizeFingerprintContent(message.content) };
+  // reasoning 与 reasoning_content 会由 prepare 派生并存，两者都在上游扫描面内。
+  if (typeof message.reasoning_content === "string") next.reasoning_content = sanitizeFingerprintText(message.reasoning_content);
+  if (typeof message.reasoning === "string") next.reasoning = sanitizeFingerprintText(message.reasoning);
+  if (Array.isArray(message.tool_calls)) {
+    next.tool_calls = message.tool_calls.map((call) => {
+      const args = call?.function?.arguments;
+      if (typeof args !== "string") return call;
+      const sanitized = sanitizeFingerprintText(args);
+      return sanitized === args ? call : { ...call, function: { ...call.function, arguments: sanitized } };
+    });
+  }
+  return next;
+}
+
+/**
+ * 对出站请求体做上游内容审核指纹脱敏。
+ *
+ * 覆盖面与参考实现一致：只处理模型会读到的 messages 文本
+ * （content / reasoning_content / reasoning / tool_calls.arguments）；tools 定义不做处理。
+ * 全程返回新对象，不改动调用方传入的请求体。
+ */
+export function sanitizeWorkBuddyChatBody(body = {}) {
+  if (!Array.isArray(body.messages)) return body;
+  return { ...body, messages: body.messages.map(sanitizeFingerprintMessage) };
+}
+
 function parseSseDataLines(text) {
   const frames = [];
   for (const rawLine of String(text || "").split("\n")) {

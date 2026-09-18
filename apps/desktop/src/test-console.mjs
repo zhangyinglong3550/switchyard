@@ -57,6 +57,7 @@ export function clientPrefix(clientId) {
     opencode: "/opencode",
     grok: "/grok",
     "deepseek-harness": "/deepseek-harness",
+    zcode: "/zcode",
     "generic-openai": ""
   };
   return map[clientId] ?? "";

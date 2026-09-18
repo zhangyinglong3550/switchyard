@@ -61,6 +61,8 @@ const CLIENT_PREFIXES = [
   // DeepSeek Harness uses its own OpenAI-compatible route so its client-level
   // model visibility is independent from generic OpenAI clients.
   { prefix: "/deepseek-harness", clientId: "deepseek-harness" },
+  // ZCode 同样是 OpenAI Chat 客户端，独立前缀让它的模型可见性不跟通用入口共享。
+  { prefix: "/zcode", clientId: "zcode" },
   { prefix: "/openai", clientId: "generic-openai" },
   { prefix: "/anthropic", clientId: "generic-openai" }
 ];

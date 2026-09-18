@@ -51,6 +51,7 @@ import {
   setKeychainSecret
 } from "./keychain-store.mjs";
 import {
+  listAgentDefinitions,
   listAgentSessions,
   readAgentSession,
   renameAgentSession,
@@ -1682,6 +1683,7 @@ ipcMain.handle("logs:open-file", async () => {
   await shell.openPath(file);
   return file;
 });
+ipcMain.handle("agent:definitions", () => listAgentDefinitions());
 ipcMain.handle("agent:sessions:list", (_e, filters = {}) => listAgentSessions(filters));
 ipcMain.handle("agent:sessions:read", (_e, { id }) => readAgentSession(id));
 ipcMain.handle("agent:sessions:rename", (_e, { id, title } = {}) => renameAgentSession(id, title));

@@ -1,6 +1,8 @@
 import { filterDiscoveryModels } from "./discovery-filter.mjs";
 import {
+  CLIENT_FILTER_OPTIONS,
   CLIENT_SCOPE_OPTIONS,
+  clientDisplayLabel,
   clientScopeLabel,
   modelsForClient as visibleModelsForClient,
   normalizeClientScope
@@ -356,6 +358,55 @@ function collectClientScopeOptions(containerId) {
   return checked;
 }
 
+/**
+ * 用 [[value,label], …] 填充 select，尽量保留当前选中值。
+ * allLabel 非空时在首部插入「全部」项（allValue 决定其 value）。
+ */
+function fillSelectOptions(selectOrId, options, { allLabel = "", allValue = "", defaultValue = null } = {}) {
+  const el = typeof selectOrId === "string" ? document.getElementById(selectOrId) : selectOrId;
+  if (!el) return;
+  const rows = (allLabel ? [[allValue, allLabel]] : []).concat(options || []);
+  if (!rows.length) return;
+  const previous = defaultValue ?? el.value;
+  el.innerHTML = rows
+    .map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`)
+    .join("");
+  if (rows.some(([value]) => value === previous)) el.value = previous;
+}
+/**
+ * 按「运行时入口」筛选的 select：取值来自网关客户端清单（CLIENT_SCOPE_OPTIONS）唯一真源。
+ * 新增客户端只需改 client-visibility-utils.mjs，这里不用动。
+ */
+const RUNTIME_CLIENT_FILTERS = [
+  // 测试台默认打通用入口，保持原有默认值；只能选真实客户端
+  ["test-agent", { options: CLIENT_SCOPE_OPTIONS, defaultValue: "generic-openai" }],
+  // 用量 / 请求日志是按落库数据筛选，需要能筛到 model-test 这类伪 clientId
+  ["usage-agent-filter", { options: CLIENT_FILTER_OPTIONS, allLabel: "全部 Agent" }],
+  ["trace-agent-filter", { options: CLIENT_FILTER_OPTIONS, allLabel: "全部 Agent" }]
+];
+
+/**
+ * 按「本机 Agent 目录」筛选的 select：取值来自主进程 agentDefinitions（经 agent:definitions IPC）。
+ * 与运行时清单是两个维度——像 generic-openai 没有本地目录，就不该出现在这些页面。
+ */
+const LOCAL_AGENT_FILTERS = [
+  ["session-agent-filter", { allLabel: "全部 Agent" }],
+  ["skill-agent-filter", { allLabel: "全部 Agent" }],
+  ["core-agent-filter", { defaultValue: "codex" }],
+  ["skill-link-target", { defaultValue: "codex" }],
+  ["skillhub-install-target", { defaultValue: "codex" }]
+];
+
+/** 初始化各页面的 Agent / 客户端筛选项；agentRoster 为 agent:definitions 的返回值 */
+function renderClientFilterOptions(agentRoster = []) {
+  for (const [id, { options = CLIENT_SCOPE_OPTIONS, ...opts }] of RUNTIME_CLIENT_FILTERS) {
+    fillSelectOptions(id, options, opts);
+  }
+  fillSelectOptions("sensitive-guard-bypass-client", CLIENT_SCOPE_OPTIONS, { allLabel: "全部", allValue: "*", defaultValue: "*" });
+  const agentOptions = agentRoster.map((agent) => [agent.id, agent.label]);
+  for (const [id, opts] of LOCAL_AGENT_FILTERS) fillSelectOptions(id, agentOptions, opts);
+}
+
 function startOfLocalDay(date = new Date()) {
   const d = new Date(date);
   d.setHours(0, 0, 0, 0);
@@ -514,18 +565,20 @@ function initUiDensityToggle() {
 }
 
 async function refreshAll() {
-  const [config, status, configPath, presets, providerHealth] = await Promise.all([
+  const [config, status, configPath, presets, providerHealth, agentRoster] = await Promise.all([
     invoke("config:read"),
     invoke("gateway:status"),
     invoke("config:file"),
     invoke("provider:presets"),
-    invoke("provider-health:list").catch(() => ({}))
+    invoke("provider-health:list").catch(() => ({})),
+    invoke("agent:definitions").catch(() => [])
   ]);
   state.config = config;
   state.status = status;
   state.configPath = configPath;
   state.providerPresets = presets || [];
   state.providerHealth = providerHealth || {};
+  renderClientFilterOptions(agentRoster || []);
   renderProviderPresetOptions();
   renderHeader();
   renderOverview();
@@ -635,6 +688,7 @@ function renderOverview() {
     ["OpenCode", `${base}/opencode/v1`],
     ["Grok Build", `${base}/grok/v1`],
     ["DeepSeek Harness", `${base}/deepseek-harness/v1`],
+    ["ZCode", `${base}/zcode/v1`],
     ["通用 OpenAI", `${base}/v1`]
   ];
   const copyAll = document.createElement("button");
@@ -1258,8 +1312,8 @@ const PROFILE_META = {
   "deepseek-harness": { label: "DeepSeek Harness", file: "~/.dsh/settings.yaml", entry: "/deepseek-harness/v1", note: "写入 llm-pi-ai.providers.switchyard；模型的思考和图片能力依据 Switchyard 模型能力设置生成。" }
 };
 
-/** 客户端卡片固定顺序：一键写入类优先，OpenCode / Grok / DeepSeek Harness 紧随 Hermes */
-const CLIENT_CARD_ORDER = ["codex", "claude-code", "hermes", "opencode", "grok", "deepseek-harness", "generic-openai"];
+/** 客户端卡片固定顺序：与 CLIENT_SCOPE_OPTIONS 同序（一键写入类优先） */
+const CLIENT_CARD_ORDER = CLIENT_SCOPE_OPTIONS.map(([id]) => id);
 
 function orderedClientEntries(clients = {}) {
   const map = clients && typeof clients === "object" ? clients : {};
@@ -1391,7 +1445,7 @@ function renderClients() {
       <div class="client-note">${escapeHtml(meta.note)}</div>
     ` : "";
     div.innerHTML = `
-      <div class="hd client-card-title"><h3>${escapeHtml(meta?.label || id)}</h3><span class="status-pill ${filter.enabled === false ? "stopped" : "running"}"><span class="dot"></span>${filter.enabled === false ? "已停用" : "启用中"} · ${visible.length} 个模型</span></div>
+      <div class="hd client-card-title"><h3>${escapeHtml(meta?.label || agentLabel(id))}</h3><span class="status-pill ${filter.enabled === false ? "stopped" : "running"}"><span class="dot"></span>${filter.enabled === false ? "已停用" : "启用中"} · ${visible.length} 个模型</span></div>
       <div class="bd">
         <dl class="client-meta">
           <div><dt>客户端 ID</dt><dd class="mono">${escapeHtml(id)}</dd></div>
@@ -1731,16 +1785,6 @@ document.getElementById("btn-sensitive-audit-clear")?.addEventListener("click", 
     toast(`清空失败：${error.message}`, "error");
   }
 });
-const SENSITIVE_GUARD_CLIENT_LABELS = {
-  codex: "Codex",
-  "claude-code": "Claude Code",
-  hermes: "Hermes",
-  opencode: "OpenCode",
-  grok: "Grok",
-  "deepseek-harness": "DeepSeek Harness",
-  "generic-openai": "Generic OpenAI"
-};
-
 const SENSITIVE_BUILTIN_RULE_OPTIONS = [
   { id: "cn_id_card", label: "身份证号" },
   { id: "cn_mobile", label: "手机号" },
@@ -2266,13 +2310,11 @@ function renderSensitiveGuardSettings() {
 
   const clientsHost = document.getElementById("sensitive-guard-clients");
   if (clientsHost) {
-    const clientIds = Object.keys(SENSITIVE_GUARD_CLIENT_LABELS);
-    clientsHost.innerHTML = clientIds.map((id) => {
+    clientsHost.innerHTML = CLIENT_SCOPE_OPTIONS.map(([id, label]) => {
       const checked = guard.clients?.[id] !== false;
-      const label = SENSITIVE_GUARD_CLIENT_LABELS[id] || id;
       return `<label class="import-provider-check" style="display:flex; gap:6px; align-items:center;">
-        <input type="checkbox" data-client="${id}" ${checked ? "checked" : ""}>
-        <span>${label}</span>
+        <input type="checkbox" data-client="${escapeHtml(id)}" ${checked ? "checked" : ""}>
+        <span>${escapeHtml(label)}</span>
       </label>`;
     }).join("");
     bindSensitiveGuardToggleAutosave(clientsHost, {
@@ -4729,18 +4771,9 @@ document.getElementById("usage-granularity")?.addEventListener("change", (event)
   });
 });
 
+/** 客户端展示名统一走 client-visibility-utils 的唯一真源 */
 function agentLabel(clientId) {
-  const labels = {
-    codex: "Codex",
-    "claude-code": "Claude Code",
-    hermes: "Hermes",
-    opencode: "OpenCode",
-    grok: "Grok Build",
-    "deepseek-harness": "DeepSeek Harness",
-    "generic-openai": "通用 OpenAI",
-    "model-test": "模型测试"
-  };
-  return labels[clientId] || clientId || "-";
+  return clientDisplayLabel(clientId);
 }
 
 /* ---- Agent sessions / skills ---- */

@@ -303,16 +303,8 @@
             <div class="bd page-stack" style="gap:10px;">
               <div class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap;">
                 <label>客户端
-                  <select class="field" id="sensitive-guard-bypass-client">
-                    <option value="*">全部</option>
-                    <option value="codex">Codex</option>
-                    <option value="claude-code">Claude Code</option>
-                    <option value="hermes">Hermes</option>
-                    <option value="opencode">OpenCode</option>
-                    <option value="grok">Grok</option>
-                    <option value="deepseek-harness">DeepSeek Harness</option>
-                    <option value="generic-openai">Generic OpenAI</option>
-                  </select>
+                  <!-- 选项由 renderClientFilterOptions() 按 CLIENT_SCOPE_OPTIONS 渲染 -->
+                  <select class="field" id="sensitive-guard-bypass-client"></select>
                 </label>
                 <label style="flex:1; min-width:160px;">会话 / Thread ID
                   <input class="field" id="sensitive-guard-bypass-session" placeholder="x-codex-thread-id 或 conversation_id">
@@ -361,15 +353,7 @@
           <div class="bd">
             <div class="row">
               <label>Agent
-                <select class="field" id="test-agent">
-                  <option value="generic-openai">通用 OpenAI</option>
-                  <option value="codex">Codex</option>
-                  <option value="claude-code">Claude Code</option>
-                  <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-          <option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-</select>
+                <select class="field" id="test-agent"></select>
               </label>
               <label>协议
                 <select class="field" id="test-protocol">
@@ -421,17 +405,7 @@
           <div class="tiny muted">按 Agent 和模型查看调用次数、成功率、失败、Token、缓存命中（来自上游 usage）与延迟</div>
         </div>
         <div style="flex:1;"></div>
-        <select class="field" id="usage-agent-filter" style="min-width:160px;">
-          <option value="">全部 Agent</option>
-          <option value="codex">Codex</option>
-          <option value="claude-code">Claude Code</option>
-          <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-<option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-<option value="generic-openai">通用 OpenAI</option>
-          <option value="model-test">模型测试</option>
-        </select>
+        <select class="field" id="usage-agent-filter" style="min-width:160px;"></select>
         <input class="field" id="usage-model-filter" placeholder="按模型筛选…" style="min-width:180px;">
         <select class="field" id="usage-range-preset" style="min-width:120px;" title="统计时间范围">
           <option value="24h">近 24 小时</option>
@@ -511,15 +485,7 @@
           <div class="tiny muted">可为会话自定义名称（写入 Switchyard 覆盖层；Hermes / OpenCode / Grok 尽量同步原生标题）</div>
         </div>
         <div style="flex:1;"></div>
-        <select class="field" id="session-agent-filter">
-          <option value="">全部 Agent</option>
-          <option value="codex">Codex</option>
-          <option value="claude-code">Claude Code</option>
-          <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-          <option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-</select>
+        <select class="field" id="session-agent-filter"></select>
         <button class="btn" id="btn-sessions-refresh">刷新</button>
       </div>
       <div class="page-scroll">
@@ -555,17 +521,7 @@
           <input type="checkbox" id="trace-capture-body">
           <span>落盘完整请求体</span>
         </label>
-        <select class="field" id="trace-agent-filter">
-          <option value="">全部 Agent</option>
-          <option value="codex">Codex</option>
-          <option value="claude-code">Claude Code</option>
-          <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-          <option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-          <option value="generic-openai">通用 OpenAI</option>
-          <option value="model-test">模型测试</option>
-        </select>
+        <select class="field" id="trace-agent-filter"></select>
         <input class="field observe-only-request-log" id="call-log-model-filter" placeholder="按模型筛选…" style="min-width:160px;">
         <select class="field observe-only-request-log" id="call-log-limit" style="min-width:100px;">
           <option value="50">最近 50</option>
@@ -640,15 +596,7 @@
       <div class="toolbar">
         <div class="page-title">Agent Skills</div>
         <div style="flex:1;"></div>
-        <select class="field" id="skill-agent-filter">
-          <option value="">全部 Agent</option>
-          <option value="codex">Codex</option>
-          <option value="claude-code">Claude Code</option>
-          <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-          <option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-</select>
+        <select class="field" id="skill-agent-filter"></select>
         <button class="btn" id="btn-skills-refresh">刷新</button>
       </div>
       <div class="page-scroll page-stack">
@@ -828,14 +776,7 @@
           <div class="bd">
             <div class="row">
               <label>Agent
-                <select class="field" id="core-agent-filter">
-                  <option value="codex">Codex</option>
-                  <option value="claude-code">Claude Code</option>
-                  <option value="hermes">Hermes</option>
-          <option value="opencode">OpenCode</option>
-          <option value="grok">Grok Build</option>
-          <option value="deepseek-harness">DeepSeek Harness</option>
-</select>
+                <select class="field" id="core-agent-filter"></select>
               </label>
               <label>文件
                 <select class="field" id="core-file-select"></select>
