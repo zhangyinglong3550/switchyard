@@ -955,32 +955,30 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
   assert.equal(prepared.messages[1].role, "user");
   // 官方 CLI 流式必发 include_usage，上游据此在末帧返回 usage。
   assert.deepEqual(prepared.stream_options, { include_usage: true });
-  // DeepSeek 系注入思维链开关；但**历史无思考痕迹时不能带 reasoning_effort**——
-  // 上游一旦真开思维链就要求每轮回传真实思考，ZCode 这类客户端不回传会被 11155 拒绝。
-  assert.deepEqual(prepared.thinking, { type: "enabled" });
+  // 思考开关不再由网关注入或降级：客户端送什么就是什么。
+  assert.equal(prepared.thinking, undefined);
   assert.equal(prepared.reasoning_effort, undefined);
 
-  // 显式 strict（网关判定历史可回传思考/首轮）→ 带默认档，进入严格思维链模式。
-  const strict = prepareWorkBuddyChatBody({
+  // 客户端明确带了 thinking / reasoning_effort → 原样透传。
+  const clientThinking = prepareWorkBuddyChatBody({
     model: "deepseek-v4.1-flash",
-    messages: [
-      { role: "user", content: "u1" },
-      { role: "assistant", content: "a1", reasoning_content: "上一轮真实思考" },
-      { role: "user", content: "u2" }
-    ]
-  }, { thinkingMode: "strict" });
-  assert.equal(strict.reasoning_effort, "high");
+    messages: [{ role: "user", content: "u1" }],
+    thinking: { type: "enabled" },
+    reasoning_effort: "high"
+  });
+  assert.deepEqual(clientThinking.thinking, { type: "enabled" });
+  assert.equal(clientThinking.reasoning_effort, "high");
 
-  // 显式 off（历史 assistant 配不到思考）→ 不开严格模式，避免上游 11155。
-  const off = prepareWorkBuddyChatBody({
+  // 历史里有没有思考，网关都不改：不补字段、不改档位。
+  const historyWithoutThinking = prepareWorkBuddyChatBody({
     model: "deepseek-v4.1-flash",
     messages: [
       { role: "system", content: "s" },
       { role: "assistant", content: "a1" }
     ]
-  }, { thinkingMode: "off" });
-  assert.equal(off.reasoning_effort, undefined);
-  assert.equal(off.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
+  });
+  assert.equal(historyWithoutThinking.reasoning_effort, undefined);
+  assert.equal(historyWithoutThinking.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
 
   const alreadySystem = prepareWorkBuddyChatBody({ messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] });
   assert.equal(alreadySystem.messages.length, 2);
@@ -1008,8 +1006,8 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
   const roleFixed = prepareWorkBuddyChatBody({ model: "gpt-5.6-terra", messages: [{ role: "developer", content: "d" }] });
   assert.equal(roleFixed.messages[0].role, "system");
 
-  // 多轮：严格思维链模式下**所有** assistant 都必须带 reasoning_content（上游 11155 硬要求）。
-  const backfilled = prepareWorkBuddyChatBody({
+  // 多轮：网关不再替客户端回填 reasoning_content —— 客户端送了什么就发什么。
+  const multiTurn = prepareWorkBuddyChatBody({
     model: "deepseek-v4.1-flash",
     messages: [
       { role: "system", content: "s" },
@@ -1018,27 +1016,11 @@ test("workbuddy 适配 · 强制 stream 与 system 头，SSE 聚合为 Chat JSON
       { role: "assistant", content: "a2" }
     ]
   });
-  const assistants = backfilled.messages.filter((m) => m.role === "assistant");
-  assert.equal(assistants[0].reasoning_content, "想过");
-  assert.equal(assistants[1].reasoning_content, "");
-  // 普通多轮（无思考痕迹）走非严格模式：不加 effort，也不强行补 reasoning_content。
-  const plainMultiTurn = prepareWorkBuddyChatBody({
-    model: "deepseek-v4.1-flash",
-    messages: [
-      { role: "user", content: "u1" },
-      { role: "assistant", content: "a1" },
-      { role: "user", content: "u2" }
-    ]
-  });
-  assert.equal(plainMultiTurn.reasoning_effort, undefined);
-  assert.equal(plainMultiTurn.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
-  // 显式关闭思考时不应强行加字段。
-  const thinkingOff = prepareWorkBuddyChatBody({
-    model: "deepseek-v4.1-flash",
-    thinking: { type: "disabled" },
-    messages: [{ role: "assistant", content: "a1" }]
-  });
-  assert.equal(thinkingOff.messages.find((m) => m.role === "assistant").reasoning_content, undefined);
+  const assistants = multiTurn.messages.filter((m) => m.role === "assistant");
+  // 客户端用的是别名 reasoning：原样保留，网关不搬运、不补空串。
+  assert.equal(assistants[0].reasoning, "想过");
+  assert.equal(assistants[0].reasoning_content, undefined);
+  assert.equal(assistants[1].reasoning_content, undefined);
 
   const sse = [
     'data: {"id":"chatcmpl-1","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"池化"},"finish_reason":""}]}',

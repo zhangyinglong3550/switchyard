@@ -4,11 +4,6 @@
 // 强制 stream、补 stream_options.include_usage、tool_choice 归一化、developer→system、
 // DeepSeek 系注入 thinking.type=enabled + 默认档位、多轮 assistant reasoning_content 回填。
 const WORKBUDDY_DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
-const DEFAULT_DEEPSEEK_EFFORT = "high";
-
-function isDeepSeekModel(model) {
-  return String(model || "").trim().toLowerCase().startsWith("deepseek");
-}
 
 /** 上游 tool_choice 只接受 string：对象形式归一，none 时连 tools 一起抑制（对齐 payload.go）。 */
 function normalizeToolChoice(body) {
@@ -47,82 +42,8 @@ function normalizeToolChoice(body) {
   delete body.tool_choice;
 }
 
-/** DeepSeek 系思维链开关（thinking.go injectThinking）：显式 disabled 尊重；其余注入 enabled + 默认档。 */
-/**
- * @param {"strict"|"off"|undefined} mode
- *   strict = 开思维链（thinking.enabled + reasoning_effort），调用方保证历史能回传思考；
- *   off    = 只开 thinking 开关但不带 effort（上游按不思考应答，避免 11155）；
- *   undefined = 旧启发式（历史里有思考痕迹才开），保持向后兼容。
- */
-function injectDeepSeekThinking(body, mode) {
-  if (!isDeepSeekModel(body.model)) return;
-  const thinking = body.thinking && typeof body.thinking === "object" ? body.thinking : null;
-  const type = String(thinking?.type || "").trim();
-  const explicitEffort = body.reasoning_effort !== undefined || body.reasoningEffort !== undefined;
-  const strict = mode === "strict" ? true
-    : mode === "off" ? false
-    : hasReasoningTrace(body);
-  if (type) {
-    if (type.toLowerCase() === "disabled") {
-      delete body.reasoning_effort;
-      delete body.reasoningEffort;
-      return;
-    }
-    if (!explicitEffort && strict) body.reasoning_effort = DEFAULT_DEEPSEEK_EFFORT;
-    return;
-  }
-  if (thinking) {
-    thinking.type = "enabled";
-  } else {
-    body.thinking = { type: "enabled" };
-  }
-  if (!explicitEffort && strict) body.reasoning_effort = DEFAULT_DEEPSEEK_EFFORT;
-}
-
-/**
- * 会话历史里是否存在真实思考痕迹（assistant 带非空 reasoning_content / reasoning）。
- * 上游要求：只要带 reasoning_effort（真开思维链），**每轮 assistant 都必须回传真实思考**，
- * 否则返回 11155。ZCode 这类客户端不回传思考，因此不能对它注入 effort。
- */
-function hasReasoningTrace(body) {
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    if (typeof message.reasoning_content === "string" && message.reasoning_content.trim()) return true;
-    if (typeof message.reasoning === "string" && message.reasoning.trim()) return true;
-  }
-  return false;
-}
-
-/** 当前出站请求是否处于 thinking 模式（DeepSeek 系注入 thinking.enabled 后即为真）。 */
-function isThinkingEnabled(body) {
-  if (!isDeepSeekModel(body.model)) return false;
-  const thinking = body.thinking && typeof body.thinking === "object" ? body.thinking : null;
-  return String(thinking?.type || "").trim().toLowerCase() === "enabled";
-}
-
-/**
- * DeepSeek 多轮一致性（上游硬要求，实测 code 11155 reasoning_content_missing）：
- * 只要处于 thinking 模式，**所有** assistant 消息都必须带 reasoning_content 字段（string，可空串）。
- * 早先只在「历史里已有 reasoning 痕迹」时回填，导致普通多轮请求被上游 400 拒绝。
- */
-function backfillReasoningContent(body) {
-  if (!isThinkingEnabled(body)) return;
-  // 只有严格模式（带 effort）才需要「所有 assistant 都带 reasoning_content」；
-  // 非严格模式下补空串反而会被上游当作「有思考痕迹却没回传」，触发 11155。
-  if (body.reasoning_effort === undefined && body.reasoningEffort === undefined) return
-  const messages = Array.isArray(body.messages) ? body.messages : null;
-  if (!messages || !messages.length) return;
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    if (String(message.role || "") !== "assistant") continue;
-    if (Object.prototype.hasOwnProperty.call(message, "reasoning_content")) continue;
-    message.reasoning_content = typeof message.reasoning === "string" ? message.reasoning : "";
-  }
-}
-
-/** 出站请求规范化：强制 stream:true；缺 system 头时补齐（上游 code 11128 要求）。 */
-export function prepareWorkBuddyChatBody(body = {}, { thinkingMode } = {}) {
+/** 出站请求规范化：强制 stream:true；缺 system 头时补齐（上游 code 11-128 要求）。 */
+export function prepareWorkBuddyChatBody(body = {}) {
   const next = { ...body, stream: true };
   // 官方 CLI 流式必发 include_usage，上游据此在末帧返回用量；显式带则不覆盖。
   if (!next.stream_options) next.stream_options = { include_usage: true };
@@ -138,10 +59,9 @@ export function prepareWorkBuddyChatBody(body = {}, { thinkingMode } = {}) {
   }
   next.messages = messages;
   normalizeToolChoice(next);
-  injectDeepSeekThinking(next, thinkingMode);
-  backfillReasoningContent(next);
   return next;
 }
+
 
 // 出站 WAF 中和：上游 WAF 对 AI 接口做内容检查，命中即 403 upstream_policy_blocked。
 // 实测（sess_c2c69851，抓取 workbuddy.ai 首页被拦）确认两类规则，与设备身份/指纹无关：

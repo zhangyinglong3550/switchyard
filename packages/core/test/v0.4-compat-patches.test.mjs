@@ -12,7 +12,7 @@ import { chatReasoningPatch } from "../src/compat/patches/chat-reasoning.mjs";
 import { reasoningOptionsPatch } from "../src/compat/patches/reasoning-options.mjs";
 import { reasoningStatePatch } from "../src/compat/patches/reasoning-state.mjs";
 import { toolHistoryAdjacentPatch } from "../src/compat/patches/tool-history-adjacent.mjs";
-import { SWITCHYARD_THINKING_KEY, TOOL_CALL_REASONING_PLACEHOLDER } from "../src/reasoning.mjs";
+import { SWITCHYARD_THINKING_KEY } from "../src/reasoning.mjs";
 
 // Helper: register a single test patch, run the test, then reset.
 function testPatch(name, fn) {
@@ -373,7 +373,7 @@ testPatch("reasoning-state · attaches internal thinking to assistant history", 
   assert.equal(out.thinking.type, "enabled");
 });
 
-testPatch("reasoning-state · disables thinking when history cannot pass it back", () => {
+testPatch("reasoning-state · 不改动客户端送来的 thinking 开关", () => {
   registerPatch(reasoningStatePatch.id, reasoningStatePatch);
   const out = applyOutbound(
     {
@@ -385,10 +385,11 @@ testPatch("reasoning-state · disables thinking when history cannot pass it back
     },
     { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
   );
-  assert.equal(out.thinking.type, "disabled");
+  // 历史配不到思考时也不再由网关降级为 disabled —— 开不开 thinking 是客户端的决定。
+  assert.equal(out.thinking.type, "enabled");
 });
 
-testPatch("reasoning-state · backfills placeholder reasoning on bare tool_call assistant", () => {
+testPatch("reasoning-state · 只转换客户端 thinking 块，不补占位", () => {
   registerPatch(reasoningStatePatch.id, reasoningStatePatch);
   const out = applyOutbound(
     {
@@ -411,39 +412,27 @@ testPatch("reasoning-state · backfills placeholder reasoning on bare tool_call 
     },
     { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
   );
-  // 第一条有真实 thinking，第二条无 thinking 需占位
+  // 第一条有客户端思考 -> 转换；第二条客户端没送 -> 不写字段（不再补假占位）。
   assert.equal(out.messages[1].reasoning_content, "picked tool");
-  assert.equal(out.messages[3].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
+  assert.equal(out.messages[3].reasoning_content, undefined);
   assert.equal(out.thinking.type, "enabled");
 });
 
-testPatch("reasoning-state · DeepSeek keeps tool-call placeholders after incomplete thinking disables the current turn", () => {
+testPatch("reasoning-state · 客户端未回传思考时不写入任何字段", () => {
   registerPatch(reasoningStatePatch.id, reasoningStatePatch);
   const out = applyOutbound(
     {
       messages: [
         { role: "user", content: "go" },
-        {
-          role: "assistant",
-          content: "",
-          tool_calls: [{ id: "c1", type: "function", function: { name: "exec_command", arguments: "{}" } }]
-        },
-        { role: "tool", tool_call_id: "c1", content: "ok" },
-        {
-          role: "assistant",
-          content: "",
-          tool_calls: [{ id: "c2", type: "function", function: { name: "exec_command", arguments: "{}" } }]
-        },
-        { role: "tool", tool_call_id: "c2", content: "ok" }
+        { role: "assistant", content: "done" }
       ],
       thinking: { type: "enabled" }
     },
-    { provider: { id: "opencode-go" }, model: { id: "opencode-go/deepseek-v4-pro" } }
+    { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
   );
-
-  assert.equal(out.thinking.type, "disabled");
-  assert.equal(out.messages[1].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
-  assert.equal(out.messages[3].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
+  // 网关不替客户端编造思考：没有就是没有，上游若拒绝则如实报错。
+  assert.equal(out.messages[1].reasoning_content, undefined);
+  assert.equal(out.messages[1].reasoning, undefined);
 });
 
 testPatch("reasoning-state · 已回传的思考不再以别名复制第二份", () => {
@@ -470,7 +459,7 @@ testPatch("reasoning-state · 已回传的思考不再以别名复制第二份",
   assert.equal(out.thinking.type, "enabled");
 });
 
-testPatch("reasoning-state · 客户端未回传思考时仍保留 reasoning 别名兜底", () => {
+testPatch("reasoning-state · 客户端 thinking 块只转换成一个字段名", () => {
   registerPatch(reasoningStatePatch.id, reasoningStatePatch);
   const out = applyOutbound(
     {
@@ -486,9 +475,9 @@ testPatch("reasoning-state · 客户端未回传思考时仍保留 reasoning 别
     },
     { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
   );
-  // 两个字段名都读的上游各取所需：这里仍按原设计同时写入。
+  // 上游读的是 reasoning_content；不再同时写一份 reasoning 别名（长会话里那份重复会被计入上下文上限）。
   assert.equal(out.messages[1].reasoning_content, "checked files");
-  assert.equal(out.messages[1].reasoning, "checked files");
+  assert.equal(out.messages[1].reasoning, undefined);
 });
 
 // ── 3. GLM content.text ────────────────────────────────────────────────────

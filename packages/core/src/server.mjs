@@ -14,7 +14,6 @@ import { describeProtocolRoute } from "./protocol-capabilities.mjs";
 import { readJsonResponse, isWorkBuddyOAuthProvider } from "./upstream/clients.mjs";
 import { createReasoningCoalescer } from "./reasoning-coalescer.mjs";
 import { normalizeWorkBuddyStreamLine } from "./upstream/workbuddy-adapter.mjs";
-import { reasoningCache } from "./reasoning-cache.mjs";
 import { applyVisionFallback } from "./vision-fallback.mjs";
 import { contentToText, json, readJsonBody } from "./utils.mjs";
 import { previewText } from "./text-preview.mjs";
@@ -2073,11 +2072,6 @@ async function pipeStream(upstream, res, ctx) {
   };
   // WorkBuddy/CodeBuddy 上游按词切分思考：把连续思考分片合并后再下发，避免客户端显示成碎片。
   // 正文/工具调用/结束帧不参与合并，仍然即时透传。
-  // 思考缓存：累积本轮完整思考与正文，流结束后写入会话缓存，
-  // 供下一轮请求回填（ZCode 不回传思考，由网关替它回传以维持严格思维链）。
-  let reasoningAcc = "";
-  let contentAcc = "";
-  let contentOverflow = false;
   const coalescer = ctx?.coalesceReasoning
     ? createReasoningCoalescer({
       // 60 字成帧 + 400ms 兜底：既不把连续思考切碎，也不让长停顿卡住思考显示。
@@ -2086,13 +2080,6 @@ async function pipeStream(upstream, res, ctx) {
       write: (line) => {
         flushSeparator();
         emitFrame(line);
-      },
-      onDelta: ({ reasoning, content }) => {
-        if (reasoning) reasoningAcc += reasoning;
-        if (content) {
-          if (contentAcc.length + content.length > 50000) contentOverflow = true;
-          else contentAcc += content;
-        }
       }
     })
     : null;
@@ -2146,9 +2133,6 @@ async function pipeStream(upstream, res, ctx) {
     }
   } finally {
     coalescer?.flush();
-    if (ctx?.reasoningCacheKey && !contentOverflow && reasoningAcc.trim() && contentAcc.trim()) {
-      reasoningCache.remember(ctx.reasoningCacheKey, contentAcc, reasoningAcc);
-    }
     if (typeof ctx?.onStreamSummary === "function") {
       try {
         ctx.onStreamSummary(publicStreamDiagnostics(streamDiagnostics, streamState));

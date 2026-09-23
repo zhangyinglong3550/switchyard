@@ -103,7 +103,9 @@ export const PROVIDER_PRESETS = [
     riskNote: "OAuth token 仅保存在本机账号池（~/.switchyard/pools/），不上传；请仅使用自己有权使用的 WorkBuddy 账号。",
     note: "WorkBuddy（workbuddy.ai）与 CodeBuddy（codebuddy.cn）双域账号池：支持面板内 OAuth 登录或导入 workbuddy2api auths JSON，自动刷新、积分查询、加权轮询与失败换号。上游模型名不带 global: 前缀（前缀仅 workbuddy2api 网关使用）。",
     models: [
-      { id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
+      // deepseek-v4.1-flash：官方客户端对该模型声明 maxInputTokens=1000000（上游限额计数器实测
+      // 上限 1,048,576），原来写的 128000 明显偏低，会让客户端过早压缩。
+      { id: "deepseek-v4.1-flash", displayName: "DeepSeek V4.1 Flash", contextWindow: 1000000, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },
       { id: "gpt-5.5", displayName: "GPT-5.5", contextWindow: 128000, capabilities: { reasoning: true, tools: true, stream: true } },

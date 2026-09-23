@@ -316,26 +316,3 @@ function ensureMaxTokensAboveThinkingBudget(out, budget) {
   if (!Number.isFinite(need) || need <= 0) return;
   if (!Number.isFinite(current) || current < need) out.max_tokens = need;
 }
-
-/** tool_call 消息缺 reasoning 时的占位（Kimi/DeepSeek 等多轮硬要求非空） */
-export const TOOL_CALL_REASONING_PLACEHOLDER = " ";
-
-/**
- * 给带 tool_calls 且无任何 reasoning 的 assistant 消息补非空占位。
- * 仅在「thinking 已启用」场景调用，避免无端注入污染请求。
- */
-export function ensureToolCallReasoningPlaceholder(message) {
-  if (!message || typeof message !== "object" || message.role !== "assistant") return message;
-  if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return message;
-
-  const contentReasoning = typeof message.reasoning_content === "string" && message.reasoning_content.trim();
-  const fieldReasoning = typeof message.reasoning === "string" && message.reasoning.trim();
-  const blocks = reasoningBlocksFromMessage(message);
-  if (contentReasoning || fieldReasoning || blocks.length) return message;
-
-  return {
-    ...message,
-    reasoning_content: message.reasoning_content || TOOL_CALL_REASONING_PLACEHOLDER,
-    reasoning: message.reasoning || TOOL_CALL_REASONING_PLACEHOLDER
-  };
-}

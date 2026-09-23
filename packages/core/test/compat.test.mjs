@@ -292,10 +292,11 @@ test("reasoning-state keeps explicit user reasoning level even without passable 
   resetPatches();
 });
 
-test("reasoning-state disables thinking when history lacks thinking and no explicit effort", () => {
+test("reasoning-state leaves the client's thinking switch alone when history lacks thinking", () => {
   resetPatches();
   registerBuiltinPatches();
-  // 非显式场景：thinking 由内部启发式开启，但历史里没有 thinking 可回传 → 允许降级关闭（原行为保留）。
+  // 历史里没有 thinking 可回传时，网关也不再替客户端降级为 disabled —— 开不开是客户端的决定，
+  // 上游若因此拒绝（如 reasoning_content_missing），如实报错交客户端处理。
   const out = applyOutbound(
     {
       messages: [
@@ -309,7 +310,7 @@ test("reasoning-state disables thinking when history lacks thinking and no expli
       model: { id: "deepseek/deepseek-v4-flash", providerId: "deepseek", upstreamModel: "deepseek-v4-flash" }
     }
   );
-  // 非显式且可关闭推理 → 维持原有“降级关闭”行为（以 thinking.type=disabled 体现）
-  assert.equal(out.thinking?.type, "disabled");
+  assert.equal(out.thinking?.type, "enabled");
+  assert.equal(out.messages[1].reasoning_content, undefined);
   resetPatches();
 });

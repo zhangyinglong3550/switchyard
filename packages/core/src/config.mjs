@@ -585,7 +585,7 @@ export function claudeAppDiscoveryModelId(model) {
 
 export function publicModel(model, { idOverride } = {}) {
   const id = idOverride || model.id;
-  return {
+  const out = {
     id,
     object: "model",
     created: 0,
@@ -594,6 +594,16 @@ export function publicModel(model, { idOverride } = {}) {
     capabilities: model.capabilities || {},
     aliases: Array.from(new Set([...(model.aliases || []), ...(id !== model.id ? [model.id] : [])]))
   };
+  // 如实发布上下文窗口，客户端才能自己决定何时压缩/精简。
+  // 网关不替客户端裁历史，所以这个数字必须是真的；配置里没写就不发，由客户端按未知处理。
+  const contextWindow = Number(model.contextWindow ?? model.context_window);
+  if (Number.isFinite(contextWindow) && contextWindow > 0) {
+    out.context_window = contextWindow;
+    out.max_context_window = contextWindow;
+  }
+  const maxOutputTokens = Number(model.maxOutputTokens ?? model.max_output_tokens);
+  if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) out.max_output_tokens = maxOutputTokens;
+  return out;
 }
 
 function displayNameWithProvider(model, providerName) {
