@@ -957,7 +957,26 @@ function recordStreamDiagnostics(record, summary, { status = 0, error = "" } = {
   record.requestSummary.streamDiagnostics = sanitizeStreamDiagnostics(summary);
   // 把流式解析到的 usage 落到 requestRecord 顶层，request_logs 入库才能汇总 Token
   if (summary.usage) applyUsageToRequestRecord(record, summary.usage);
-  record.responseSummary = responseSummaryFromStreamDiagnostics(summary, { status, error: error || record.error || "" });
+  // 上游以 4xx/5xx 拒绝时，把它的原话记进 error —— 否则这类失败只有空 error，
+  // 客户端和面板都看不出原因（context_length_exceeded 等就藏在上游 body 里）。
+  const upstreamError = typeof summary.upstreamError === "string" && summary.upstreamError.trim()
+    ? summary.upstreamError.trim()
+    : "";
+  const resolvedError = upstreamError || error || record.error || "";
+  if (upstreamError) {
+    record.error = upstreamError;
+    record.requestSummary.upstreamError = {
+      status: Number(summary.upstreamStatus) || status || 0,
+      message: upstreamError
+    };
+    if (summary.upstreamBody !== undefined) {
+      record.requestSummary.upstreamError.body = summary.upstreamBody;
+    }
+  }
+  record.responseSummary = responseSummaryFromStreamDiagnostics(summary, {
+    status: Number(summary.upstreamStatus) || status,
+    error: resolvedError
+  });
   if (record.responseSummary?.text && !record.responsePreview) {
     record.responsePreview = record.responseSummary.text;
   }
@@ -1043,10 +1062,36 @@ function recordUsage(record, payload) {
   applyUsageToRequestRecord(record, payload?.usage || payload);
 }
 
-function requestPayloadError(payload) {
+/**
+ * 从上游错误体里取出可读的错误信息。
+ *
+ * 上游错误体形态不统一：OpenAI 风格用 error.message，WorkBuddy/CodeBuddy 把话放在
+ * msg / extError.message / displayMsg 里（没有 error / message 字段），另一些网关直接
+ * 返回裸字符串。取值要覆盖这些形态，否则日志里只剩一个空 error —— 客户端只看到
+ * 「Bad Request」，排查时无从下手（context_length_exceeded 这类信息就藏在这里）。
+ */
+export function requestPayloadError(payload) {
   if (!payload) return "";
   if (typeof payload === "string") return payload.slice(0, 300);
-  return payload.error?.message || payload.error || payload.message || "";
+  if (typeof payload !== "object") return String(payload).slice(0, 300);
+  const nested = payload.error && typeof payload.error === "object" ? payload.error : null;
+  const display = payload.displayMsg && typeof payload.displayMsg === "object" ? payload.displayMsg : null;
+  const candidates = [
+    nested?.message,
+    nested?.code,
+    typeof payload.error === "string" ? payload.error : "",
+    payload.msg,
+    payload.message,
+    payload.extError?.message,
+    payload.extError?.code,
+    display?.zh,
+    display?.en,
+    payload.code !== undefined && payload.code !== null ? `code ${payload.code}` : ""
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim().slice(0, 300);
+  }
+  return "";
 }
 
 function emitRequestError(record, requestedModel, message) {
@@ -2031,6 +2076,35 @@ function setVisionHeader(res, chatBody) {
 }
 
 async function pipeStream(upstream, res, ctx) {
+  // 上游以 4xx/5xx 拒绝时，错误信息在 body 里（如 context_length_exceeded）。
+  // 必须读出来：否则日志只剩一个空 error、客户端只看到光秃秃的 Bad Request。
+  if (!upstream.ok) {
+    const raw = await upstream.text().catch(() => "");
+    let payload = raw;
+    try { payload = JSON.parse(raw); } catch { /* 非 JSON：按文本处理 */ }
+    const message = requestPayloadError(payload) || `status ${upstream.status}`;
+    if (typeof ctx?.onStreamSummary === "function") {
+      try {
+        ctx.onStreamSummary({
+          protocol: "chat",
+          usage: null,
+          terminalState: "failed",
+          terminalReason: "upstream_error",
+          sawTerminalEvent: false,
+          sawMeaningfulEvent: false,
+          upstreamError: message,
+          upstreamStatus: upstream.status,
+          upstreamBody: typeof payload === "string" ? payload.slice(0, 2000) : payload
+        });
+      } catch {}
+    }
+    res.writeHead(upstream.status, {
+      "Content-Type": upstream.headers.get("content-type") || "application/json; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform"
+    });
+    res.end(typeof payload === "string" ? payload : JSON.stringify(payload));
+    return;
+  }
   res.writeHead(upstream.status, {
     "Content-Type": upstream.headers.get("content-type") || "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",

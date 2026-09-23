@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import net from "node:net";
-import { createServer, isCodexUiSidecarRequest, requestedModelForClient } from "../src/server.mjs";
+import { createServer, isCodexUiSidecarRequest, requestedModelForClient, requestPayloadError } from "../src/server.mjs";
 
 function writeTempConfig(content) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lls-srv-"));
@@ -1763,6 +1763,87 @@ test("server records Codex chat-stream terminal state instead of a blank 200 row
   assert.match(badRow.error, /incomplete stream/);
   assert.equal(goodRow.responseSummary.finishReason, "completed");
   assert.equal(goodRow.error, undefined);
+});
+
+// 上游错误体形态各异；取不到话就等于「只看到 Bad Request」，排查时无从下手。
+test("requestPayloadError covers the upstream error shapes we actually meet", () => {
+  // WorkBuddy/CodeBuddy：话在 msg / extError / displayMsg，没有 error / message
+  assert.equal(
+    requestPayloadError({
+      code: 11115,
+      msg: "prompt is too long: 1050424 tokens > 1048576 maximum",
+      extError: { code: "context_length_exceeded", message: "prompt is too long: 1050424 tokens > 1048576 maximum" },
+      displayMsg: { zh: "对话内容超出模型长度上限，请精简对话或减少附件后重试。" }
+    }),
+    "prompt is too long: 1050424 tokens > 1048576 maximum"
+  );
+  // OpenAI 风格
+  assert.equal(requestPayloadError({ error: { message: "invalid_request_error: bad tool schema" } }), "invalid_request_error: bad tool schema");
+  // 只给错误码
+  assert.equal(requestPayloadError({ error: { code: "rate_limit_exceeded" } }), "rate_limit_exceeded");
+  // 裸字符串 / 纯文本
+  assert.equal(requestPayloadError("upstream 502"), "upstream 502");
+  // 只有 displayMsg 时也不能是空串
+  assert.match(requestPayloadError({ displayMsg: { zh: "请求被安全策略拦截" } }), /请求被安全策略拦截/);
+  // 实在没有可读信息才回空
+  assert.equal(requestPayloadError({ requestId: "x" }), "");
+  assert.equal(requestPayloadError(null), "");
+});
+
+test("server records the upstream 4xx body instead of a blank error", async (t) => {
+  const logs = [];
+  // 复刻 WorkBuddy 的真实超限错误体：错误信息在 msg/extError/displayMsg 里，没有 error/message 字段。
+  const upstreamBody = {
+    code: 11115,
+    msg: "prompt is too long: 1050424 tokens > 1048576 maximum",
+    requestId: "req-abc",
+    extError: {
+      code: "context_length_exceeded",
+      message: "prompt is too long: 1050424 tokens > 1048576 maximum",
+      type: "invalid_request_error",
+      StatusCode: 400
+    },
+    displayMsg: { zh: "对话内容超出模型长度上限，请精简对话或减少附件后重试。" }
+  };
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(upstreamBody));
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const upPort = upstream.address().port;
+  const { tmp } = writeTempConfig({
+    host: "127.0.0.1",
+    port: 0,
+    providers: [{ id: "p", apiFormat: "openai_chat", baseUrl: `http://127.0.0.1:${upPort}/v1` }],
+    models: [{ id: "p/m", providerId: "p", upstreamModel: "m" }]
+  });
+  const server = createServer({ onLog: (entry) => logs.push(entry) });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const resp = await fetch(`http://127.0.0.1:${port}/codex/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer dummy" },
+    body: JSON.stringify({ model: "p/m", stream: true, messages: [{ role: "user", content: "hi" }] })
+  });
+  assert.equal(resp.status, 400);
+  // 上游的原话要原样带回客户端，客户端才能自己判断（如 context_length_exceeded 需要压缩历史）
+  const text = await resp.text();
+  assert.match(text, /prompt is too long/);
+
+  const row = logs.find((entry) => entry.requestLog && entry.modelId === "p/m");
+  assert.ok(row, "应落一行 requestLog");
+  // 关键：error 不能是空串 —— 这正是最初「只看到 Bad Request、查不出原因」的根因
+  assert.match(row.error, /prompt is too long/);
+  assert.equal(row.status, 400);
 });
 
 test("server streams chat reasoning_content as Responses reasoning events", async (t) => {

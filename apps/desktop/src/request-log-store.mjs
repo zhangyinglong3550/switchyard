@@ -235,6 +235,8 @@ function jsonSummary(value, max = 12000) {
     toolCount: compact?.toolCount || tools.length || 0,
     tools,
     streamDiagnostics: compact?.streamDiagnostics || null,
+    // 上游 4xx/5xx 的原话与响应体：排查时唯一能说明「为什么被拒」的线索。
+    upstreamError: compact?.upstreamError || null,
     status: compact?.status,
     stream: compact?.stream,
     finishReason: compact?.finishReason,
