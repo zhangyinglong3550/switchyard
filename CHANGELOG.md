@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.3.15 — 2026-09-23
+
+### Changed
+
+- **网关回归「透传 + 协议转换」，去掉自造内容与代客户端决策**。原则：网关只负责透传，协议不适配时做消息体形态转换；不自己拼内容，不替客户端做决定。对全部接入 provider 生效，非 WorkBuddy 专属。
+  - 删除 `reasoning-cache.mjs`：它按会话记住上一轮思考，在客户端未回传时**替客户端回填**——纯属网关编造内容，且客户端通常自带思考，实际几乎空转。
+  - `reasoning-state` 改为纯字段转换：客户端 thinking 块 → `reasoning_content`；不再生成思考摘要、不再给 tool_call 补占位、不再改写推理档位、不再替客户端把 `thinking` 降级为 `disabled`。客户端已带 `reasoning_content` / `reasoning` 时原样透传。
+  - `workbuddy-adapter`：去掉 `injectDeepSeekThinking`（客户端没要求也注入 `thinking.enabled` + 默认 `reasoning_effort`）与 `backfillReasoningContent`（给每条 assistant 补空 `reasoning_content`）。
+  - 删除随之失去调用方的 `ensureToolCallReasoningPlaceholder` 与 `TOOL_CALL_REASONING_PLACEHOLDER`；`server.mjs` 去掉为思考缓存服务的流内累积。
+  - 保留的均为上游硬约束适配：强制 `stream`、补 `stream_options`、`tool_choice` 归一、`developer`→`system`、首条补 system、工具名/schema/角色归一、字段名映射。
+
+- **思考回传的去重**：客户端已回传思考时不再复制一份 `reasoning` 别名。长会话实测出站体积 3,415,756 → 2,556,386 字节（−25%）。
+
+### Added
+
+- **`/v1/models` 如实发布上下文窗口**（`publicModel` 输出 `context_window` / `max_context_window` / `max_output_tokens`）。此前一个窗口字段都不发，客户端无从得知上限，也就无法自己决定何时压缩历史。配置里没写则不发布，网关不编造数字。
+- **`/v1/models` 发布真实窗口后**，workbuddy preset 的 `deepseek-v4.1-flash` 由 `128000` 改为 `1000000`（官方客户端对该模型声明 `maxInputTokens=1000000`；上游限额计数器实测上限 1,048,576）。
+
+### Fixed
+
+- **上游 4xx/5xx 的原话与响应体不再丢失**。此前这类失败在日志里 `error` 与 `response_preview` 都是空的，客户端只看到光秃秃的 `Bad Request`，排查时无从下手（「老会话不能用」的问题就是卡在这里，最后靠手工回放请求才挖出上游原话）。三处根因：
+  - `requestPayloadError` 只认 `error.message` / `error` / `message`，而 WorkBuddy / CodeBuddy 把话放在 `msg` / `extError.message` / `displayMsg` 里，取值全部落空 → 现覆盖这些形态，并支持裸字符串、仅错误码、仅 `displayMsg`。
+  - `pipeStream` 在上游非 2xx 时直接透传状态码与头部，**从不读 body** → 现读出 body，把原话与完整响应体交给 `onStreamSummary`。
+  - `recordStreamDiagnostics` 不认 `summary.upstreamError` → 现写入 `record.error`，并在 `requestSummary.upstreamError` 保留 `{status, message, body}`。
+  - 客户端行为不变：状态码与 body 原样透传，网关不做内容改写，只是日志不再丢原因。
+
+### Tests
+
+- 全量 855 用例通过。新增：`requestPayloadError` 覆盖六种上游错误体形态；端到端用例断言 400 时 `error` 非空且含上游原话；`reasoning-state` 改为纯转换后的透传/不写入/不改开关三组用例；`prepareWorkBuddyChatBody` 不再注入思考开关的用例。
+
+### 说明
+
+- **WorkBuddy 的上下文额度按「上游限额计数器」而非它回传的 `input_tokens` 计算**：同一 prompt，回传 663,910、限额按 1,050,424 算（比值 1.5822，与「全部字符 ÷ 去掉思考后的字符 = 1.5892」吻合）。即回传的思考被计入限额却不计入回传值，故面板显示的 token 数会低估离墙距离。
+- **那 1,000,000 窗口下实际可用约 660k**：实测 `workbuddy/deepseek-v4.1-flash` 在 664,680 处触顶（400 `context_length_exceeded`），而 `command-code` / `ke` 同族模型可到 957,383 / 934,367（声明 1M 的 96% / 93%），说明隐藏计数的行为因 provider 而异。
+- 本版**不替客户端裁历史**：历史思考由客户端自己回传，网关如实转发。老会话若要恢复，需客户端自行压缩，或改用余量更大的 provider。
+
 ## 2.3.14 — 2026-09-18
 
 ### Fixed
