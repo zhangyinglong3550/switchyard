@@ -408,6 +408,9 @@
         <select class="field" id="usage-agent-filter" style="min-width:160px;"></select>
         <input class="field" id="usage-model-filter" placeholder="按模型筛选…" style="min-width:180px;">
         <select class="field" id="usage-range-preset" style="min-width:120px;" title="统计时间范围">
+          <option value="3h">近 3 小时</option>
+          <option value="6h">近 6 小时</option>
+          <option value="12h">近 12 小时</option>
           <option value="24h">近 24 小时</option>
           <option value="3d">近 3 天</option>
           <option value="7d">近 7 天</option>
@@ -597,6 +600,7 @@
         <div class="page-title">Agent Skills</div>
         <div style="flex:1;"></div>
         <select class="field" id="skill-agent-filter"></select>
+        <input class="field" id="skill-search" placeholder="搜索 Skill 名称 / 路径…" style="min-width:180px;">
         <button class="btn" id="btn-skills-refresh">刷新</button>
       </div>
       <div class="page-scroll page-stack">

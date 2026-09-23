@@ -112,11 +112,16 @@ function attachReasoningContent(message) {
   const blocks = reasoningBlocksFromMessage(message);
   const summary = thinkingSummaryText(blocks);
   if (!summary) return { message, attached: false };
+  // 客户端已经回传过思考时，不要再把同一段文本复制进别名字段。
+  // 上游真正读的是 reasoning_content（WorkBuddy/DeepSeek 缺字段时报 11155），
+  // 而 reasoning 只是别名；两份并存会让每个请求的出站体积凭空翻倍，
+  // 长会话里实测多出 1/3，且会被上游计入上下文上限。
+  const carried = message.reasoning_content || message.reasoning;
   return {
     message: {
       ...message,
       reasoning_content: message.reasoning_content || summary,
-      reasoning: message.reasoning || summary,
+      ...(carried ? null : { reasoning: summary }),
       [SWITCHYARD_THINKING_KEY]: message[SWITCHYARD_THINKING_KEY]
     },
     attached: true
@@ -129,7 +134,7 @@ export const reasoningStatePatch = {
   description: "把内部 thinking/reasoning 历史转成常见 Chat 上游可回传字段；仅当请求未显式选择推理且模型允许关闭推理时，才在缺少可回传 thinking 历史时禁用 provider thinking。",
   trigger: "provider/model/baseUrl 命中 DeepSeek、GLM、Kimi、MiMo、Qwen/DashScope、OpenRouter 等 reasoning 模型，或手动启用。",
   changes: [
-    "assistant thinking block -> reasoning_content / reasoning",
+    "assistant thinking block -> reasoning_content（客户端已回传时不再复制一份 reasoning 别名）",
     "用户显式选择了推理等级（reasoning_effort / reasoning.effort 非 off）时，绝不做降级，原样传给上游",
     "模型禁止关闭推理（能力表不含 none / OpenRouter stealth）不做降级，避免 upstream 400",
     "仅「未显式选推理」且「可关闭推理」的模型，才在历史缺 thinking 时降级为 disabled",

@@ -402,6 +402,12 @@ export function upsertAccounts(providerId, incomingAccounts, {
 
 function accountKey(account, poolKind = "") {
   if (account.agentIdentity && account.agentRuntimeId) return `agent:${account.agentRuntimeId}`;
+  // WorkBuddy 重新授权会换发新 refreshToken，若沿用 `rt:` 去重，同一账号每次重授权都会
+  // 在池中新增一行；加权轮询随后把并发摊到这些同 uid 槽位上，等于对单账号叠加并发。
+  // uid 才是账号身份，故同 realm 内优先按 accountId 去重（跨 realm 的 uid 不保证不撞）。
+  if (poolKind === "workbuddy_oauth" && account.accountId) {
+    return `acct:${account.realm || ""}:${account.accountId}`;
+  }
   if (account.refreshToken) return `rt:${account.refreshToken}`;
   if (account.sessionToken) return `st:${account.sessionToken}`;
   if (account.ssoToken) return `sso:${account.ssoToken}`;

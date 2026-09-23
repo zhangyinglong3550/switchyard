@@ -413,6 +413,89 @@ test("workbuddy oauth · 登录 state/token/account 与刷新走真实端点", a
   );
 });
 
+// realm 透传：state 取自哪个域，token 就必须在该域兑换。
+// 漏传 realm 时轮询会回落 global 打到 www.workbuddy.ai，下方 fetchImpl 会抛 unexpected url。
+test("workbuddy oauth · cn realm 的 state 与轮询必须同域", async () => {
+  const cnBase = workBuddyRealmConfig("cn").baseUrl;
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (url === `${cnBase}/v2/plugin/auth/state?platform=CLI`) {
+      return response(envelope({ state: "st-cn", authUrl: "https://www.codebuddy.cn/login?state=st-cn" }));
+    }
+    if (url === `${cnBase}/v2/plugin/auth/token?state=st-cn`) {
+      return response(envelope({ accessToken: "at-cn", refreshToken: "rt-cn", expiresIn: 3600, domain: "www.codebuddy.cn" }));
+    }
+    if (url === `${cnBase}/v2/plugin/login/account?state=st-cn`) {
+      return response(envelope({ uid: "uid-cn", enterpriseId: "", nickname: "nick-cn" }));
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const state = await createWorkBuddyAuthState({ realm: "cn", fetchImpl });
+  assert.equal(state.realm, "cn");
+  assert.ok(state.authUrl.startsWith("https://www.codebuddy.cn"));
+
+  const login = await pollWorkBuddyLogin("st-cn", { realm: "cn", fetchImpl });
+  assert.equal(login.accessToken, "at-cn");
+  assert.equal(login.realm, "cn");
+  assert.equal(login.domain, "www.codebuddy.cn");
+  assert.equal(login.uid, "uid-cn");
+  assert.ok(
+    calls.every((url) => url.includes("copilot.tencent.com")),
+    `所有请求都应落在 cn 域，实际: ${calls.join(", ")}`
+  );
+});
+
+// 批量收号场景：同一 WorkBuddy 账号重新授权会换发新 refreshToken。
+// 去重必须按 uid（accountId）而非 refreshToken，否则池中会堆出同账号的多个槽位，
+// 加权轮询随后把并发摊到这些槽位上，等于对单账号叠加并发。
+test("workbuddy account pool · 同 uid 重新授权不新增重复槽位", async () => {
+  const home = tmpHome();
+  try {
+    const first = upsertAccounts("workbuddy-pool", [{
+      accountId: "uid-1",
+      name: "nick-1",
+      realm: "global",
+      domain: "www.workbuddy.ai",
+      accessToken: "at-old",
+      refreshToken: "rt-old",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString()
+    }], { poolKind: "workbuddy_oauth", home });
+    assert.equal(first.added, 1);
+    assert.equal(first.total, 1);
+
+    const second = upsertAccounts("workbuddy-pool", [{
+      accountId: "uid-1",
+      name: "nick-1",
+      realm: "global",
+      domain: "www.workbuddy.ai",
+      accessToken: "at-new",
+      refreshToken: "rt-new",
+      expiresAt: new Date(Date.now() + 7200_000).toISOString()
+    }], { poolKind: "workbuddy_oauth", skipDuplicates: false, home });
+    assert.equal(second.added, 0);
+    assert.equal(second.updated, 1);
+    assert.equal(second.total, 1);
+
+    const pool = loadPool("workbuddy-pool", { poolKind: "workbuddy_oauth", home });
+    assert.equal(pool.accounts.length, 1);
+    assert.equal(pool.accounts[0].refreshToken, "rt-new");
+
+    // 跨 realm 的同 uid 不保证是同一账号，key 带 realm 才不会误合并。
+    const crossRealm = upsertAccounts("workbuddy-pool", [{
+      accountId: "uid-1",
+      realm: "cn",
+      domain: "www.codebuddy.cn",
+      accessToken: "at-cn",
+      refreshToken: "rt-cn",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString()
+    }], { poolKind: "workbuddy_oauth", home });
+    assert.equal(crossRealm.added, 1);
+    assert.equal(crossRealm.total, 2);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test("workbuddy account pool · 刷新、绑定与公开脱敏", async () => {
   const home = tmpHome();
   try {

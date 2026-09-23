@@ -26,3 +26,17 @@ function slugifyProvider(value) {
     .replace(/^-+|-+$/g, "");
   return slug || "provider";
 }
+
+const MANUAL_PLACEHOLDER_ID_PATTERN = /\/new-model-\d+$/;
+
+/** 「供应商」弹窗手动添加模型时的占位 ID（providerId/new-model-<时间戳>）。 */
+export function isManualPlaceholderModelId(id) {
+  return MANUAL_PLACEHOLDER_ID_PATTERN.test(String(id || ""));
+}
+
+/** 手动添加模型的正式 ID：与发现/模板一致，取 providerId/上游模型名。 */
+export function deriveManualModelId(providerId, upstreamModel) {
+  const provider = String(providerId || "").trim() || "provider";
+  const upstream = String(upstreamModel || "").trim().replace(/[^a-zA-Z0-9_./@+-]/g, "_") || "new-model";
+  return `${provider}/${upstream}`;
+}

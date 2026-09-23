@@ -7,7 +7,7 @@ import {
   modelsForClient as visibleModelsForClient,
   normalizeClientScope
 } from "./client-visibility-utils.mjs";
-import { modelIdConflict } from "./model-form-utils.mjs";
+import { deriveManualModelId, isManualPlaceholderModelId, modelIdConflict } from "./model-form-utils.mjs";
 import { normalizeDiscoveredModelForProvider, selectedImportResult as buildSelectedImportResult } from "./import-selection-utils.mjs";
 import { buildTestRequest, parseTestMessages } from "../src/test-console.mjs";
 import { buildSetupProgress, providerCredentialState } from "./setup-utils.mjs";
@@ -130,6 +130,7 @@ const state = {
   sessionHandoff: null,
   skillLink: null,
   skillHub: { items: [], install: null, detail: null },
+  skillRows: [],
   plugins: { sources: [], marketplaces: [], installed: [], available: [] },
   coreFiles: { items: [], current: null },
   providerHealth: {},
@@ -445,9 +446,13 @@ function defaultUsageRange() {
   };
 }
 
+/** 用量统计快捷范围。小时级为滚动窗口（now-Nh），天级按本地自然日对齐。 */
+const USAGE_RANGE_PRESETS = ["3h", "6h", "12h", "24h", "3d", "7d", "30d", "custom"];
+const USAGE_HOUR_PRESETS = { "3h": 3, "6h": 6, "12h": 12, "24h": 24 };
+
 /** 范围变更时推荐的时间维度。 */
 function suggestedUsageGranularity(preset, sinceIso, untilIso) {
-  if (preset === "24h") return "hour";
+  if (USAGE_HOUR_PRESETS[preset]) return "hour";
   if (preset === "3d" || preset === "7d" || preset === "30d") return "day";
   const since = new Date(sinceIso || Date.now());
   const until = new Date(untilIso || Date.now());
@@ -2585,7 +2590,16 @@ function renderProviderDiscovery() {
 
   wrap.querySelectorAll("[data-discovery-upstream]").forEach((el) => {
     el.addEventListener("input", () => {
-      state.providerDiscovery[Number(el.dataset.discoveryUpstream)].upstreamModel = el.value.trim();
+      const model = state.providerDiscovery[Number(el.dataset.discoveryUpstream)];
+      if (!model) return;
+      model.upstreamModel = el.value.trim();
+      // 手动添加的占位 ID 随上游模型名实时替换为正式 ID（providerId/上游模型名）。
+      if (model.manual && model.upstreamModel) {
+        const providerId = document.getElementById("provider-form")?.querySelector('[name="id"]')?.value?.trim() || model.providerId;
+        model.id = deriveManualModelId(providerId, model.upstreamModel);
+      }
+      const row = wrap.querySelector(`tr.discovery-table-row[data-discovery-idx="${el.dataset.discoveryUpstream}"]`);
+      if (row) row.children[1].textContent = model.upstreamModel;
     });
   });
   wrap.querySelectorAll("[data-discovery-display]").forEach((el) => {
@@ -3353,19 +3367,29 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
       });
     }
   let providers = [...state.config.providers];
+  // 手动添加的占位 ID（以及历史版本遗留的 new-model-<时间戳> ID）按当前供应商标识 +
+  // 上游模型名落盘为正式 ID，避免「模型」页出现随机后缀。
+  const placeholderReplacements = new Set();
   const discoveredModels = state.providerDiscovery
     .filter((item) => item.enabled)
-    .map((item) => ({
-      id: item.id,
-      providerId: data.id,
-      upstreamModel: item.upstreamModel,
-      displayName: item.displayName || item.upstreamModel,
-      aliases: item.aliases || [],
-      contextWindow: item.contextWindow,
-      maxOutputTokens: item.maxOutputTokens,
-      allowedClients: item.allowedClients || ["*"],
-      capabilities: { ...item.capabilities }
-    }));
+    .map((item) => {
+      const model = {
+        id: item.id,
+        providerId: data.id,
+        upstreamModel: item.upstreamModel,
+        displayName: item.displayName || item.upstreamModel,
+        aliases: item.aliases || [],
+        contextWindow: item.contextWindow,
+        maxOutputTokens: item.maxOutputTokens,
+        allowedClients: item.allowedClients || ["*"],
+        capabilities: { ...item.capabilities }
+      };
+      if ((item.manual || isManualPlaceholderModelId(item.id)) && String(model.upstreamModel || "").trim()) {
+        if (isManualPlaceholderModelId(model.id)) placeholderReplacements.add(model.id);
+        model.id = deriveManualModelId(data.id, model.upstreamModel);
+      }
+      return model;
+    });
   const incompleteModel = discoveredModels.find((model) => !String(model.upstreamModel || "").trim());
   if (incompleteModel) throw new Error("请填写手动添加模型的上游模型 ID");
   const newId = data.id;
@@ -3392,6 +3416,8 @@ document.getElementById("provider-form").addEventListener("submit", async (e) =>
   // Merge by model id in both create and edit flows so repeated saves never
   // produce the duplicate-model-id validation error.
   const modelsById = new Map(models.map((model) => [model.id, model]));
+  // 占位 ID 已改写为正式 ID：先移除旧键，历史遗留的随机 ID 模型不会残留成重复项。
+  for (const oldId of placeholderReplacements) modelsById.delete(oldId);
   for (const item of discoveredModels) {
     modelsById.set(item.id, {
       ...modelsById.get(item.id),
@@ -3493,7 +3519,9 @@ document.getElementById("btn-discovery-add-manual")?.addEventListener("click", (
   const providerId = document.getElementById("provider-form")?.querySelector('[name="id"]')?.value?.trim() || "unknown";
   const newModel = {
     enabled: true,
+    // 占位 ID：填写上游模型名后由 deriveManualModelId 实时替换，不会带着 new-model-<时间戳> 落盘。
     id: `${providerId}/new-model-${Date.now()}`,
+    manual: true,
     providerId,
     upstreamModel: "",
     displayName: "",
@@ -4428,8 +4456,7 @@ function syncUsageRangeControls() {
   const range = state.usageRange || defaultUsageRange();
   const preset = document.getElementById("usage-range-preset");
   if (preset) {
-    const known = ["24h", "3d", "7d", "30d", "custom"];
-    preset.value = known.includes(range.preset) ? range.preset : "30d";
+    preset.value = USAGE_RANGE_PRESETS.includes(range.preset) ? range.preset : "30d";
   }
   const gran = document.getElementById("usage-granularity");
   if (gran) gran.value = normalizeUsageGranularity(range.granularity, range);
@@ -4443,7 +4470,7 @@ function syncUsageRangeControls() {
 function syncUsageRangeFromControls() {
   const range = state.usageRange || defaultUsageRange();
   const presetRaw = document.getElementById("usage-range-preset")?.value || range.preset || "30d";
-  const preset = ["24h", "3d", "7d", "30d", "custom"].includes(presetRaw) ? presetRaw : "30d";
+  const preset = USAGE_RANGE_PRESETS.includes(presetRaw) ? presetRaw : "30d";
   const granularityInput = document.getElementById("usage-granularity")?.value || range.granularity || "day";
   if (preset !== "custom") {
     applyUsagePreset(preset, {
@@ -4475,7 +4502,7 @@ function applyUsagePreset(value, {
   keepGranularity = false,
   granularity
 } = {}) {
-  const preset = ["24h", "3d", "7d", "30d", "custom"].includes(value) ? value : "30d";
+  const preset = USAGE_RANGE_PRESETS.includes(value) ? value : "30d";
   const current = state.usageRange || defaultUsageRange();
   if (preset === "custom") {
     state.usageRange = {
@@ -4491,8 +4518,9 @@ function applyUsagePreset(value, {
   const now = new Date();
   let until = new Date(now);
   let since;
-  if (preset === "24h") {
-    since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const hourSpan = USAGE_HOUR_PRESETS[preset];
+  if (hourSpan) {
+    since = new Date(now.getTime() - hourSpan * 60 * 60 * 1000);
   } else if (preset === "3d") {
     until = endOfLocalDay(now);
     since = startOfLocalDay(now);
@@ -4629,7 +4657,7 @@ function renderUsageRangeSummary() {
   const summary = document.getElementById("usage-range-summary");
   if (!summary) return;
   const range = state.usageRange || defaultUsageRange();
-  const rangeLabels = { "24h": "近24小时", "3d": "近3天", "7d": "近7天", "30d": "近30天", custom: "自定义" };
+  const rangeLabels = { "3h": "近3小时", "6h": "近6小时", "12h": "近12小时", "24h": "近24小时", "3d": "近3天", "7d": "近7天", "30d": "近30天", custom: "自定义" };
   const granLabels = { hour: "按小时", day: "按日", week: "按周", month: "按月" };
   const gran = normalizeUsageGranularity(range.granularity, range);
   const sinceText = gran === "hour"
@@ -6049,10 +6077,21 @@ async function refreshAgentSessions() {
 async function refreshAgentSkills() {
   const agentId = document.getElementById("skill-agent-filter")?.value || "";
   const rows = await invoke("agent:skills:list", agentId ? { agentId } : {});
+  state.skillRows = rows || [];
+  renderSkillRows();
+}
+
+function renderSkillRows() {
   const tbody = document.getElementById("skills-tbody");
   if (!tbody) return;
+  const query = (document.getElementById("skill-search")?.value || "").trim().toLowerCase();
+  const all = state.skillRows || [];
+  const rows = query
+    ? all.filter((row) => [row.name, row.relativePath, row.path, row.agentId, row.agentLabel]
+      .some((value) => String(value || "").toLowerCase().includes(query)))
+    : all;
   tbody.innerHTML = "";
-  for (const row of rows || []) {
+  for (const row of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(row.agentLabel || agentLabel(row.agentId))}</td>
@@ -6069,9 +6108,11 @@ async function refreshAgentSkills() {
     `;
     tbody.appendChild(tr);
   }
-  if (!rows?.length) tbody.innerHTML = '<tr><td colspan="6" class="muted">没有找到 Skill</td></tr>';
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">${all.length ? "没有匹配的 Skill" : "没有找到 Skill"}</td></tr>`;
+  }
   const summary = document.getElementById("skills-summary");
-  if (summary) summary.textContent = `${rows?.length || 0} 个`;
+  if (summary) summary.textContent = query ? `${rows.length} / ${all.length} 个` : `${all.length} 个`;
 }
 
 async function refreshAgentPlugins() {
@@ -6418,6 +6459,7 @@ document.getElementById("btn-skills-refresh")?.addEventListener("click", () => {
 document.getElementById("skill-agent-filter")?.addEventListener("change", () => {
   refreshAgentSkills().catch((err) => toast(`刷新 Skill 失败：${err.message}`));
 });
+document.getElementById("skill-search")?.addEventListener("input", () => renderSkillRows());
 document.getElementById("skills-tbody")?.addEventListener("click", async (event) => {
   const edit = event.target.closest("[data-skill-edit]");
   const link = event.target.closest("[data-skill-link]");

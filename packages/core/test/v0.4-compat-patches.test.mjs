@@ -446,6 +446,51 @@ testPatch("reasoning-state · DeepSeek keeps tool-call placeholders after incomp
   assert.equal(out.messages[3].reasoning_content, TOOL_CALL_REASONING_PLACEHOLDER);
 });
 
+testPatch("reasoning-state · 已回传的思考不再以别名复制第二份", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "done",
+          // 客户端已经回传了思考；上游（如 WorkBuddy/DeepSeek）读的就是 reasoning_content
+          reasoning_content: "checked files",
+          [SWITCHYARD_THINKING_KEY]: [{ type: "thinking", thinking: "checked files" }]
+        }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "workbuddy" }, model: { id: "workbuddy/deepseek-v4.1-flash" } }
+  );
+  assert.equal(out.messages[1].reasoning_content, "checked files");
+  // 同一段思考不得再写一份别名：长会话里这份重复约占出站体积 1/3，会被上游计入上下文上限。
+  assert.equal(out.messages[1].reasoning, undefined);
+  assert.equal(out.thinking.type, "enabled");
+});
+
+testPatch("reasoning-state · 客户端未回传思考时仍保留 reasoning 别名兜底", () => {
+  registerPatch(reasoningStatePatch.id, reasoningStatePatch);
+  const out = applyOutbound(
+    {
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "done",
+          [SWITCHYARD_THINKING_KEY]: [{ type: "thinking", thinking: "checked files" }]
+        }
+      ],
+      thinking: { type: "enabled" }
+    },
+    { provider: { id: "deepseek" }, model: { id: "deepseek/deepseek-v4-pro" } }
+  );
+  // 两个字段名都读的上游各取所需：这里仍按原设计同时写入。
+  assert.equal(out.messages[1].reasoning_content, "checked files");
+  assert.equal(out.messages[1].reasoning, "checked files");
+});
+
 // ── 3. GLM content.text ────────────────────────────────────────────────────
 
 testPatch("glm-content-text · wraps bare string content into array for GLM providers", () => {
