@@ -271,10 +271,46 @@ export function chatEffortToThinkingBudget(effort) {
   return null;
 }
 
+// Claude 4.7 起（含 Opus 5.5 / Sonnet 5）只认 thinking.adaptive，写 enabled 会被 400；
+// 4.6 及更早（含 4.5 全系）只认 enabled + budget_tokens，写 adaptive 会被 400。
+const ADAPTIVE_THINKING_MIN = { major: 4, minor: 7 };
+
+/**
+ * 解析 Claude 模型版本，用于决定 thinking 形态。
+ * 兼容 claude-opus-4-6 / claude-4.6-sonnet / claude-opus-4.6 / claude-sonnet-5 等命名。
+ * 只在 claude 之后的头几段里找版本号：客户端别名形如 claude-switchyard-ke-glm-5.3-xxx
+ * 会带 claude 前缀但实为其他模型，不能把其中的 5.3 当成 Claude 版本。
+ * 无法识别时返回 null，调用方按旧形态处理以保持既有行为。
+ * @returns {{major:number, minor:number}|null}
+ */
+export function parseClaudeModelVersion(modelId) {
+  const text = String(modelId || "").split("/").pop().trim().toLowerCase();
+  const at = text.indexOf("claude");
+  if (at === -1) return null;
+  const tail = text.slice(at + "claude".length).replace(/^[-_]+/, "");
+  const window = tail.split(/[-_]/).slice(0, 3).join("-");
+  const dotted = /(\d+)\.(\d+)/.exec(window);
+  if (dotted) return { major: Number(dotted[1]), minor: Number(dotted[2]) };
+  const dashed = /(?:^|[^\d])(\d+)-(\d+)(?:[^\d]|$)/.exec(window);
+  if (dashed) return { major: Number(dashed[1]), minor: Number(dashed[2]) };
+  const single = /(?:^|[^\d])(\d+)(?:[^\d]|$)/.exec(window);
+  if (single) return { major: Number(single[1]), minor: 0 };
+  return null;
+}
+
+/** 该模型是否必须用 thinking.adaptive（4.7+）。版本无法识别时按旧形态处理，保持既有行为。 */
+export function requiresAdaptiveThinking(modelId) {
+  const version = parseClaudeModelVersion(modelId);
+  if (!version) return false;
+  if (version.major !== ADAPTIVE_THINKING_MIN.major) return version.major > ADAPTIVE_THINKING_MIN.major;
+  return version.minor >= ADAPTIVE_THINKING_MIN.minor;
+}
+
 /**
  * 把 Chat 侧 reasoning 档位写回 Anthropic Messages 请求。
  * 仅在显式有 effort 且非 none 时写入；不覆盖调用方已提供的 thinking / output_config。
- * 写入 budget 时同步抬高 max_tokens，避免 Anthropic「budget > max_tokens」400。
+ * thinking 形态按模型版本决定：4.7+ 用 adaptive，4.6 及更早用 enabled + budget_tokens。
+ * 写 budget 时同步抬高 max_tokens，避免 Anthropic「budget > max_tokens」400。
  */
 export function applyChatReasoningToAnthropic(out, body) {
   if (!out || typeof out !== "object" || !body || typeof body !== "object") return out;
@@ -295,7 +331,6 @@ export function applyChatReasoningToAnthropic(out, body) {
   }
 
   const outputEffort = chatEffortToAnthropicOutputEffort(effort);
-  const budget = chatEffortToThinkingBudget(effort);
 
   if (!hasOutputConfig && outputEffort) {
     out.output_config = {
@@ -303,9 +338,17 @@ export function applyChatReasoningToAnthropic(out, body) {
       effort: outputEffort
     };
   }
-  if (!hasThinking && budget != null) {
-    out.thinking = { type: "enabled", budget_tokens: budget };
-    ensureMaxTokensAboveThinkingBudget(out, budget);
+  if (!hasThinking) {
+    if (requiresAdaptiveThinking(out.model)) {
+      // 4.7+ 拒绝 budget_tokens，思考深度由 output_config.effort 表达
+      out.thinking = { type: "adaptive" };
+    } else {
+      const budget = chatEffortToThinkingBudget(effort);
+      if (budget != null) {
+        out.thinking = { type: "enabled", budget_tokens: budget };
+        ensureMaxTokensAboveThinkingBudget(out, budget);
+      }
+    }
   }
   return out;
 }

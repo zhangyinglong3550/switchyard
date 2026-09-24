@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.16 — 2026-09-24
+
+### Fix
+
+- **Claude 4.7+ 的 thinking 形态按模型版本适配**：`applyChatReasoningToAnthropic` 此前对所有 Anthropic Messages 上游一律写 `thinking.type=enabled` + `budget_tokens`，而 Claude 4.7 起（含 Opus 5.5、Sonnet 5）只接受 `thinking.type=adaptive` + `output_config.effort`，导致请求被上游 400（`claude-opus-5-5 requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort`）。现在按模型版本选择形态：4.7+ 写 `{type:"adaptive"}` 且不再附带 `budget_tokens`，4.6 及更早（含 4.5 全系）保持 `enabled` + `budget_tokens` 不变。判定基于上游硬约束，对全部 Anthropic Messages 供应商生效，不针对单一 provider。
+  - 新增 `parseClaudeModelVersion` / `requiresAdaptiveThinking`（`reasoning.mjs`）。版本号只在 `claude` 之后的头几段里解析：客户端别名形如 `claude-switchyard-ke-glm-5.3-xxx` 会带 `claude` 前缀但实为其他模型，不能把其中的 `5.3` 当成 Claude 版本。
+  - 版本无法识别时按旧形态处理，保持既有行为；`adaptive` 不需要抬高 `max_tokens`，该逻辑只在旧形态下生效。
+  - 新增 4 条单测覆盖新旧两代模型的出站形态、命名风格解析与 `4.7` 分界。全量 860/860 通过。
+
 ## 2.3.15 — 2026-09-23
 
 ### Changed

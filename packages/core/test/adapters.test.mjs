@@ -5,7 +5,7 @@ import { anthropicToChat, chatToAnthropic, streamChatAsAnthropic, streamResponse
 import { chatToAnthropicMessages, anthropicMessagesToChatResponse } from "../src/anthropic-adapter-out.mjs";
 import { chatToResponses, normalizeChatgptCodexResponsesBody, responsesToChatResponse, responsesStreamToChatResponse, streamResponsesAsChat } from "../src/openai-adapter-out.mjs";
 import { Writable } from "node:stream";
-import { SWITCHYARD_THINKING_KEY } from "../src/reasoning.mjs";
+import { SWITCHYARD_THINKING_KEY, parseClaudeModelVersion, requiresAdaptiveThinking } from "../src/reasoning.mjs";
 
 test("responsesToChat preserves system + user input", () => {
   const chat = responsesToChat({ instructions: "be brief", input: "hello" }, "u-model");
@@ -1085,6 +1085,71 @@ test("chatToAnthropicMessages maps low/medium effort budgets", () => {
   }, "claude-test");
   assert.equal(medium.thinking.budget_tokens, 8192);
   assert.equal(medium.output_config.effort, "medium");
+});
+
+test("chatToAnthropicMessages uses adaptive thinking for Claude 4.7+ and drops budget_tokens", () => {
+  for (const upstream of ["claude-opus-5-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7"]) {
+    const out = chatToAnthropicMessages({
+      messages: [{ role: "user", content: "hello" }],
+      reasoning: { effort: "high" },
+      max_tokens: 1024
+    }, upstream);
+    assert.deepEqual(out.thinking, { type: "adaptive" }, upstream);
+    assert.deepEqual(out.output_config, { effort: "high" }, upstream);
+    assert.equal(out.thinking.budget_tokens, undefined, upstream);
+    // adaptive 不需要抬高 max_tokens
+    assert.equal(out.max_tokens, 1024, upstream);
+  }
+});
+
+test("chatToAnthropicMessages keeps enabled + budget_tokens for Claude 4.6 and earlier", () => {
+  for (const upstream of ["claude-opus-4-6", "claude-sonnet-4-6", "claude-4.6-sonnet", "claude-opus-4.6", "claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5", "claude-3-5-sonnet"]) {
+    const out = chatToAnthropicMessages({
+      messages: [{ role: "user", content: "hello" }],
+      reasoning: { effort: "high" }
+    }, upstream);
+    assert.deepEqual(out.thinking, { type: "enabled", budget_tokens: 16384 }, upstream);
+    assert.deepEqual(out.output_config, { effort: "high" }, upstream);
+    assert.ok(out.max_tokens >= 16384 + 1024, upstream);
+  }
+});
+
+test("parseClaudeModelVersion reads claude version across naming styles", () => {
+  assert.deepEqual(parseClaudeModelVersion("claude-opus-5-5"), { major: 5, minor: 5 });
+  assert.deepEqual(parseClaudeModelVersion("claude-sonnet-5"), { major: 5, minor: 0 });
+  assert.deepEqual(parseClaudeModelVersion("claude-opus-4-6"), { major: 4, minor: 6 });
+  assert.deepEqual(parseClaudeModelVersion("claude-4.6-sonnet"), { major: 4, minor: 6 });
+  assert.deepEqual(parseClaudeModelVersion("claude-opus-4.6"), { major: 4, minor: 6 });
+  assert.deepEqual(parseClaudeModelVersion("claude-3-5-sonnet"), { major: 3, minor: 5 });
+  assert.deepEqual(parseClaudeModelVersion("xiaoyi/claude-opus-5-5"), { major: 5, minor: 5 });
+  assert.equal(parseClaudeModelVersion("claude-test"), null);
+  assert.equal(parseClaudeModelVersion("glm-5.3"), null);
+  // 客户端别名带 claude 前缀但实为其他模型：不能把尾部的 5.3 / 5.6 当成 Claude 版本
+  assert.equal(parseClaudeModelVersion("claude-switchyard-ke-glm-5.3-cc27100b"), null);
+  assert.equal(parseClaudeModelVersion("claude-switchyard-blank-gpt-gpt-5.6-terra-a81bd158"), null);
+});
+
+test("requiresAdaptiveThinking flips at Claude 4.7 and defaults to legacy when unknown", () => {
+  assert.equal(requiresAdaptiveThinking("claude-opus-4-7"), true);
+  assert.equal(requiresAdaptiveThinking("claude-opus-4-8"), true);
+  assert.equal(requiresAdaptiveThinking("claude-sonnet-5"), true);
+  assert.equal(requiresAdaptiveThinking("claude-opus-5-5"), true);
+  assert.equal(requiresAdaptiveThinking("claude-opus-4-6"), false);
+  assert.equal(requiresAdaptiveThinking("claude-sonnet-4-5"), false);
+  assert.equal(requiresAdaptiveThinking("claude-3-5-sonnet"), false);
+  // 无法识别版本时按旧形态处理，保持既有行为
+  assert.equal(requiresAdaptiveThinking("claude-test"), false);
+  assert.equal(requiresAdaptiveThinking("gpt-5.6-terra"), false);
+  assert.equal(requiresAdaptiveThinking(""), false);
+});
+
+test("chatToAnthropicMessages does not force thinking on 4.7+ when reasoning is off", () => {
+  const out = chatToAnthropicMessages({
+    messages: [{ role: "user", content: "hello" }],
+    reasoning: { effort: "none" }
+  }, "claude-opus-5-5");
+  assert.deepEqual(out.thinking, { type: "disabled" });
+  assert.equal(out.output_config, undefined);
 });
 
 test("chatToAnthropicMessages groups consecutive tool results for parallel tool_use", () => {
